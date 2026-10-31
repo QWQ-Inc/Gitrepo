@@ -127,6 +127,9 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*Server, error) {
 		st.Close()
 		return nil, err
 	}
+	if !s.git.LFSAvailable(context.Background()) {
+		log.Warn("git-lfs is not installed: repositories that use Git LFS cannot be synced to mirrors or imported")
+	}
 	if err := s.writeShims(); err != nil {
 		st.Close()
 		return nil, err
@@ -287,6 +290,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /ui/", webui.Handler("/ui/"))
 	mux.Handle("GET /ui", http.RedirectHandler("/ui/", http.StatusFound))
 	mux.Handle("GET /{$}", http.RedirectHandler("/ui/", http.StatusFound))
+	mux.HandleFunc("GET /archive/{org}/{name}/{file...}", func(w http.ResponseWriter, r *http.Request) {
+		s.gitsrv.ServeArchive(w, r, r.PathValue("org"), r.PathValue("name"), r.PathValue("file"))
+	})
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /metrics", s.requireAdmin(s.handleMetrics))
 	mux.Handle("/", s.gitsrv)

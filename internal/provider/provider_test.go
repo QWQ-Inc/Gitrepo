@@ -85,3 +85,14 @@ func TestGiteeErrorsDoNotLeakTheToken(t *testing.T) {
 		t.Fatalf("redactURL kept secrets: %s", got)
 	}
 }
+
+func TestLFSLimits(t *testing.T) {
+	gh, _ := Get("github")
+	if l, ok := gh.(LFSLimiter); !ok || l.MaxLFSObjectSize() != 2_000_000_000 {
+		t.Fatal("GitHub's LFS limit is not declared")
+	}
+	gl, _ := Get("gitlab")
+	if _, ok := gl.(LFSLimiter); ok {
+		t.Fatal("GitLab's LFS limit depends on the instance and must not be assumed")
+	}
+}

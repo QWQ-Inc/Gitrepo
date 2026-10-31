@@ -117,7 +117,7 @@ func short(sha string) string {
 type targetFlags struct {
 	provider, baseURL, apiURL, namespace, urlTemplate, visibility string
 	noAutoCreate                                                  bool
-	maxFileSize                                                   int64
+	maxFileSize, maxLFSSize                                       int64
 	username, tokenEnv, sshKeyFile, knownHostsFile, expires       string
 	tokenStdin, passwordStdin, noCredential                       bool
 }
@@ -132,6 +132,7 @@ func (f *targetFlags) register(c *cobra.Command, create bool) {
 	fl.StringVar(&f.visibility, "visibility", "", "force mirror visibility (private|public|internal); default follows the repository")
 	fl.BoolVar(&f.noAutoCreate, "no-auto-create", false, "do not create missing repositories on the platform")
 	fl.Int64Var(&f.maxFileSize, "max-file-size", 0, "override the platform's per-file size limit in bytes")
+	fl.Int64Var(&f.maxLFSSize, "max-lfs-object-size", 0, "override the platform's Git LFS object size limit in bytes (GitHub default: 2 GB)")
 	fl.StringVar(&f.username, "username", "", "username for basic/token credentials on generic targets")
 	fl.BoolVar(&f.tokenStdin, "token-stdin", false, "read an access token from stdin")
 	fl.StringVar(&f.tokenEnv, "token-env", "", "read an access token from this environment variable")
@@ -163,6 +164,9 @@ func (f *targetFlags) body(c *cobra.Command) (map[string]any, error) {
 	}
 	if c.Flags().Changed("max-file-size") {
 		b["max_file_size"] = f.maxFileSize
+	}
+	if c.Flags().Changed("max-lfs-object-size") {
+		b["max_lfs_object_size"] = f.maxLFSSize
 	}
 
 	var cred map[string]any

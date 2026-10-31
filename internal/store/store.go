@@ -219,6 +219,10 @@ CREATE TABLE ssh_keys (
   last_used_at INTEGER NOT NULL DEFAULT 0
 );
 `,
+	// 5: per-target Git LFS object size limit.
+	`
+ALTER TABLE targets ADD COLUMN max_lfs_object_size INTEGER NOT NULL DEFAULT 0;
+`,
 }
 
 func (s *Store) migrate(ctx context.Context) error {

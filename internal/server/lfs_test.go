@@ -218,6 +218,23 @@ func TestGitLFS(t *testing.T) {
 		}
 	})
 
+	t.Run("the strictest mirror LFS limit is enforced at upload", func(t *testing.T) {
+		e.do(http.MethodPatch, "/api/targets/lfsmirror", map[string]any{"max_lfs_object_size": 1024}, nil)
+		defer e.do(http.MethodPatch, "/api/targets/lfsmirror", map[string]any{"max_lfs_object_size": 0}, nil)
+		req, _ := http.NewRequest(http.MethodPost, "http://"+e.hubAddr+"/media/assets.git/info/lfs/objects/batch",
+			strings.NewReader(`{"operation":"upload","objects":[{"oid":"`+strings.Repeat("ef", 32)+`","size":4096},{"oid":"`+strings.Repeat("fe", 32)+`","size":512}]}`))
+		req.SetBasicAuth("x", dev.Token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != 200 || !strings.Contains(string(body), "larger than the 1024-byte limit") || strings.Count(string(body), `"upload"`) != 1 {
+			t.Fatalf("batch with an oversized object: %d %s", resp.StatusCode, body)
+		}
+	})
+
 	t.Run("the batch API requires credentials", func(t *testing.T) {
 		resp, err := http.Post("http://"+e.hubAddr+"/media/assets.git/info/lfs/objects/batch", "application/vnd.git-lfs+json",
 			strings.NewReader(`{"operation":"download","objects":[{"oid":"`+oid+`","size":1}]}`))

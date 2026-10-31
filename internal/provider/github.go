@@ -26,6 +26,10 @@ func (*GitHub) Caps() Caps {
 // GitHub rejects files larger than 100 MiB.
 func (*GitHub) MaxFileSize() int64 { return 100 << 20 }
 
+// MaxLFSObjectSize is GitHub's documented Git LFS limit on the Free and Pro
+// plans (2 GB); Team and Enterprise allow more — override it per target.
+func (*GitHub) MaxLFSObjectSize() int64 { return 2_000_000_000 }
+
 func (g *GitHub) web(t *store.Target) string {
 	if t.BaseURL == "" {
 		return "https://github.com"

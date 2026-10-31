@@ -145,6 +145,7 @@ type targetIn struct {
 	Visibility  *string `json:"visibility"`
 	AutoCreate  *bool   `json:"auto_create"`
 	MaxFileSize *int64  `json:"max_file_size"`
+	MaxLFSSize  *int64  `json:"max_lfs_object_size"`
 	Credential  *credIn `json:"credential"`
 	ExpiresAt   *string `json:"expires_at"`
 }
@@ -160,6 +161,7 @@ type targetOut struct {
 	Visibility   string     `json:"visibility,omitempty"`
 	AutoCreate   bool       `json:"auto_create"`
 	MaxFileSize  int64      `json:"max_file_size,omitempty"`
+	MaxLFSSize   int64      `json:"max_lfs_object_size,omitempty"`
 	CredKind     string     `json:"credential_kind"`
 	CredUsername string     `json:"credential_username,omitempty"`
 	HasSecret    bool       `json:"has_secret"`
@@ -172,7 +174,7 @@ func toTargetOut(t *store.Target) targetOut {
 	return targetOut{
 		ID: t.ID, Name: t.Name, Provider: t.Provider, BaseURL: t.BaseURL, APIURL: t.APIURL,
 		Namespace: t.Namespace, URLTemplate: t.URLTemplate, Visibility: t.Visibility, AutoCreate: t.AutoCreate,
-		MaxFileSize: t.MaxFileSize, CredKind: t.CredKind, CredUsername: t.CredUsername, HasSecret: len(t.CredSecret) > 0,
+		MaxFileSize: t.MaxFileSize, MaxLFSSize: t.MaxLFSObjectSize, CredKind: t.CredKind, CredUsername: t.CredUsername, HasSecret: len(t.CredSecret) > 0,
 		ExpiresAt: ts(t.ExpiresAt), CreatedAt: ts(t.CreatedAt), UpdatedAt: ts(t.UpdatedAt),
 	}
 }
@@ -194,6 +196,9 @@ func (s *Server) applyTargetIn(t *store.Target, in *targetIn) error {
 	}
 	if in.MaxFileSize != nil {
 		t.MaxFileSize = *in.MaxFileSize
+	}
+	if in.MaxLFSSize != nil {
+		t.MaxLFSObjectSize = *in.MaxLFSSize
 	}
 	if in.ExpiresAt != nil {
 		if *in.ExpiresAt == "" {

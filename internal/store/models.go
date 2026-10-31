@@ -27,23 +27,25 @@ const (
 // Target is a platform account: provider + credential + default namespace.
 // Repositories mirror to targets through remotes.
 type Target struct {
-	ID            int64
-	Name          string
-	Provider      string // github | gitlab | generic
-	BaseURL       string
-	APIURL        string
-	Namespace     string
-	URLTemplate   string
-	Visibility    string // "" follows the repository
-	AutoCreate    bool
-	MaxFileSize   int64
-	CredKind      string // token | basic | ssh | none
-	CredUsername  string
-	CredSecret    []byte // ciphertext
-	SSHKnownHosts string
-	ExpiresAt     int64
-	CreatedAt     int64
-	UpdatedAt     int64
+	ID          int64
+	Name        string
+	Provider    string // github | gitlab | generic
+	BaseURL     string
+	APIURL      string
+	Namespace   string
+	URLTemplate string
+	Visibility  string // "" follows the repository
+	AutoCreate  bool
+	MaxFileSize int64
+	// MaxLFSObjectSize overrides the provider's Git LFS object limit.
+	MaxLFSObjectSize int64
+	CredKind         string // token | basic | ssh | none
+	CredUsername     string
+	CredSecret       []byte // ciphertext
+	SSHKnownHosts    string
+	ExpiresAt        int64
+	CreatedAt        int64
+	UpdatedAt        int64
 }
 
 // CredentialAAD binds a target's ciphertext to the target.
@@ -159,13 +161,13 @@ type Token struct {
 // ---------------------------------------------------------------- targets
 
 const targetCols = `id, name, provider, base_url, api_url, namespace, url_template, visibility,
-auto_create, max_file_size, cred_kind, cred_username, cred_secret, ssh_known_hosts, expires_at, created_at, updated_at`
+auto_create, max_file_size, max_lfs_object_size, cred_kind, cred_username, cred_secret, ssh_known_hosts, expires_at, created_at, updated_at`
 
 func scanTarget(sc interface{ Scan(...any) error }) (*Target, error) {
 	var t Target
 	var auto int
 	err := sc.Scan(&t.ID, &t.Name, &t.Provider, &t.BaseURL, &t.APIURL, &t.Namespace, &t.URLTemplate, &t.Visibility,
-		&auto, &t.MaxFileSize, &t.CredKind, &t.CredUsername, &t.CredSecret, &t.SSHKnownHosts, &t.ExpiresAt, &t.CreatedAt, &t.UpdatedAt)
+		&auto, &t.MaxFileSize, &t.MaxLFSObjectSize, &t.CredKind, &t.CredUsername, &t.CredSecret, &t.SSHKnownHosts, &t.ExpiresAt, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		return nil, wrapErr(err)
 	}
@@ -177,10 +179,10 @@ func (s *Store) CreateTarget(ctx context.Context, t *Target) error {
 	now := Now()
 	t.CreatedAt, t.UpdatedAt = now, now
 	res, err := s.db.ExecContext(ctx, `INSERT INTO targets (name, provider, base_url, api_url, namespace, url_template, visibility,
-auto_create, max_file_size, cred_kind, cred_username, cred_secret, ssh_known_hosts, expires_at, created_at, updated_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+auto_create, max_file_size, max_lfs_object_size, cred_kind, cred_username, cred_secret, ssh_known_hosts, expires_at, created_at, updated_at)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		t.Name, t.Provider, t.BaseURL, t.APIURL, t.Namespace, t.URLTemplate, t.Visibility,
-		b2i(t.AutoCreate), t.MaxFileSize, t.CredKind, t.CredUsername, t.CredSecret, t.SSHKnownHosts, t.ExpiresAt, t.CreatedAt, t.UpdatedAt)
+		b2i(t.AutoCreate), t.MaxFileSize, t.MaxLFSObjectSize, t.CredKind, t.CredUsername, t.CredSecret, t.SSHKnownHosts, t.ExpiresAt, t.CreatedAt, t.UpdatedAt)
 	if err != nil {
 		return wrapErr(err)
 	}
@@ -191,9 +193,9 @@ VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 func (s *Store) UpdateTarget(ctx context.Context, t *Target) error {
 	t.UpdatedAt = Now()
 	_, err := s.db.ExecContext(ctx, `UPDATE targets SET provider=?, base_url=?, api_url=?, namespace=?, url_template=?, visibility=?,
-auto_create=?, max_file_size=?, cred_kind=?, cred_username=?, cred_secret=?, ssh_known_hosts=?, expires_at=?, updated_at=? WHERE id=?`,
+auto_create=?, max_file_size=?, max_lfs_object_size=?, cred_kind=?, cred_username=?, cred_secret=?, ssh_known_hosts=?, expires_at=?, updated_at=? WHERE id=?`,
 		t.Provider, t.BaseURL, t.APIURL, t.Namespace, t.URLTemplate, t.Visibility,
-		b2i(t.AutoCreate), t.MaxFileSize, t.CredKind, t.CredUsername, t.CredSecret, t.SSHKnownHosts, t.ExpiresAt, t.UpdatedAt, t.ID)
+		b2i(t.AutoCreate), t.MaxFileSize, t.MaxLFSObjectSize, t.CredKind, t.CredUsername, t.CredSecret, t.SSHKnownHosts, t.ExpiresAt, t.UpdatedAt, t.ID)
 	return wrapErr(err)
 }
 

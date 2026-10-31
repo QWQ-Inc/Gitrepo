@@ -62,6 +62,12 @@ type Provider interface {
 	Check(ctx context.Context, t *store.Target, secret string) (string, error)
 }
 
+// LFSLimiter is implemented by providers with a known Git LFS object size
+// limit; the hub refuses larger uploads for repositories mirrored there.
+type LFSLimiter interface {
+	MaxLFSObjectSize() int64
+}
+
 // LoginUsername is implemented by providers whose Git-over-HTTPS username
 // must be the token owner's login. When a target has no username, the API
 // fills it in from Check.

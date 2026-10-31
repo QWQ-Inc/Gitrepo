@@ -183,6 +183,7 @@ func (s *Server) serveLFS(w http.ResponseWriter, r *http.Request, slug, rest str
 	}
 	srv := *s.LFS
 	srv.Auth = authz
+	srv.MaxObjectSize = s.maxLFSObjectSize(r.Context(), repo)
 	srv.Serve(w, r, lfs.Repo{Slug: slug, ID: repo.ID, Dir: s.Registry.Path(slug)}, rest)
 }
 
@@ -303,6 +304,35 @@ func (s *Server) maxFileSize(ctx context.Context, repo *store.Repo) int64 {
 		if l == 0 {
 			if p, err := provider.Get(t.Provider); err == nil {
 				l = p.MaxFileSize()
+			}
+		}
+		if l > 0 && (limit == 0 || l < limit) {
+			limit = l
+		}
+	}
+	return limit
+}
+
+// maxLFSObjectSize is the strictest Git LFS object limit among the global
+// setting and every mirror of the repository (target override, else the
+// provider's known limit).
+func (s *Server) maxLFSObjectSize(ctx context.Context, repo *store.Repo) int64 {
+	limit := s.LFS.MaxObjectSize
+	remotes, err := s.Store.ListRemotes(ctx, repo.ID)
+	if err != nil {
+		return limit
+	}
+	for _, rem := range remotes {
+		t, err := s.Store.GetTarget(ctx, rem.TargetID)
+		if err != nil {
+			continue
+		}
+		l := t.MaxLFSObjectSize
+		if l == 0 {
+			if p, err := provider.Get(t.Provider); err == nil {
+				if ll, ok := p.(provider.LFSLimiter); ok {
+					l = ll.MaxLFSObjectSize()
+				}
 			}
 		}
 		if l > 0 && (limit == 0 || l < limit) {

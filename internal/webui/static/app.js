@@ -480,6 +480,7 @@ function editTarget(t, container) {
     if (t.provider === 'generic') body.url_template = d.url_template;
     else body.base_url = d.base_url;
     if (d.max_file_size !== '') body.max_file_size = Number(d.max_file_size) * 1024 * 1024;
+    if (d.max_lfs_object_size !== '') body.max_lfs_object_size = Number(d.max_lfs_object_size) * 1024 * 1024;
     // Username omitted: the server keeps it, or looks it up again (Gitee).
     if (d.secret) body.credential = { kind: t.credential_kind, secret: d.secret };
     await api('PATCH', '/api/targets/' + enc(t.name), body);
@@ -492,6 +493,7 @@ function editTarget(t, container) {
     ? field('URL 模板', h('input', { name: 'url_template', value: t.url_template || '' }), 'wide')
     : field('站点地址', h('input', { name: 'base_url', value: t.base_url || '' })),
   field('单文件上限 MiB（0 = 平台默认）', h('input', { name: 'max_file_size', type: 'number', min: '0', value: t.max_file_size ? Math.round(t.max_file_size / 1048576) : '' })),
+  field('LFS 对象上限 MiB（0 = 平台默认）', h('input', { name: 'max_lfs_object_size', type: 'number', min: '0', value: t.max_lfs_object_size ? Math.round(t.max_lfs_object_size / 1048576) : '' })),
   field('凭据过期日', h('input', { name: 'expires_at', type: 'date', value: t.expires_at ? t.expires_at.slice(0, 10) : '' })),
   t.credential_kind === 'none' ? null : field(isSSH ? '新 SSH 私钥（留空不变）' : '新令牌 / 密码（留空不变）',
     isSSH ? h('textarea', { name: 'secret' }) : h('input', { name: 'secret', type: 'password', autocomplete: 'off' }), isSSH ? 'wide' : ''),

@@ -185,6 +185,20 @@ git push hub main
 - 不提供 shell：`ssh git@…` 只会回一句问候并断开。
 - 只接受 ed25519、ECDSA，以及至少 2048 位的 RSA 公钥。
 
+## 源码包
+
+构建只需要代码、不需要历史时，可以直接下载源码包：
+
+```bash
+curl -fL -u x:$TOKEN https://git.example.com/archive/acme/demo/<sha>.tar.gz -o src.tar.gz
+curl -fL -u x:$TOKEN https://git.example.com/archive/acme/demo/release/1.2.zip -o src.zip   # 分支或标签名也可以
+```
+
+- 鉴权与 clone 相同：公开仓库允许匿名下载，私有仓库需要 read 权限。
+- 只提供分支和标签能到达的提交（`refs/backup/` 里的内容不会被下载）。
+- 按完整 SHA 下载时内容不可变：公开仓库返回 `Cache-Control: public, immutable`，可以放在 CDN 上永久缓存；按分支或标签名下载不缓存。
+- LFS 文件在源码包里是指针文件。
+
 ## 导入已有项目 / 从镜像恢复
 
 已经在 GitHub、GitLab 等平台上的项目，一条命令就能让 Gitrepo 成为它的 Hub：
@@ -216,7 +230,9 @@ remote: gitrepo:   [failed]   github:acme/app  adoption required: the mirror rep
 仓库里提交的 `.lfsconfig` 不会影响 Gitrepo 向镜像同步时使用的 LFS 地址：git-lfs 在一个看不到仓库内容的临时仓库里运行。镜像凭据也只会发给该镜像自己的地址。
 
 - 镜像平台要开启 LFS：GitHub 默认开启，但有存储配额；GitLab 默认开启；Gitea/Forgejo 需要服务端启用 LFS。通过 SSH 访问的通用镜像，需要服务端支持 `git-lfs-authenticate`。
-- 单个对象大小可以用 `policy.max_lfs_object_size` 限制。对象存放在 Hub 仓库目录下的 `lfs/objects/`，备份数据目录时会一并备份。
+- 上传到 Hub 时，按该仓库所有镜像中最严的 LFS 大小上限拒绝过大的对象。GitHub 默认 2 GB（Team 和 Enterprise 套餐更高，可用 `gr target update github --max-lfs-object-size <字节>` 覆盖）；全局上限用 `policy.max_lfs_object_size` 设置。
+- LFS 传输链接 15 分钟有效（git-lfs 会自动重新获取），所以撤销令牌后最多 15 分钟就会失效。
+- 对象存放在 Hub 仓库目录下的 `lfs/objects/`，备份数据目录时会一并备份。
 - 暂不支持 LFS 文件锁：`git lfs lock` 会返回明确的错误；推送时的锁检查会通过，不会产生警告。
 
 ## 策略
@@ -283,6 +299,7 @@ gr webhook add|list|test|enable|disable|rm
 | POST | `/api/webhooks/{id}/test` | 发送测试投递 |
 | GET | `/api/status` | 全部仓库概览 |
 | GET | `/metrics` | Prometheus 指标 |
+| GET | `/archive/{org}/{name}/{rev}.tar.gz`、`.zip` | 源码包（鉴权同 clone） |
 | GET | `/healthz` | 健康检查 |
 | GET | `/ui/` | Web 控制台（`/` 会重定向到这里） |
 
@@ -302,7 +319,7 @@ Git 地址：`/{org}/{name}.git`（smart HTTP，协议 v2）；启用 SSH 后还
 
 - **M1（已完成）**：target / binding / token，push 自动建仓，pre/post-receive，force-with-lease 同步，分叉检测与备份，巡检与重试，`gr status`。
 - **M2**：~~出站 webhook 与告警~~、~~Web 控制台~~（已完成）。
-- **M3**：只读边缘节点、bundle-uri / 源码包 CDN、按区域读取路由。
+- **M3**：~~源码包~~（已完成）、bundle-uri、只读边缘节点、按区域读取路由。
 - **M4**：~~Gitea / Forgejo 适配器~~、~~Git LFS~~、~~Gitee 适配器~~（已完成）、按需同步 Release。
 
 ## 发布

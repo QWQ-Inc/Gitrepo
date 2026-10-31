@@ -23,8 +23,9 @@ var (
 
 const mediaType = "application/vnd.git-lfs+json"
 
-// actionTTL is how long transfer hrefs stay valid.
-const actionTTL = time.Hour
+// actionTTL is how long transfer hrefs stay valid; git-lfs asks again for
+// expired ones. It bounds how long access survives a revoked token.
+const actionTTL = 15 * time.Minute
 
 // Repo identifies the repository a request is for.
 type Repo struct {
