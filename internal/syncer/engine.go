@@ -18,9 +18,11 @@ func pid() int { return os.Getpid() }
 
 // RemoteOutcome summarises one remote's sync.
 type RemoteOutcome struct {
-	Label     string
-	State     string
-	Changed   int
+	Label   string
+	State   string
+	Changed int
+	// Updated maps refs changed on the mirror to their new value ("" = deleted).
+	Updated   map[string]string
 	Error     string
 	Divergent []string
 	Warnings  []string
@@ -216,6 +218,10 @@ func (m *Manager) syncRemote(parent context.Context, repo *store.Repo, rem *stor
 			case st.OK():
 				if st.Flag != '=' {
 					out.Changed++
+					if out.Updated == nil {
+						out.Updated = map[string]string{}
+					}
+					out.Updated[op.Ref] = op.New
 				}
 			case st.StaleLease():
 				divs = append(divs, Div{Ref: op.Ref, HubSHA: op.New, Expected: op.Expect, Reason: "remote changed during sync (lease rejected)"})

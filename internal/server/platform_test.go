@@ -28,6 +28,7 @@ type fakePlatforms struct {
 const (
 	ghToken = "gh-token"
 	glToken = "gl-token"
+	gtToken = "gt-token"
 )
 
 // glProtectHook makes the fake GitLab refuse non-fast-forward pushes to main
@@ -72,7 +73,7 @@ func (f *fakePlatforms) initRepo(platform, path string) {
 	if out, err := gitCmd("", "init", "-q", "--bare", "-b", "main", dir); err != nil {
 		f.t.Fatalf("init %s: %v %s", dir, err, out)
 	}
-	if platform == "gl" {
+	if platform == "gl" || platform == "gt" {
 		if err := os.WriteFile(filepath.Join(dir, "hooks", "pre-receive"), []byte(glProtectHook), 0o755); err != nil {
 			f.t.Fatal(err)
 		}
@@ -105,11 +106,20 @@ func (f *fakePlatforms) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		f.gitlab(w, r, strings.TrimPrefix(p, "/gl/api/v4"))
+	case strings.HasPrefix(p, "/gt/api/v1/"):
+		if r.Header.Get("Authorization") != "token "+gtToken {
+			writeJSONResp(w, 401, map[string]string{"message": "token is required"})
+			return
+		}
+		f.gitea(w, r, strings.TrimPrefix(p, "/gt/api/v1"))
 	default:
 		platform, rest, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/"), "/")
 		wantUser, wantPass := "x-access-token", ghToken
-		if platform == "gl" {
+		switch platform {
+		case "gl":
 			wantUser, wantPass = "oauth2", glToken
+		case "gt":
+			wantUser, wantPass = "oauth2", gtToken
 		}
 		u, pw, ok := r.BasicAuth()
 		if !ok || u != wantUser || pw != wantPass {
@@ -200,6 +210,46 @@ func (f *fakePlatforms) gitlab(w http.ResponseWriter, r *http.Request, p string)
 	}
 }
 
+func (f *fakePlatforms) gitea(w http.ResponseWriter, r *http.Request, p string) {
+	var body map[string]any
+	json.NewDecoder(r.Body).Decode(&body)
+	seg := strings.Split(strings.TrimPrefix(p, "/"), "/")
+	switch {
+	case r.Method == "GET" && p == "/user":
+		writeJSONResp(w, 200, map[string]string{"login": "gitea-bot"})
+	case r.Method == "POST" && len(seg) == 3 && seg[0] == "orgs" && seg[2] == "repos":
+		name, _ := body["name"].(string)
+		f.record("gt create org " + seg[1] + "/" + name + " private=" + jsonStr(body["private"]))
+		f.initRepo("gt", seg[1]+"/"+name)
+		writeJSONResp(w, 201, map[string]any{})
+	case len(seg) >= 3 && seg[0] == "repos":
+		project := seg[1] + "/" + seg[2]
+		if !f.exists("gt", project) {
+			writeJSONResp(w, 404, map[string]string{"message": "Not Found"})
+			return
+		}
+		repoDir := filepath.Join(f.dir, "gt", project+".git")
+		switch {
+		case r.Method == "GET" && len(seg) == 3:
+			writeJSONResp(w, 200, map[string]any{})
+		case r.Method == "PATCH" && len(seg) == 3:
+			f.record("gt default_branch " + project + "=" + jsonStr(body["default_branch"]))
+			writeJSONResp(w, 200, map[string]any{})
+		case r.Method == "GET" && len(seg) == 4 && seg[3] == "branch_protections":
+			_, err := os.Stat(filepath.Join(repoDir, "allow_force"))
+			writeJSONResp(w, 200, []map[string]any{{"rule_name": "main", "enable_force_push": err == nil}})
+		case r.Method == "PATCH" && len(seg) == 5 && seg[3] == "branch_protections":
+			f.record("gt enable_force_push " + project + " " + seg[4] + "=" + jsonStr(body["enable_force_push"]))
+			os.WriteFile(filepath.Join(repoDir, "allow_force"), nil, 0o644)
+			writeJSONResp(w, 200, map[string]any{})
+		default:
+			writeJSONResp(w, 404, map[string]string{"message": "Not Found"})
+		}
+	default:
+		writeJSONResp(w, 404, map[string]string{"message": "Not Found"})
+	}
+}
+
 func TestPlatformAdapters(t *testing.T) {
 	e := newEnv(t)
 	fake := newFakePlatforms(t)
@@ -212,6 +262,11 @@ func TestPlatformAdapters(t *testing.T) {
 	e.do(http.MethodPost, "/api/targets", map[string]any{
 		"name": "gitlab", "provider": "gitlab", "namespace": "acme-group", "base_url": fake.srv.URL + "/gl",
 		"credential": map[string]any{"kind": "token", "secret": glToken},
+	}, nil)
+
+	e.do(http.MethodPost, "/api/targets", map[string]any{
+		"name": "forgejo", "provider": "gitea", "namespace": "acme", "base_url": fake.srv.URL + "/gt",
+		"credential": map[string]any{"kind": "token", "secret": gtToken},
 	}, nil)
 
 	t.Run("credential check reports the platform identity", func(t *testing.T) {
@@ -227,10 +282,15 @@ func TestPlatformAdapters(t *testing.T) {
 		if !res.OK || res.Identity != "tanuki" {
 			t.Fatalf("gitlab check: %+v", res)
 		}
+		e.do(http.MethodPost, "/api/targets/forgejo/check", nil, &res)
+		if !res.OK || res.Identity != "gitea-bot" {
+			t.Fatalf("gitea check: %+v", res)
+		}
 	})
 
 	e.do(http.MethodPost, "/api/bindings", map[string]any{"org": "*", "target": "github"}, nil)
 	e.do(http.MethodPost, "/api/bindings", map[string]any{"org": "*", "target": "gitlab"}, nil)
+	e.do(http.MethodPost, "/api/bindings", map[string]any{"org": "*", "target": "forgejo"}, nil)
 	var dev struct {
 		Token string `json:"token"`
 	}
@@ -242,15 +302,18 @@ func TestPlatformAdapters(t *testing.T) {
 	hub := e.hubURL(dev.Token, slug)
 	ghRepo := filepath.Join(fake.dir, "gh", "acme", "svc.git")
 	glRepo := filepath.Join(fake.dir, "gl", "acme-group", "svc.git")
+	gtRepo := filepath.Join(fake.dir, "gt", "acme", "svc.git")
 
 	t.Run("first push creates the repositories through the APIs", func(t *testing.T) {
 		out := e.run(work, "push", hub, "main")
-		mustContain(t, out, "[ok]       github:acme/svc", "[ok]       gitlab:acme-group/svc")
+		mustContain(t, out, "[ok]       github:acme/svc", "[ok]       gitlab:acme-group/svc", "[ok]       forgejo:acme/svc")
 		for _, c := range []string{
 			"gh create org acme/svc private=true",
 			"gl create ns=7 svc visibility=private",
+			"gt create org acme/svc private=true",
 			"gh default_branch acme/svc=main",
 			"gl default_branch acme-group/svc=main",
+			"gt default_branch acme/svc=main",
 		} {
 			if !fake.called(c) {
 				t.Errorf("expected API call %q; got %v", c, fake.calls)
@@ -259,17 +322,21 @@ func TestPlatformAdapters(t *testing.T) {
 		want := e.refs(e.hubRepo(slug))
 		sameRefs(t, "github", e.refs(ghRepo), want)
 		sameRefs(t, "gitlab", e.refs(glRepo), want)
+		sameRefs(t, "forgejo", e.refs(gtRepo), want)
 	})
 
-	t.Run("force push lifts GitLab branch protection first", func(t *testing.T) {
+	t.Run("force push lifts GitLab and Gitea branch protection first", func(t *testing.T) {
 		e.run(work, "commit", "-q", "--amend", "-m", "rewritten")
 		out := e.run(work, "push", "--force", hub, "main")
-		mustContain(t, out, "[ok]       github:acme/svc", "[ok]       gitlab:acme-group/svc")
-		if !fake.called("gl allow_force_push acme-group/svc main=true") {
-			t.Fatalf("protection was not relaxed; calls: %v", fake.calls)
+		mustContain(t, out, "[ok]       github:acme/svc", "[ok]       gitlab:acme-group/svc", "[ok]       forgejo:acme/svc")
+		for _, c := range []string{"gl allow_force_push acme-group/svc main=true", "gt enable_force_push acme/svc main=true"} {
+			if !fake.called(c) {
+				t.Fatalf("protection was not relaxed (%s); calls: %v", c, fake.calls)
+			}
 		}
 		want := e.refs(e.hubRepo(slug))
 		sameRefs(t, "gitlab", e.refs(glRepo), want)
+		sameRefs(t, "forgejo", e.refs(gtRepo), want)
 		sameRefs(t, "github", e.refs(ghRepo), want)
 	})
 }

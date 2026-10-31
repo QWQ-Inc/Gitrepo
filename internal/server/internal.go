@@ -11,7 +11,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/qwq-inc/gitrepo/internal/gitexec"
 	"github.com/qwq-inc/gitrepo/internal/githooks"
+	"github.com/qwq-inc/gitrepo/internal/notify"
 	"github.com/qwq-inc/gitrepo/internal/store"
 	"github.com/qwq-inc/gitrepo/internal/syncer"
 )
@@ -79,6 +81,15 @@ func (s *Server) handlePostReceive(w http.ResponseWriter, r *http.Request) {
 	if err := s.fixHead(ctx, repo, path, updates); err != nil {
 		s.log.Warn("update HEAD", "repo", repo.Slug, "err", err)
 	}
+	pushed := map[string]string{}
+	for _, u := range updates {
+		if gitexec.IsZero(u.New) {
+			pushed[u.Ref] = ""
+		} else {
+			pushed[u.Ref] = u.New
+		}
+	}
+	s.notify.Emit(notify.Event{Event: notify.EventPush, Repo: repo.Slug, CloneURL: s.cfg.PublicURL + "/" + repo.Slug + ".git", Refs: pushed, Pusher: req.Pusher})
 
 	remotes, err := s.store.ListRemotes(ctx, repo.ID)
 	if err != nil {

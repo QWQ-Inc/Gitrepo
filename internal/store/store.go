@@ -183,6 +183,24 @@ CREATE TABLE leases (
   expires_at INTEGER NOT NULL
 );
 `,
+	// 2: outbound webhooks. The URL is encrypted because chat-bot URLs embed
+	// their access key.
+	`
+CREATE TABLE webhooks (
+  id               INTEGER PRIMARY KEY,
+  name             TEXT    NOT NULL UNIQUE,
+  url              BLOB    NOT NULL,
+  url_host         TEXT    NOT NULL DEFAULT '',
+  format           TEXT    NOT NULL DEFAULT 'json',
+  events           TEXT    NOT NULL DEFAULT '*',
+  repos            TEXT    NOT NULL DEFAULT '',
+  secret           BLOB,
+  enabled          INTEGER NOT NULL DEFAULT 1,
+  last_status      TEXT    NOT NULL DEFAULT '',
+  last_delivery_at INTEGER NOT NULL DEFAULT 0,
+  created_at       INTEGER NOT NULL
+);
+`,
 }
 
 func (s *Store) migrate(ctx context.Context) error {

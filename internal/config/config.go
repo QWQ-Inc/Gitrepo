@@ -38,6 +38,17 @@ type Config struct {
 	Git    GitConfig    `yaml:"git"`
 	Sync   SyncConfig   `yaml:"sync"`
 	Policy PolicyConfig `yaml:"policy"`
+	Alerts AlertsConfig `yaml:"alerts"`
+}
+
+// AlertsConfig controls when webhook alerts fire.
+type AlertsConfig struct {
+	// FailureThreshold emits remote.failed after this many consecutive
+	// failed syncs of a mirror.
+	FailureThreshold int `yaml:"failure_threshold"`
+	// CredentialExpiryWarning emits credential.expiring (at most daily) when
+	// a target's credential expires within this window.
+	CredentialExpiryWarning Duration `yaml:"credential_expiry_warning"`
 }
 
 type GitConfig struct {
@@ -91,6 +102,10 @@ func Default() *Config {
 			BackupRetention: Duration(30 * 24 * time.Hour),
 			RetryBase:       Duration(30 * time.Second),
 			RetryMax:        Duration(time.Hour),
+		},
+		Alerts: AlertsConfig{
+			FailureThreshold:        3,
+			CredentialExpiryWarning: Duration(14 * 24 * time.Hour),
 		},
 	}
 }
@@ -158,6 +173,9 @@ func (c *Config) validate() error {
 	}
 	if c.Sync.PushTimeout.D() <= 0 {
 		errs = append(errs, errors.New("sync.push_timeout must be positive"))
+	}
+	if c.Alerts.FailureThreshold <= 0 {
+		errs = append(errs, errors.New("alerts.failure_threshold must be positive"))
 	}
 	if c.Sync.RetryBase.D() <= 0 || c.Sync.RetryMax.D() < c.Sync.RetryBase.D() {
 		errs = append(errs, errors.New("sync.retry_base must be positive and <= sync.retry_max"))

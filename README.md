@@ -20,8 +20,9 @@
 - **不静默覆盖**：每次推送都带 `--force-with-lease`。repohub 只覆盖自己推过的内容（或能快进的内容）；镜像上出现别人的提交时标记为"分叉"并告警，其他分支照常同步。
 - **留有后悔药**：Hub 上被强推覆盖或删除的 ref、被覆盖前的镜像分叉内容，都保存在隐藏的 `refs/backup/<时间>/…` 下（默认保留 30 天）。
 - **在入口挡住注定失败的 push**：单文件大小上限取所有镜像中最严的（GitHub 是 100 MiB），超限的 push 在 Hub 就被拒绝，不会在某个镜像上一直失败。
+- **出事会通知**：分叉、连续失败、恢复、凭据即将过期、同步完成（带 ref 和 SHA，可用来触发下游构建）都可以推送到带签名的 webhook，或直接推到 Slack、企业微信、飞书、钉钉。
 
-> 当前处于 M1 阶段：Hub 接收 push、单向同步、状态可见。读取路由、镜像加速、出站 webhook 和 LFS 见 [路线图](#路线图)。
+> 当前处于 M1 阶段，并已包含 M2 的通知功能和 M4 的 Gitea/Forgejo 适配器。读取路由、镜像加速和 LFS 见 [路线图](#路线图)。
 
 ## 快速开始
 
@@ -55,7 +56,10 @@ rh target add github --provider github --namespace acme --token-env GITHUB_TOKEN
 rh target add gitlab --provider gitlab --namespace acme-group --token-env GITLAB_TOKEN
 rh target add corp-gitlab --provider gitlab --base-url https://gitlab.example.com --namespace infra --token-stdin < token.txt
 
-# 自建 / 任意 Git 服务器（没有 API，仓库需事先存在）
+# 自建 Gitea / Forgejo：access token，需要 repository 读写权限（在组织下建仓还需要 organization 写权限）
+rh target add forgejo --provider gitea --base-url https://git.example.com --namespace backup --token-env FORGEJO_TOKEN
+
+# 任意 Git 服务器（没有 API，仓库需事先存在）
 rh target add backup --provider generic \
   --url-template 'ssh://git@git.example.com/{namespace}/{name}.git' --namespace mirrors \
   --ssh-key-file ~/.ssh/repohub_mirror --known-hosts-file ./known_hosts
@@ -129,6 +133,31 @@ remote: repohub:   [diverged] gitlab:acme-group/demo  refs/heads/main
 
 每个推送操作都把刚观测到的远端值作为 lease。如果观测和推送之间远端又被改动，远端会拒绝这次推送，下一轮同步把它识别为分叉。
 
+## 通知
+
+```bash
+# 下游 CI：同步完成后按 SHA 触发构建，带 HMAC 签名
+rh webhook add ci --url https://ci.example.com/hooks/repohub --events sync.completed --secret-env HOOK_SECRET
+
+# 值班群：只推告警（URL 里带有机器人的 key，用环境变量传入，入库加密）
+rh webhook add oncall --format wecom --url-env WECOM_BOT_URL --events 'remote.*,credential.expiring'
+
+rh webhook test 2
+```
+
+| 事件 | 何时触发 |
+| --- | --- |
+| `push` | Hub 收到 push（各 ref 的新 SHA、推送者） |
+| `sync.completed` | 一轮同步至少改动了一个镜像（变更的 ref、SHA 和每个镜像的结果）；没有变化的巡检不触发 |
+| `remote.diverged` | 镜像进入分叉状态（只在状态变化时触发一次） |
+| `remote.failed` | 镜像连续失败达到 `alerts.failure_threshold` 次（默认 3） |
+| `remote.recovered` | 告警过的镜像恢复同步 |
+| `credential.expiring` | target 凭据在 `alerts.credential_expiry_warning`（默认 14 天）内过期，每天最多一次；过期时间用 `rh target update NAME --expires 2027-01-31` 设置 |
+
+`--format` 支持 `json`（默认，完整载荷）、`slack`、`wecom`、`feishu`、`dingtalk`。
+
+JSON 投递带以下请求头：`X-Repohub-Event`、`X-Repohub-Delivery`；配置了 secret 时还带 `X-Repohub-Signature-256: sha256=<HMAC-SHA256(secret, body)>`，校验方式与 GitHub webhook 相同。失败的投递会在 5s、30s、2m 后重试。`--repos 'acme/*'` 可以只接收部分仓库的事件。飞书和钉钉机器人的"签名校验"安全设置暂不支持，请改用关键词（例如 `repohub`）或 IP 白名单。
+
 ## 策略
 
 在 Hub 的 pre-receive 阶段执行：
@@ -160,6 +189,7 @@ rh sync    ORG/NAME [--overwrite] [--remote ID]
 rh status  [ORG/NAME]
 rh runs    ORG/NAME
 rh token   create|list|rm
+rh webhook add|list|test|enable|disable|rm
 ```
 
 所有命令都支持 `--json`。`rh` 读取 `REPOHUB_URL` 和 `REPOHUB_TOKEN`。
@@ -181,6 +211,8 @@ rh token   create|list|rm
 | POST | `/api/repos/{org}/{name}/sync` | 立即同步，`{"wait":true,"overwrite":false}` |
 | GET | `/api/repos/{org}/{name}/runs` | 同步历史 |
 | GET/POST | `/api/tokens`，DELETE `/api/tokens/{id}` | 客户端 token |
+| GET/POST | `/api/webhooks`，PATCH/DELETE `/api/webhooks/{id}` | 出站通知 |
+| POST | `/api/webhooks/{id}/test` | 发送测试投递 |
 | GET | `/api/status` | 全部仓库概览 |
 | GET | `/metrics` | Prometheus 指标 |
 | GET | `/healthz` | 健康检查 |
@@ -191,6 +223,7 @@ Git 地址：`/{org}/{name}.git`（smart HTTP，协议 v2）。
 
 - **数据目录**：`repos/`（bare 仓库）、`repohub.db`（SQLite）、`trash/`（注销的仓库）。备份这个目录和 `REPOHUB_SECRET_KEY` 就够了。
 - **重试**：失败的镜像按 30s、1m、2m… 指数退避自动重试，上限 1h；巡检每 10 分钟全量检查一次，兜底 webhook 丢失和服务重启。
+- **告警**：见[通知](#通知)。
 - **监控**：`repohub_remote_state`、`repohub_remote_last_success_timestamp_seconds`、`repohub_remote_consecutive_failures`、`repohub_target_credential_expiry_timestamp_seconds`。建议对"上次成功同步距今多久"和 `state="diverged"` 设告警。
 - **单实例**：Hub 是唯一权威源，按单实例运行。repohub 自己的部署源请直接指向 GitHub，不要经过 repohub。
 
@@ -198,10 +231,10 @@ Git 地址：`/{org}/{name}.git`（smart HTTP，协议 v2）。
 
 ## 路线图
 
-- **M1（当前）**：target / binding / token，push 自动建仓，pre/post-receive，force-with-lease 同步，分叉检测与备份，巡检与重试，`rh status`。
-- **M2**：出站 webhook（同步完成、分叉、失败事件，带 HMAC 签名）、凭据过期告警、Web 控制台。
+- **M1（已完成）**：target / binding / token，push 自动建仓，pre/post-receive，force-with-lease 同步，分叉检测与备份，巡检与重试，`rh status`。
+- **M2**：~~出站 webhook 与告警~~（已完成）、Web 控制台。
 - **M3**：只读边缘节点、bundle-uri / 源码包 CDN、按区域读取路由。
-- **M4**：Gitea / Forgejo / Gitee 适配器、Git LFS、按需同步 Release。
+- **M4**：~~Gitea / Forgejo 适配器~~（已完成）、Gitee 适配器、Git LFS、按需同步 Release。
 
 ## 开发
 

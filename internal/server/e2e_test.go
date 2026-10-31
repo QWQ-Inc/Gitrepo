@@ -80,7 +80,7 @@ const (
 	tokenB     = "tok-b"
 )
 
-func newEnv(t *testing.T) *env {
+func newEnv(t *testing.T, tweaks ...func(*config.Config)) *env {
 	t.Helper()
 	tmp := t.TempDir()
 	logs := &syncBuffer{}
@@ -121,6 +121,9 @@ func newEnv(t *testing.T) *env {
 	cfg.AdminTokenEnv = "RH_TEST_ADMIN_TOKEN"
 	cfg.Sync.PostReceiveWait = config.Duration(30 * time.Second)
 	cfg.Sync.PushTimeout = config.Duration(time.Minute)
+	for _, f := range tweaks {
+		f(cfg)
+	}
 	t.Setenv(cfg.SecretKeyEnv, secrets.GenerateKey())
 	t.Setenv(cfg.AdminTokenEnv, adminToken)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

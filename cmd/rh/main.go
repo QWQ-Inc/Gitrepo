@@ -46,7 +46,7 @@ func main() {
 	root.PersistentFlags().StringVar(&flagToken, "token", os.Getenv("REPOHUB_TOKEN"), "admin token (env REPOHUB_TOKEN)")
 	root.PersistentFlags().BoolVar(&flagJSON, "json", false, "print raw JSON")
 
-	root.AddCommand(targetCmd(), bindCmd(), bindingCmd(), repoCmd(), remoteCmd(), syncCmd(), statusCmd(), runsCmd(), tokenCmd())
+	root.AddCommand(targetCmd(), bindCmd(), bindingCmd(), repoCmd(), remoteCmd(), syncCmd(), statusCmd(), runsCmd(), tokenCmd(), webhookCmd())
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
@@ -124,7 +124,7 @@ type targetFlags struct {
 
 func (f *targetFlags) register(c *cobra.Command, create bool) {
 	fl := c.Flags()
-	fl.StringVar(&f.provider, "provider", "", "github | gitlab | generic")
+	fl.StringVar(&f.provider, "provider", "", "github | gitlab | gitea (also Forgejo) | generic")
 	fl.StringVar(&f.baseURL, "base-url", "", "web base URL for self-hosted instances (e.g. https://gitlab.example.com)")
 	fl.StringVar(&f.apiURL, "api-url", "", "API base URL if it cannot be derived from --base-url")
 	fl.StringVar(&f.namespace, "namespace", "", "default owner: GitHub user/org, GitLab user/group path")
@@ -898,4 +898,122 @@ func splitNonEmpty(s string) []string {
 		}
 	}
 	return out
+}
+
+// ----------------------------------------------------------------- webhook
+
+func webhookCmd() *cobra.Command {
+	cmd := &cobra.Command{Use: "webhook", Short: "Outbound notifications (JSON with HMAC, Slack, 企业微信, 飞书, 钉钉)"}
+	var rawURL, urlEnv, format, events, repos, secretEnv string
+	add := &cobra.Command{
+		Use:   "add NAME",
+		Short: "Add a webhook",
+		Long: `Add a webhook.
+
+Events: push, sync.completed, remote.diverged, remote.failed, remote.recovered,
+credential.expiring; "remote.*" or "*" subscribe to groups.
+
+JSON deliveries carry X-Repohub-Event, X-Repohub-Delivery and, with a secret,
+X-Repohub-Signature-256: sha256=HMAC-SHA256(secret, body).
+
+Chat-bot URLs contain their access key; pass them with --url-env to keep them
+out of shell history. They are stored encrypted.`,
+		Example: `  rh webhook add ci --url https://ci.example.com/hooks/repohub --events sync.completed --secret-env HOOK_SECRET
+  rh webhook add oncall --format wecom --url-env WECOM_BOT_URL --events 'remote.*,credential.expiring'
+  rh webhook add team --format slack --url-env SLACK_WEBHOOK_URL --repos 'acme/*'`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			u := rawURL
+			if urlEnv != "" {
+				u = strings.TrimSpace(os.Getenv(urlEnv))
+			}
+			if u == "" {
+				return errors.New("--url or --url-env is required")
+			}
+			body := map[string]any{"name": args[0], "url": u, "format": format, "events": splitNonEmpty(events), "repos": splitNonEmpty(repos)}
+			if secretEnv != "" {
+				sec := strings.TrimSpace(os.Getenv(secretEnv))
+				if sec == "" {
+					return fmt.Errorf("environment variable %s is empty", secretEnv)
+				}
+				body["secret"] = sec
+			}
+			var h client.Webhook
+			if err := call(http.MethodPost, "/api/webhooks", body, &h); err != nil {
+				return err
+			}
+			if flagJSON {
+				return printJSON(h)
+			}
+			fmt.Printf("webhook %s added (id %d, %s → %s); try it: rh webhook test %d\n", h.Name, h.ID, h.Format, h.Host, h.ID)
+			return nil
+		},
+	}
+	add.Flags().StringVar(&rawURL, "url", "", "endpoint URL")
+	add.Flags().StringVar(&urlEnv, "url-env", "", "read the endpoint URL from this environment variable")
+	add.Flags().StringVar(&format, "format", "json", "json | slack | wecom | feishu | dingtalk")
+	add.Flags().StringVar(&events, "events", "*", "comma-separated events")
+	add.Flags().StringVar(&repos, "repos", "", "only events of these repositories, e.g. 'acme/*' (default: all)")
+	add.Flags().StringVar(&secretEnv, "secret-env", "", "HMAC signing secret from this environment variable")
+
+	list := &cobra.Command{
+		Use: "list", Aliases: []string{"ls"}, Short: "List webhooks", Args: cobra.NoArgs,
+		RunE: func(c *cobra.Command, args []string) error {
+			var hs []client.Webhook
+			if err := call(http.MethodGet, "/api/webhooks", nil, &hs); err != nil {
+				return err
+			}
+			if flagJSON {
+				return printJSON(hs)
+			}
+			w := table()
+			fmt.Fprintln(w, "ID\tNAME\tFORMAT\tHOST\tEVENTS\tREPOS\tENABLED\tLAST DELIVERY")
+			for _, h := range hs {
+				r := strings.Join(h.Repos, ",")
+				if r == "" {
+					r = "*"
+				}
+				last := "never"
+				if h.LastDeliveryAt != nil {
+					last = h.LastStatus + " (" + ago(h.LastDeliveryAt) + ")"
+				}
+				fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%v\t%s\n", h.ID, h.Name, h.Format, h.Host, strings.Join(h.Events, ","), r, h.Enabled, last)
+			}
+			return w.Flush()
+		},
+	}
+	simple := func(use, short, method, suffix string, body any, done string) *cobra.Command {
+		return &cobra.Command{
+			Use: use + " ID", Short: short, Args: cobra.ExactArgs(1),
+			RunE: func(c *cobra.Command, args []string) error {
+				if err := call(method, "/api/webhooks/"+args[0]+suffix, body, nil); err != nil {
+					return err
+				}
+				fmt.Printf("webhook %s %s\n", args[0], done)
+				return nil
+			},
+		}
+	}
+	test := &cobra.Command{
+		Use: "test ID", Short: "Send a test delivery now", Args: cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			var res struct {
+				OK    bool   `json:"ok"`
+				Error string `json:"error"`
+			}
+			if err := call(http.MethodPost, "/api/webhooks/"+args[0]+"/test", nil, &res); err != nil {
+				return err
+			}
+			if !res.OK {
+				return fmt.Errorf("delivery failed: %s", res.Error)
+			}
+			fmt.Println("delivered")
+			return nil
+		},
+	}
+	cmd.AddCommand(add, list, test,
+		simple("disable", "Stop deliveries", http.MethodPatch, "", map[string]any{"enabled": false}, "disabled"),
+		simple("enable", "Resume deliveries", http.MethodPatch, "", map[string]any{"enabled": true}, "enabled"),
+		simple("rm", "Remove a webhook", http.MethodDelete, "", nil, "removed"))
+	return cmd
 }

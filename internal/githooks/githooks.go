@@ -39,6 +39,7 @@ type PostReceiveRequest struct {
 	Repo    string      `json:"repo"`
 	Updates []RefUpdate `json:"updates"`
 	WaitMS  int64       `json:"wait_ms"`
+	Pusher  string      `json:"pusher"`
 }
 
 type RefUpdate struct {
@@ -223,6 +224,7 @@ func PostReceive(stdin io.Reader, stderr io.Writer) int {
 		Repo:    os.Getenv(EnvRepo),
 		Updates: updates,
 		WaitMS:  wait,
+		Pusher:  os.Getenv("REMOTE_USER"),
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(wait)*time.Millisecond+30*time.Second)
 	defer cancel()

@@ -46,6 +46,7 @@ func (s *Server) registerAPI(mux *http.ServeMux) {
 	h("DELETE /api/tokens/{id}", s.apiDeleteToken)
 
 	h("GET /api/status", s.apiListRepos)
+	s.registerWebhookAPI(h)
 }
 
 func (s *Server) requireAdmin(fn http.HandlerFunc) http.HandlerFunc {

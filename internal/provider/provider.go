@@ -69,19 +69,20 @@ func register(p Provider) { registry[p.Kind()] = p }
 func Get(kind string) (Provider, error) {
 	p, ok := registry[kind]
 	if !ok {
-		return nil, fmt.Errorf("unknown provider %q (supported: github, gitlab, generic)", kind)
+		return nil, fmt.Errorf("unknown provider %q (supported: %s)", kind, strings.Join(Kinds(), ", "))
 	}
 	return p, nil
 }
 
 // Kinds lists registered provider kinds.
 func Kinds() []string {
-	return []string{"github", "gitlab", "generic"}
+	return []string{"github", "gitlab", "gitea", "generic"}
 }
 
 func init() {
 	register(&GitHub{})
 	register(&GitLab{})
+	register(&Gitea{})
 	register(&Generic{})
 }
 

@@ -183,3 +183,16 @@ type Token struct {
 	CreatedAt  *time.Time `json:"created_at"`
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
 }
+
+type Webhook struct {
+	ID             int64      `json:"id"`
+	Name           string     `json:"name"`
+	Host           string     `json:"host"`
+	Format         string     `json:"format"`
+	Events         []string   `json:"events"`
+	Repos          []string   `json:"repos,omitempty"`
+	Signed         bool       `json:"signed"`
+	Enabled        bool       `json:"enabled"`
+	LastStatus     string     `json:"last_status,omitempty"`
+	LastDeliveryAt *time.Time `json:"last_delivery_at,omitempty"`
+}

@@ -19,6 +19,7 @@ func TestRepoURLs(t *testing.T) {
 		{"generic", store.Target{URLTemplate: "ssh://git@git.example.com/{namespace}/{name}.git", Namespace: "backup"}, "", "ssh://git@git.example.com/backup/demo.git"},
 		{"generic", store.Target{URLTemplate: "https://git.example.com/{namespace}/{name}.git"}, "", "https://git.example.com/demo.git"},
 		{"generic", store.Target{BaseURL: "https://git.example.com"}, "ns", "https://git.example.com/ns/demo.git"},
+		{"gitea", store.Target{BaseURL: "https://forgejo.example.com/", Namespace: "acme"}, "", "https://forgejo.example.com/acme/demo.git"},
 	}
 	for _, c := range cases {
 		p, _ := Get(c.kind)

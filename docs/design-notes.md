@@ -50,4 +50,8 @@ GitHub 和 GitLab 的 API 调用直接用 `net/http` 实现（每个平台只用
 - 多实例：Hub 按单实例运行。SQLite 中的 lease 只防止两个进程误用同一个数据目录。
 - Git LFS：Hub 需要自己实现 LFS batch API 和对象存储才能接收 LFS 推送，计划在 M4。
 - 读取路由、熔断、镜像加速：Git 入口和 Hub 在同一个进程里，在有独立部署的边缘节点之前，路由带不来可用性收益。
-- 出站 webhook 和告警推送：M2。
+
+## M1 之后补充的功能
+
+- **Gitea / Forgejo 适配器**（`--provider gitea`）：自动建仓、设置默认分支；对需要强推或删除的分支，开启保护规则的 `enable_force_push`（Gitea ≥ 1.22 / Forgejo ≥ 7），旧版本则移除对应规则。
+- **出站通知**：`push`、`sync.completed`、`remote.diverged`、`remote.failed`、`remote.recovered`、`credential.expiring`。告警只在状态变化时触发（分叉只在进入分叉时触发一次；失败只在连续失败次数恰好达到阈值时触发；恢复只针对告警过的镜像），所以每 10 分钟一次的巡检不会重复刷屏。`sync.completed` 只在确实改动了镜像时发出，载荷里带变更的 ref 和 SHA，下游可以据此按 SHA 拉取并校验，避免"镜像还没同步完就开始构建"的竞态。webhook URL 加密存储，因为聊天机器人的 URL 里就带着 access key。

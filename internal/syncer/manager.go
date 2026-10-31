@@ -11,11 +11,13 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/qwq-inc/gitrepo/internal/gitexec"
+	"github.com/qwq-inc/gitrepo/internal/notify"
 	"github.com/qwq-inc/gitrepo/internal/registry"
 	"github.com/qwq-inc/gitrepo/internal/secrets"
 	"github.com/qwq-inc/gitrepo/internal/store"
@@ -58,6 +60,13 @@ type Options struct {
 	PushTimeout time.Duration
 	RetryBase   time.Duration
 	RetryMax    time.Duration
+	// AlertAfterFailures emits remote.failed when a mirror reaches this many
+	// consecutive failures (default 3).
+	AlertAfterFailures int
+	// PublicURL prefixes clone URLs in events.
+	PublicURL string
+	// Notify receives events (may be nil).
+	Notify func(notify.Event)
 }
 
 type Manager struct {
@@ -92,6 +101,9 @@ type pendingRun struct {
 }
 
 func New(st *store.Store, g *gitexec.Git, box *secrets.Box, reg *registry.Registry, log *slog.Logger, opts Options) *Manager {
+	if opts.AlertAfterFailures <= 0 {
+		opts.AlertAfterFailures = 3
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Manager{
 		store: st, git: g, box: box, reg: reg, log: log, opts: opts,
@@ -252,6 +264,8 @@ func (m *Manager) runRepo(repoID int64, p *pendingRun) {
 	req := Request{Trigger: p.trigger, Overwrite: p.overwrite}
 
 	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var outcomes []RemoteOutcome
 	for _, rem := range remotes {
 		wg.Add(1)
 		go func(rem *store.Remote) {
@@ -268,12 +282,71 @@ func (m *Manager) runRepo(repoID int64, p *pendingRun) {
 			} else {
 				log.Info("remote synced", "remote", out.Label, "state", out.State, "changed", out.Changed)
 			}
+			m.notifyTransition(repo, rem, out)
+			mu.Lock()
+			outcomes = append(outcomes, out)
+			mu.Unlock()
 			emit(Event{Type: "remote", Remote: out.Label, State: out.State, Changed: out.Changed,
 				Error: out.Error, Divergent: out.Divergent, Warnings: out.Warnings})
 		}(rem)
 	}
 	wg.Wait()
+	m.notifyCompleted(repo, p.trigger, outcomes)
 	emit(Event{Type: "done"})
+}
+
+func (m *Manager) cloneURL(repo *store.Repo) string {
+	if m.opts.PublicURL == "" {
+		return ""
+	}
+	return m.opts.PublicURL + "/" + repo.Slug + ".git"
+}
+
+// notifyTransition emits per-mirror events on meaningful state changes only,
+// so periodic patrols do not repeat alerts.
+func (m *Manager) notifyTransition(repo *store.Repo, rem *store.Remote, out RemoteOutcome) {
+	if m.opts.Notify == nil {
+		return
+	}
+	base := notify.Event{Repo: repo.Slug, CloneURL: m.cloneURL(repo), Remote: out.Label, State: out.State}
+	alerted := (rem.State == store.StateFailed && rem.ConsecutiveFailures >= m.opts.AlertAfterFailures) || rem.State == store.StateDiverged
+	switch {
+	case out.State == store.StateDiverged && rem.State != store.StateDiverged:
+		base.Event = notify.EventRemoteDiverged
+		base.Divergent = out.Divergent
+	case out.State == store.StateFailed && rem.ConsecutiveFailures+1 == m.opts.AlertAfterFailures:
+		base.Event = notify.EventRemoteFailed
+		base.Error = out.Error
+		base.Failures = rem.ConsecutiveFailures + 1
+	case out.State == store.StateSynced && alerted:
+		base.Event = notify.EventRemoteRecovered
+	default:
+		return
+	}
+	m.opts.Notify(base)
+}
+
+// notifyCompleted emits sync.completed when any mirror received changes.
+func (m *Manager) notifyCompleted(repo *store.Repo, trigger string, outcomes []RemoteOutcome) {
+	if m.opts.Notify == nil {
+		return
+	}
+	refs := map[string]string{}
+	var summaries []notify.RemoteSummary
+	for _, o := range outcomes {
+		for ref, sha := range o.Updated {
+			refs[ref] = sha
+		}
+		summaries = append(summaries, notify.RemoteSummary{Remote: o.Label, State: o.State, Changed: o.Changed, Error: o.Error, Divergent: o.Divergent})
+	}
+	if len(refs) == 0 {
+		return
+	}
+	sort.Slice(summaries, func(i, j int) bool { return summaries[i].Remote < summaries[j].Remote })
+	m.opts.Notify(notify.Event{
+		Event: notify.EventSyncCompleted, Repo: repo.Slug, CloneURL: m.cloneURL(repo),
+		Trigger: trigger, Refs: refs, Remotes: summaries,
+	})
 }
 
 func (m *Manager) backoff(failures int) time.Duration {

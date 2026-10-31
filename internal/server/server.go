@@ -16,12 +16,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/qwq-inc/gitrepo/internal/auth"
 	"github.com/qwq-inc/gitrepo/internal/config"
 	"github.com/qwq-inc/gitrepo/internal/gitexec"
 	"github.com/qwq-inc/gitrepo/internal/gitserve"
+	"github.com/qwq-inc/gitrepo/internal/notify"
 	"github.com/qwq-inc/gitrepo/internal/registry"
 	"github.com/qwq-inc/gitrepo/internal/secrets"
 	"github.com/qwq-inc/gitrepo/internal/store"
@@ -45,6 +47,7 @@ type Server struct {
 	box    *secrets.Box
 	reg    *registry.Registry
 	mgr    *syncer.Manager
+	notify *notify.Notifier
 	auth   *auth.Authenticator
 	gitsrv *gitserve.Server
 
@@ -57,6 +60,9 @@ type Server struct {
 	sockSrv *http.Server
 	cancel  context.CancelFunc
 	done    chan struct{}
+
+	expiryMu       sync.Mutex
+	expiryNotified map[int64]time.Time
 }
 
 // New prepares the data directory, database and components.
@@ -98,6 +104,8 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*Server, error) {
 		socketPath: socketPath(cfg),
 		selfPath:   self,
 		done:       make(chan struct{}),
+
+		expiryNotified: map[int64]time.Time{},
 	}
 	s.git = &gitexec.Git{
 		Bin:            cfg.Git.Binary,
@@ -117,11 +125,15 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*Server, error) {
 		return nil, err
 	}
 	s.reg = &registry.Registry{Store: st, Git: s.git, ReposDir: cfg.ReposDir(), TrashDir: cfg.TrashDir()}
+	s.notify = notify.New(st, box, log)
 	s.mgr = syncer.New(st, s.git, box, s.reg, log, syncer.Options{
-		Workers:     cfg.Sync.Workers,
-		PushTimeout: cfg.Sync.PushTimeout.D(),
-		RetryBase:   cfg.Sync.RetryBase.D(),
-		RetryMax:    cfg.Sync.RetryMax.D(),
+		Workers:            cfg.Sync.Workers,
+		PushTimeout:        cfg.Sync.PushTimeout.D(),
+		RetryBase:          cfg.Sync.RetryBase.D(),
+		RetryMax:           cfg.Sync.RetryMax.D(),
+		AlertAfterFailures: cfg.Alerts.FailureThreshold,
+		PublicURL:          cfg.PublicURL,
+		Notify:             s.notify.Emit,
 	})
 	adminHash := ""
 	if tok := strings.TrimSpace(os.Getenv(cfg.AdminTokenEnv)); tok != "" {
@@ -248,6 +260,7 @@ func (s *Server) Start(ln net.Listener) error {
 			s.log.Error("http server", "err", err)
 		}
 	}()
+	s.notify.Start(2)
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
 	if s.opts.NoBackground {
@@ -268,6 +281,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		errs = append(errs, s.httpSrv.Shutdown(ctx))
 	}
 	s.mgr.Shutdown()
+	s.notify.Stop()
 	if s.sockSrv != nil {
 		errs = append(errs, s.sockSrv.Shutdown(ctx))
 	}
@@ -323,6 +337,36 @@ func (s *Server) patrol(ctx context.Context) {
 	}
 	if err := s.store.PruneRuns(ctx, 200); err != nil {
 		s.log.Warn("prune sync runs", "err", err)
+	}
+	s.checkCredentialExpiry(ctx)
+}
+
+// checkCredentialExpiry emits credential.expiring at most once a day per
+// target whose credential expires within the warning window.
+func (s *Server) checkCredentialExpiry(ctx context.Context) {
+	targets, err := s.store.ListTargets(ctx)
+	if err != nil {
+		return
+	}
+	now := time.Now()
+	window := s.cfg.Alerts.CredentialExpiryWarning.D()
+	s.expiryMu.Lock()
+	defer s.expiryMu.Unlock()
+	for _, t := range targets {
+		if t.ExpiresAt == 0 {
+			continue
+		}
+		exp := store.ToTime(t.ExpiresAt)
+		if exp.Sub(now) > window {
+			continue
+		}
+		if last, ok := s.expiryNotified[t.ID]; ok && now.Sub(last) < 24*time.Hour {
+			continue
+		}
+		s.expiryNotified[t.ID] = now
+		expUTC := exp.UTC()
+		s.notify.Emit(notify.Event{Event: notify.EventCredentialExpiring, Target: t.Name, ExpiresAt: &expUTC})
+		s.log.Warn("target credential expires soon", "target", t.Name, "expires_at", expUTC)
 	}
 }
 
