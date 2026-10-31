@@ -128,3 +128,15 @@ Hub 自己实现了 LFS 服务端（`internal/lfs`）：
   - URL 解析错误和 API 回显中的 token 会被抹掉；`base_url`、`api_url` 在保存时校验。
   - 更新凭据时没带用户名就保留原值。
   - 轮换 token 时重新查询登录名。
+
+## 源码包与 bundle-uri
+
+- **源码包** `/archive/{org}/{name}/{rev}.tar.gz|.zip`：
+  - 鉴权与 clone 相同；`rev` 通过 `--end-of-options` 解析，杜绝参数注入。
+  - 只提供能从分支或标签到达的提交（`for-each-ref --contains`），隐藏的备份内容不会外泄。
+  - 按完整 SHA 请求时内容不可变，公开仓库可被 CDN 永久缓存。
+- **bundle-uri**（默认关闭）：
+  - 巡检时为超过 `min_size` 的仓库重建 bundle，条件是 ref 有变化且距上次超过 `interval`。只打包分支和标签，保留最新的两个 bundle。
+  - 通过 upload-pack 的 `uploadpack.advertiseBundleURIs` 和 `bundle.*` 配置广播，HTTP 和 SSH 都生效。使用 `creationToken` 启发式，客户端可以据此做增量。
+  - 每个 bundle 记录所属仓库的数据库 ID，只广播和提供属于当前仓库的 bundle。
+  - 私有仓库的链接带 15 分钟签名令牌（与 LFS 共用签名密钥）。

@@ -71,6 +71,7 @@ type env struct {
 	api       *client.Client
 	git       *gitexec.Git
 	srv       *server.Server
+	logs      *syncBuffer
 }
 
 const (
@@ -146,7 +147,7 @@ func newEnv(t *testing.T, tweaks ...func(*config.Config)) *env {
 	return &env{
 		t: t, hubAddr: ln.Addr().String(), reposDir: cfg.ReposDir(),
 		remoteURL: remote.URL, remoteDir: remoteDir,
-		api: client.New(cfg.PublicURL, adminToken), git: g, srv: srv,
+		api: client.New(cfg.PublicURL, adminToken), git: g, srv: srv, logs: logs,
 	}
 }
 

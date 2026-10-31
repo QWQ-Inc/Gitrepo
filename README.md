@@ -199,6 +199,22 @@ curl -fL -u x:$TOKEN https://git.example.com/archive/acme/demo/release/1.2.zip -
 - 按完整 SHA 下载时内容不可变：公开仓库返回 `Cache-Control: public, immutable`，可以放在 CDN 上永久缓存；按分支或标签名下载不缓存。
 - LFS 文件在源码包里是指针文件。
 
+## 首次克隆加速（bundle-uri）
+
+大仓库的首次克隆（比如 CI 冷启动）可以先下载一个预先打好的 bundle 文件，再只拉取之后的增量：
+
+```yaml
+bundles:
+  enabled: true
+  min_size: 50MiB   # 小于这个大小的仓库不打 bundle
+  interval: 24h     # bundle 最快多久重建一次（只在 ref 有变化时重建）
+```
+
+客户端需要开启：`git config --global transfer.bundleURI true`，然后照常 `git clone`（协议 v2，HTTPS 和 SSH 均可）。
+
+- bundle 只包含分支和标签，不含 `refs/backup/`。仓库被注销时，它的 bundle 也会一并删除。
+- 公开仓库的 bundle 链接不变、可以永久缓存，适合放在 CDN 后面。私有仓库的 bundle 链接里带有 15 分钟有效的签名令牌，git 下载时不需要额外的凭据。
+
 ## 导入已有项目 / 从镜像恢复
 
 已经在 GitHub、GitLab 等平台上的项目，一条命令就能让 Gitrepo 成为它的 Hub：
@@ -319,7 +335,7 @@ Git 地址：`/{org}/{name}.git`（smart HTTP，协议 v2）；启用 SSH 后还
 
 - **M1（已完成）**：target / binding / token，push 自动建仓，pre/post-receive，force-with-lease 同步，分叉检测与备份，巡检与重试，`gr status`。
 - **M2**：~~出站 webhook 与告警~~、~~Web 控制台~~（已完成）。
-- **M3**：~~源码包~~（已完成）、bundle-uri、只读边缘节点、按区域读取路由。
+- **M3**：~~源码包~~、~~bundle-uri~~（已完成）、只读边缘节点、按区域读取路由。
 - **M4**：~~Gitea / Forgejo 适配器~~、~~Git LFS~~、~~Gitee 适配器~~（已完成）、按需同步 Release。
 
 ## 发布

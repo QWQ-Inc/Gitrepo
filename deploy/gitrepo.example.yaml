@@ -41,6 +41,11 @@ ssh:
   listen: ""                 # e.g. ":2222" enables git over SSH (off by default)
   public_host: ""            # host[:port] for ssh:// URLs; default: public_url host + listen port
 
+bundles:
+  enabled: false             # bundle-uri: pre-built bundles for clients with transfer.bundleURI=true
+  interval: 24h              # minimum age before a bundle is rebuilt (only when refs changed)
+  min_size: 50MiB            # repositories smaller than this get no bundle
+
 alerts:
   failure_threshold: 3            # remote.failed after this many consecutive failures
   credential_expiry_warning: 14d  # credential.expiring when a target expires within this window

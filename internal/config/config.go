@@ -35,11 +35,22 @@ type Config struct {
 	// admin token. Additional tokens are managed through the API.
 	AdminTokenEnv string `yaml:"admin_token_env"`
 
-	Git    GitConfig    `yaml:"git"`
-	Sync   SyncConfig   `yaml:"sync"`
-	Policy PolicyConfig `yaml:"policy"`
-	Alerts AlertsConfig `yaml:"alerts"`
-	SSH    SSHConfig    `yaml:"ssh"`
+	Git     GitConfig     `yaml:"git"`
+	Sync    SyncConfig    `yaml:"sync"`
+	Policy  PolicyConfig  `yaml:"policy"`
+	Alerts  AlertsConfig  `yaml:"alerts"`
+	SSH     SSHConfig     `yaml:"ssh"`
+	Bundles BundlesConfig `yaml:"bundles"`
+}
+
+// BundlesConfig controls bundle-uri: pre-built bundles that clients with
+// transfer.bundleURI=true download before fetching the rest.
+type BundlesConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// Interval is the minimum age before a bundle is rebuilt.
+	Interval Duration `yaml:"interval"`
+	// MinSize skips repositories smaller than this.
+	MinSize ByteSize `yaml:"min_size"`
 }
 
 // SSHConfig enables Git over SSH. It is off unless Listen is set.
@@ -114,6 +125,10 @@ func Default() *Config {
 			BackupRetention: Duration(30 * 24 * time.Hour),
 			RetryBase:       Duration(30 * time.Second),
 			RetryMax:        Duration(time.Hour),
+		},
+		Bundles: BundlesConfig{
+			Interval: Duration(24 * time.Hour),
+			MinSize:  ByteSize(50 << 20),
 		},
 		Alerts: AlertsConfig{
 			FailureThreshold:        3,
@@ -278,12 +293,13 @@ func ParseByteSize(s string) (int64, error) {
 }
 
 // Paths derived from DataDir.
-func (c *Config) ReposDir() string { return filepath.Join(c.DataDir, "repos") }
-func (c *Config) HooksDir() string { return filepath.Join(c.DataDir, "hooks") }
-func (c *Config) BinDir() string   { return filepath.Join(c.DataDir, "bin") }
-func (c *Config) RunDir() string   { return filepath.Join(c.DataDir, "run") }
-func (c *Config) TmpDir() string   { return filepath.Join(c.DataDir, "tmp") }
-func (c *Config) HomeDir() string  { return filepath.Join(c.DataDir, "home") }
-func (c *Config) SSHDir() string   { return filepath.Join(c.DataDir, "ssh") }
-func (c *Config) TrashDir() string { return filepath.Join(c.DataDir, "trash") }
-func (c *Config) DBPath() string   { return filepath.Join(c.DataDir, "gitrepo.db") }
+func (c *Config) ReposDir() string   { return filepath.Join(c.DataDir, "repos") }
+func (c *Config) HooksDir() string   { return filepath.Join(c.DataDir, "hooks") }
+func (c *Config) BinDir() string     { return filepath.Join(c.DataDir, "bin") }
+func (c *Config) RunDir() string     { return filepath.Join(c.DataDir, "run") }
+func (c *Config) TmpDir() string     { return filepath.Join(c.DataDir, "tmp") }
+func (c *Config) HomeDir() string    { return filepath.Join(c.DataDir, "home") }
+func (c *Config) SSHDir() string     { return filepath.Join(c.DataDir, "ssh") }
+func (c *Config) TrashDir() string   { return filepath.Join(c.DataDir, "trash") }
+func (c *Config) DBPath() string     { return filepath.Join(c.DataDir, "gitrepo.db") }
+func (c *Config) BundlesDir() string { return filepath.Join(c.DataDir, "bundles") }

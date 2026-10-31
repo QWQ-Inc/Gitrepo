@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/qwq-inc/gitrepo/internal/auth"
+	"github.com/qwq-inc/gitrepo/internal/bundles"
 	"github.com/qwq-inc/gitrepo/internal/githooks"
 	"github.com/qwq-inc/gitrepo/internal/lfs"
 	"github.com/qwq-inc/gitrepo/internal/provider"
@@ -46,6 +47,12 @@ type Server struct {
 	OnCreate func(repo *store.Repo)
 	// LFS serves <repo>.git/info/lfs/*; its Auth is filled in per request.
 	LFS *lfs.Server
+	// Bundles, when set, are advertised to readers via bundle-uri and served
+	// under <repo>.git/bundles/. Links to private bundles carry a token
+	// signed with Signer.
+	Bundles   *bundles.Manager
+	Signer    *lfs.Signer
+	PublicURL string
 }
 
 const (
@@ -68,6 +75,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if lfsPath, ok := strings.CutPrefix(rest, "info/lfs/"); ok {
 		s.serveLFS(w, r, slug, lfsPath)
+		return
+	}
+	if file, ok := strings.CutPrefix(rest, "bundles/"); ok && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+		s.serveBundle(w, r, slug, file)
 		return
 	}
 
@@ -252,6 +263,9 @@ func (s *Server) GitEnv(ctx context.Context, repo *store.Repo, p *auth.Principal
 		githooks.EnvGit + "=" + s.GitBin,
 		githooks.EnvWait + "=" + strconv.FormatInt(s.PostReceiveWait.Milliseconds(), 10),
 	}
+	if !write {
+		extraConfig = append(extraConfig, s.bundleConfig(repo)...)
+	}
 	env = append(env, gitConfigEnv(append([]string{
 		"core.hooksPath", s.HooksDir,
 		"transfer.hideRefs", "refs/backup",
@@ -266,6 +280,85 @@ func (s *Server) GitEnv(ctx context.Context, repo *store.Repo, p *auth.Principal
 		env = append(env, githooks.EnvMaxFileSize+"="+strconv.FormatInt(s.maxFileSize(ctx, repo), 10))
 	}
 	return env
+}
+
+// bundleConfig advertises the repository's current bundle to readers.
+func (s *Server) bundleConfig(repo *store.Repo) []string {
+	if s.Bundles == nil {
+		return nil
+	}
+	b, ok := s.Bundles.Current(repo.Slug, repo.ID)
+	if !ok {
+		return nil
+	}
+	uri := strings.TrimRight(s.PublicURL, "/") + "/" + repo.Slug + ".git/bundles/" + b.ID + ".bundle"
+	if repo.Visibility != "public" {
+		uri += "?t=" + s.Signer.Sign(lfs.RepoKey(repo.Slug, repo.ID), "bundle-"+b.ID, "bundle", 15*time.Minute)
+	}
+	return []string{
+		"uploadpack.advertiseBundleURIs", "true",
+		"bundle.version", "1",
+		"bundle.mode", "all",
+		"bundle.heuristic", "creationToken",
+		"bundle.b" + b.ID + ".uri", uri,
+		"bundle.b" + b.ID + ".creationToken", b.ID,
+	}
+}
+
+// serveBundle serves <repo>.git/bundles/<id>.bundle to readers, or to
+// anyone holding the token from the advertised link.
+func (s *Server) serveBundle(w http.ResponseWriter, r *http.Request, slug, file string) {
+	id, ok := strings.CutSuffix(file, ".bundle")
+	if !ok || !bundles.ValidID(id) || s.Bundles == nil {
+		http.NotFound(w, r)
+		return
+	}
+	var repo *store.Repo
+	if tok := r.URL.Query().Get("t"); tok != "" {
+		var err error
+		if repo, err = s.Store.GetRepoBySlug(r.Context(), slug); err != nil ||
+			s.Signer.Verify(tok, lfs.RepoKey(slug, repo.ID), "bundle-"+id, "bundle") != nil {
+			unauthorized(w, "invalid or expired bundle link")
+			return
+		}
+	} else {
+		p, err := s.Auth.FromRequest(r)
+		if err != nil {
+			unauthorized(w, "invalid token")
+			return
+		}
+		repo, err = s.Access(r.Context(), slug, p, false, false)
+		switch {
+		case errors.Is(err, ErrUnauthenticated):
+			unauthorized(w, "authentication required")
+			return
+		case err != nil:
+			http.NotFound(w, r)
+			return
+		}
+	}
+	if !s.Bundles.Belongs(slug, id, repo.ID) {
+		http.NotFound(w, r)
+		return
+	}
+	f, err := os.Open(s.Bundles.Path(slug, id))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if repo.Visibility == "public" {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	} else {
+		w.Header().Set("Cache-Control", "private, max-age=86400")
+	}
+	w.Header().Set("Content-Type", "application/x-git-bundle")
+	http.ServeContent(w, r, id+".bundle", fi.ModTime(), f)
 }
 
 func unauthorized(w http.ResponseWriter, msg string) {

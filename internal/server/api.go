@@ -747,6 +747,9 @@ func (s *Server) apiDeleteRepo(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	if s.bundles != nil {
+		s.bundles.Remove(repo.Slug)
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"moved_to": trash})
 }
 

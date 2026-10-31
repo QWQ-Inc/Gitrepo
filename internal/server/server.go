@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/qwq-inc/gitrepo/internal/auth"
+	"github.com/qwq-inc/gitrepo/internal/bundles"
 	"github.com/qwq-inc/gitrepo/internal/config"
 	"github.com/qwq-inc/gitrepo/internal/gitexec"
 	"github.com/qwq-inc/gitrepo/internal/gitserve"
@@ -46,16 +47,17 @@ type Server struct {
 	opts Options
 	log  *slog.Logger
 
-	store  *store.Store
-	git    *gitexec.Git
-	box    *secrets.Box
-	reg    *registry.Registry
-	mgr    *syncer.Manager
-	notify *notify.Notifier
-	ssh    *sshserve.Server // nil when SSH is disabled
-	sshLn  net.Listener
-	auth   *auth.Authenticator
-	gitsrv *gitserve.Server
+	store   *store.Store
+	git     *gitexec.Git
+	box     *secrets.Box
+	reg     *registry.Registry
+	mgr     *syncer.Manager
+	notify  *notify.Notifier
+	ssh     *sshserve.Server // nil when SSH is disabled
+	bundles *bundles.Manager // nil when bundles are disabled
+	sshLn   net.Listener
+	auth    *auth.Authenticator
+	gitsrv  *gitserve.Server
 
 	tickets    *gitexec.Tickets
 	hookToken  string
@@ -163,6 +165,12 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*Server, error) {
 		MaxFileSize:     int64(cfg.Policy.MaxFileSize),
 		PostReceiveWait: cfg.Sync.PostReceiveWait.D(),
 		LFS:             &lfs.Server{Signer: lfsSigner, MaxObjectSize: int64(cfg.Policy.MaxLFSObjectSize), PublicURL: cfg.PublicURL, Log: log},
+		Signer:          lfsSigner,
+		PublicURL:       cfg.PublicURL,
+	}
+	if cfg.Bundles.Enabled {
+		s.bundles = &bundles.Manager{Dir: cfg.BundlesDir(), Git: s.git, Interval: cfg.Bundles.Interval.D(), MinSize: int64(cfg.Bundles.MinSize), Log: log}
+		s.gitsrv.Bundles = s.bundles
 	}
 	if cfg.SSH.Listen != "" {
 		s.ssh = &sshserve.Server{
@@ -421,6 +429,23 @@ func (s *Server) patrol(ctx context.Context) {
 		s.log.Warn("prune sync runs", "err", err)
 	}
 	s.checkCredentialExpiry(ctx)
+	s.RefreshBundles(ctx, false)
+}
+
+// RefreshBundles rebuilds bundles that are due (all of them with force).
+func (s *Server) RefreshBundles(ctx context.Context, force bool) {
+	if s.bundles == nil {
+		return
+	}
+	repos, err := s.store.ListRepos(ctx)
+	if err != nil {
+		return
+	}
+	for _, r := range repos {
+		if _, err := s.bundles.Refresh(ctx, r.Slug, r.ID, s.reg.Path(r.Slug), force); err != nil {
+			s.log.Warn("refresh bundle", "repo", r.Slug, "err", err)
+		}
+	}
 }
 
 // checkCredentialExpiry emits credential.expiring at most once a day per
