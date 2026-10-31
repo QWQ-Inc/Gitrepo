@@ -108,3 +108,23 @@ Hub 自己实现了 LFS 服务端（`internal/lfs`）：
 - **已有内容**：Hub 已有 ref 时必须带 `force`；带 `force` 时先把这些 ref 备份到 `refs/backup/`，再执行带 `--prune` 的 fetch。
 - **拉取内容**：拉取所有分支和标签；如果历史里有 LFS 指针，还会执行 `git lfs fetch --all`。HEAD 跟随来源的 `ls-remote --symref HEAD`。
 - **记录来源**：来源镜像标记为已接管，`pushed_state` 设为导入时的 ref，所以下一次同步时它就是"已同步"状态，其他镜像则照常推送。
+
+## 第二次独立评审（LFS、Gitee）后的修正
+
+- **高危：提交的 `.lfsconfig` 可以把镜像凭据引向任意主机。** git-lfs 会读取 bare 仓库 HEAD 中 `.lfsconfig` 的 `lfs.url` 和 `lfs.pushurl`，而 askpass 对任何主机都会给出凭据。修复分两层，每层单独都能挡住攻击：
+  - git-lfs 改在一个临时 bare 仓库里运行（通过 alternates 借用对象，HEAD 未出生，`lfs.storage` 指向 Hub 的 LFS 目录），根本读不到仓库内容。`lfs.url` 和 `lfs.pushurl` 也被固定为镜像自己的地址。
+  - askpass ticket 绑定到远端的 origin（scheme://host:port），对其他主机的凭据提示一律拒绝。这对普通 git 操作同样生效。
+- **LFS 对象缺失时不再推送指针。** 每次同步都会扫描新引入的指针，对象不在 Hub 上就让该镜像的同步失败。pre-receive 改为只把分支和标签视为"已存在"（`--not --branches --tags`），所以只能从 `refs/backup/*` 到达的内容也会被检查。
+- **LFS 服务端：**
+  - batch 请求最多 1000 个对象，请求体最多 1 MiB。
+  - 只有在已有对象大小正确时才跳过上传，否则替换；写入时先 fsync 临时文件，rename 后再 fsync 目录。
+  - 传输链接使用配置的 `public_url`。
+  - 令牌绑定"仓库名 + 数据库 ID"，仓库删除重建后旧令牌失效。
+  - 指针解析与 git-lfs 一致：支持 CRLF 和旧版本行，键必须按序。
+  - 未认证时不暴露私有仓库是否存在。
+  - 锁接口接受 `git-lfs-authenticate` 签发的仓库级令牌。
+- **扫描改为流式：** 指针扫描（同步端和 pre-receive）通过管道流式处理，不再把整段输出读进内存。
+- **Gitee：**
+  - URL 解析错误和 API 回显中的 token 会被抹掉；`base_url`、`api_url` 在保存时校验。
+  - 更新凭据时没带用户名就保留原值。
+  - 轮换 token 时重新查询登录名。

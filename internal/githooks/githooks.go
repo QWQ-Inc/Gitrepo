@@ -165,27 +165,41 @@ func missingLFSObjects(blobs []blobRef) ([]string, error) {
 			return nil, err
 		}
 	}
-	var in strings.Builder
 	paths := map[string]string{}
 	for _, b := range blobs {
-		in.WriteString(b.id + "\n")
 		paths[b.id] = b.path
 	}
 	cmd := exec.Command(gitBin(), "cat-file", "--batch")
-	cmd.Stdin = strings.NewReader(in.String())
-	out, err := cmd.Output()
+	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return nil, fmt.Errorf("cat-file --batch: %w", err)
+		return nil, err
 	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	go func() {
+		w := bufio.NewWriter(stdin)
+		for _, b := range blobs {
+			w.WriteString(b.id + "\n")
+		}
+		w.Flush()
+		stdin.Close()
+	}()
 	var missing []string
-	r := bufio.NewReader(bytes.NewReader(out))
+	r := bufio.NewReaderSize(stdout, 64<<10)
+	var readErr error
 	for {
 		header, err := r.ReadString('\n')
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return nil, err
+			readErr = err
+			break
 		}
 		f := strings.Fields(header)
 		if len(f) != 3 || f[1] != "blob" {
@@ -194,11 +208,20 @@ func missingLFSObjects(blobs []blobRef) ([]string, error) {
 		size, _ := strconv.Atoi(f[2])
 		content := make([]byte, size+1) // trailing newline
 		if _, err := io.ReadFull(r, content); err != nil {
-			return nil, err
+			readErr = err
+			break
 		}
 		if p, ok := lfs.ParsePointer(content[:size]); ok && !lfs.Has(gitDir, p.OID, p.Size) {
 			missing = append(missing, fmt.Sprintf("%s: LFS object %.12s (%s) is missing on the hub", paths[f[0]], p.OID, humanSize(p.Size)))
 		}
+	}
+	if readErr != nil {
+		cmd.Process.Kill()
+		cmd.Wait()
+		return nil, readErr
+	}
+	if err := cmd.Wait(); err != nil {
+		return nil, fmt.Errorf("cat-file --batch: %w", err)
 	}
 	return missing, nil
 }
@@ -209,7 +232,10 @@ func missingLFSObjects(blobs []blobRef) ([]string, error) {
 func scanNewBlobs(tips []string, limit int64) (blobScan, error) {
 	var scan blobScan
 	revArgs := append([]string{"rev-list", "--objects"}, tips...)
-	revArgs = append(revArgs, "--not", "--all")
+	// Only published branches and tags count as already present: objects
+	// reachable solely from refs/backup/* (e.g. fetched from a mirror
+	// before an overwrite) were never checked and must be checked now.
+	revArgs = append(revArgs, "--not", "--branches", "--tags")
 	rev := exec.Command(gitBin(), revArgs...)
 	check := exec.Command(gitBin(), "cat-file", "--batch-check=%(objecttype) %(objectsize) %(objectname) %(rest)")
 	pipe, err := rev.StdoutPipe()

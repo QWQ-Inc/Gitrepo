@@ -328,6 +328,14 @@ func TestPlatformAdapters(t *testing.T) {
 	if gitee.CredUsername != "gitee-user" {
 		t.Fatalf("gitee login was not filled in: %+v", gitee)
 	}
+	// Updating other credential fields without a username keeps the login.
+	e.do(http.MethodPatch, "/api/targets/gitee", map[string]any{"credential": map[string]any{"kind": "token"}}, &gitee)
+	if gitee.CredUsername != "gitee-user" {
+		t.Fatalf("gitee login was wiped: %+v", gitee)
+	}
+	if err := e.api.Do(t.Context(), http.MethodPatch, "/api/targets/gitee", map[string]any{"base_url": "https://gitee.example.com:8443x"}, nil); err == nil {
+		t.Fatal("an invalid base_url was accepted")
+	}
 
 	t.Run("credential check reports the platform identity", func(t *testing.T) {
 		var res struct {

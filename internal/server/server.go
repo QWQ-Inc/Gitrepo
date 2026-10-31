@@ -159,7 +159,7 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*Server, error) {
 		HookToken:       s.hookToken,
 		MaxFileSize:     int64(cfg.Policy.MaxFileSize),
 		PostReceiveWait: cfg.Sync.PostReceiveWait.D(),
-		LFS:             &lfs.Server{Signer: lfsSigner, MaxObjectSize: int64(cfg.Policy.MaxLFSObjectSize), Log: log},
+		LFS:             &lfs.Server{Signer: lfsSigner, MaxObjectSize: int64(cfg.Policy.MaxLFSObjectSize), PublicURL: cfg.PublicURL, Log: log},
 	}
 	if cfg.SSH.Listen != "" {
 		s.ssh = &sshserve.Server{

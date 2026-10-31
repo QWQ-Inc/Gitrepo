@@ -278,16 +278,19 @@ func (m *Manager) syncRemote(parent context.Context, repo *store.Repo, rem *stor
 
 	// 6. Upload the LFS objects the new refs reference before the refs
 	// themselves, so the mirror never holds pointers without content.
-	if len(ops) > 0 && lfs.HasObjects(repoPath) {
+	// Every sync scans for pointers (not only when the hub stores LFS
+	// objects), and a pointer whose object the hub lacks stops the run:
+	// pushing it would leave the mirror with a file it cannot serve.
+	if len(ops) > 0 {
 		n, missing, err := m.syncLFS(ctx, repoPath, url, cred, ops, remoteRefs)
 		if err != nil {
 			return fail("upload LFS objects: %v", err)
 		}
+		if missing > 0 {
+			return fail("%d LFS object(s) referenced by the new refs are not stored on the hub; upload them with `git lfs push --all <hub url>` and sync again", missing)
+		}
 		if n > 0 {
 			detail = append(detail, fmt.Sprintf("uploaded %d LFS object(s)", n))
-		}
-		if missing > 0 {
-			out.Warnings = append(out.Warnings, fmt.Sprintf("%d referenced LFS object(s) are not stored on the hub and were not uploaded", missing))
 		}
 	}
 
@@ -471,6 +474,12 @@ func (m *Manager) syncLFS(ctx context.Context, repoPath, url string, cred *gitex
 		} else {
 			missing++
 		}
+	}
+	if missing > 0 || len(oids) == 0 {
+		return 0, missing, nil
+	}
+	if !m.git.LFSAvailable(ctx) {
+		return 0, 0, errors.New("git-lfs is not installed on the Gitrepo server")
 	}
 	sort.Strings(oids)
 	if err := m.git.LFSPush(ctx, repoPath, url, cred, oids); err != nil {

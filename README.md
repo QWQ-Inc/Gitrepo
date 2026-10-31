@@ -211,7 +211,9 @@ remote: gitrepo:   [failed]   github:acme/app  adoption required: the mirror rep
 
 客户端照常使用：`git lfs track`、`git push`。Hub 本身就是 LFS 服务器（`<仓库地址>/info/lfs`），使用相同的令牌和权限。读权限可以下载，写权限可以上传，公开仓库允许匿名下载。
 
-同步时，Gitrepo 先把本次新引用的 LFS 对象用 `git lfs push` 上传到各镜像，再推送 ref，所以镜像上不会出现缺内容的指针。只上传本次同步新增的对象，不会每次重传整个历史。
+同步时，Gitrepo 先把本次新引用的 LFS 对象用 `git lfs push` 上传到各镜像，再推送 ref。只上传本次同步新增的对象，不会每次重传整个历史。如果某个指针对应的对象不在 Hub 上，这个镜像的同步会失败并提示原因，而不是把缺内容的指针推出去。
+
+仓库里提交的 `.lfsconfig` 不会影响 Gitrepo 向镜像同步时使用的 LFS 地址：git-lfs 在一个看不到仓库内容的临时仓库里运行。镜像凭据也只会发给该镜像自己的地址。
 
 - 镜像平台要开启 LFS：GitHub 默认开启，但有存储配额；GitLab 默认开启；Gitea/Forgejo 需要服务端启用 LFS。通过 SSH 访问的通用镜像，需要服务端支持 `git-lfs-authenticate`。
 - 单个对象大小可以用 `policy.max_lfs_object_size` 限制。对象存放在 Hub 仓库目录下的 `lfs/objects/`，备份数据目录时会一并备份。

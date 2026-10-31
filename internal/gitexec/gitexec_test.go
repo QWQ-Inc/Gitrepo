@@ -42,15 +42,29 @@ func TestParsePorcelain(t *testing.T) {
 
 func TestTickets(t *testing.T) {
 	tk := NewTickets()
-	id, release := tk.Issue(Cred{Username: "u", Secret: "s"})
-	if a, ok := tk.Answer(id, "Username for 'https://example.com': "); !ok || a != "u" {
+	id, release := tk.Issue(Cred{Username: "u", Secret: "s"}, Origin("https://git.example.com/acme/demo.git"))
+	if a, ok := tk.Answer(id, "Username for 'https://git.example.com': "); !ok || a != "u" {
 		t.Fatalf("username answer %q %v", a, ok)
 	}
-	if a, ok := tk.Answer(id, "Password for 'https://u@example.com': "); !ok || a != "s" {
+	if a, ok := tk.Answer(id, "Password for 'https://u@git.example.com': "); !ok || a != "s" {
 		t.Fatalf("password answer %q %v", a, ok)
 	}
+	if a, ok := tk.Answer(id, `Password for "https://u@git.example.com:443"`); !ok || a != "s" {
+		t.Fatalf("git-lfs style prompt with default port: %q %v", a, ok)
+	}
+	for _, other := range []string{
+		"Password for 'https://evil.example.com': ",
+		"Password for 'http://git.example.com': ",
+		"Password for 'https://git.example.com:8443': ",
+		`Password for "https://u@git.example.com.evil.net"`,
+		"Password: ",
+	} {
+		if _, ok := tk.Answer(id, other); ok {
+			t.Errorf("credential released for %q", other)
+		}
+	}
 	release()
-	if _, ok := tk.Answer(id, "Password: "); ok {
+	if _, ok := tk.Answer(id, "Password for 'https://git.example.com': "); ok {
 		t.Fatal("released ticket still answers")
 	}
 }

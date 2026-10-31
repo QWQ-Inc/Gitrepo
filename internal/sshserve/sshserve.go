@@ -365,7 +365,7 @@ func (s *Server) exec(ctx context.Context, p *auth.Principal, ch ssh.Channel, cm
 		op := args[2]
 		resp := map[string]any{
 			"href":       strings.TrimRight(s.PublicURL, "/") + "/" + repo.Slug + ".git/info/lfs",
-			"header":     map[string]string{"Authorization": "Bearer " + s.Signer.Sign(repo.Slug, lfs.AnyObject, op, time.Hour)},
+			"header":     map[string]string{"Authorization": "Bearer " + s.Signer.Sign(lfs.RepoKey(repo.Slug, repo.ID), lfs.AnyObject, op, time.Hour)},
 			"expires_in": 3600,
 		}
 		json.NewEncoder(ch).Encode(resp)

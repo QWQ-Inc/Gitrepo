@@ -6,8 +6,6 @@
 package lfs
 
 import (
-	"bufio"
-	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -36,31 +34,58 @@ type Pointer struct {
 	Size int64
 }
 
-// ParsePointer parses an LFS pointer file. It returns false for any other
-// content.
+// pointerVersions are the version lines git-lfs accepts, including the
+// pre-1.0 spellings.
+var pointerVersions = []string{
+	"https://git-lfs.github.com/spec/v1",
+	"https://hawser.github.com/spec/v1",
+	"http://git-media.io/v/2",
+}
+
+// ParsePointer parses an LFS pointer file with the same rules as git-lfs:
+// "version" first, the remaining keys in sorted order, oid and size
+// required, LF or CRLF line endings. It returns false for any other content.
 func ParsePointer(b []byte) (Pointer, bool) {
-	if len(b) > MaxPointerSize || !bytes.HasPrefix(b, []byte("version https://git-lfs.github.com/spec/v1\n")) {
+	if len(b) > MaxPointerSize {
+		return Pointer{}, false
+	}
+	text := strings.ReplaceAll(string(b), "\r\n", "\n")
+	if !strings.HasSuffix(text, "\n") {
+		return Pointer{}, false
+	}
+	lines := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
+	version, ok := strings.CutPrefix(lines[0], "version ")
+	if !ok || !contains(pointerVersions, version) {
 		return Pointer{}, false
 	}
 	var p Pointer
-	sc := bufio.NewScanner(bytes.NewReader(b))
-	for sc.Scan() {
-		k, v, ok := strings.Cut(sc.Text(), " ")
-		if !ok {
-			continue
+	var haveOID, haveSize bool
+	prev := ""
+	for _, line := range lines[1:] {
+		k, v, ok := strings.Cut(line, " ")
+		if !ok || k == "" || k <= prev {
+			return Pointer{}, false // malformed or out of order
 		}
-		switch k {
-		case "oid":
-			p.OID = strings.TrimPrefix(v, "sha256:")
-		case "size":
+		prev = k
+		switch {
+		case k == "oid":
+			hexOID, ok := strings.CutPrefix(v, "sha256:")
+			if !ok || !ValidOID(hexOID) {
+				return Pointer{}, false
+			}
+			p.OID, haveOID = hexOID, true
+		case k == "size":
 			n, err := strconv.ParseInt(v, 10, 64)
 			if err != nil || n < 0 {
 				return Pointer{}, false
 			}
-			p.Size = n
+			p.Size, haveSize = n, true
+		case strings.HasPrefix(k, "ext-"):
+		default:
+			return Pointer{}, false
 		}
 	}
-	if !ValidOID(p.OID) {
+	if !haveOID || !haveSize {
 		return Pointer{}, false
 	}
 	return p, true
@@ -102,6 +127,11 @@ func NewSigner(masterKey []byte) *Signer {
 	m.Write([]byte("gitrepo lfs action token v1"))
 	return &Signer{key: m.Sum(nil), now: time.Now}
 }
+
+// RepoKey identifies a repository in tokens: the slug plus its database ID,
+// so a token does not survive deleting and re-creating a repository under
+// the same name.
+func RepoKey(slug string, id int64) string { return slug + "#" + strconv.FormatInt(id, 10) }
 
 type claims struct {
 	Repo string `json:"r"`

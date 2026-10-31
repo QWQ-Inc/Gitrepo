@@ -73,3 +73,15 @@ func TestErrorsDoNotLeakTokens(t *testing.T) {
 		t.Fatalf("error leaks the token: %v", err)
 	}
 }
+
+func TestGiteeErrorsDoNotLeakTheToken(t *testing.T) {
+	g := &Gitee{}
+	tgt := &store.Target{BaseURL: "https://gitee.example.com:8443x", Namespace: "acme", CredKind: "token"}
+	_, err := g.Check(context.Background(), tgt, "SECRET-GITEE-TOKEN")
+	if err == nil || strings.Contains(err.Error(), "SECRET-GITEE-TOKEN") {
+		t.Fatalf("error leaks the token: %v", err)
+	}
+	if got := redactURL("https://u:p@host:99x/a?access_token=X"); strings.Contains(got, "access_token") || strings.Contains(got, "u:p") {
+		t.Fatalf("redactURL kept secrets: %s", got)
+	}
+}

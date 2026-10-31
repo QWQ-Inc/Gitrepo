@@ -133,20 +133,39 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveLFS hands Git LFS requests to the LFS server with an authorizer that
-// applies the same token scopes and visibility rules as git itself.
+// applies the same token scopes and visibility rules as git itself. Like the
+// git endpoints, it answers 401 rather than 404 to anonymous callers so the
+// existence of private repositories is not revealed.
 func (s *Server) serveLFS(w http.ResponseWriter, r *http.Request, slug, rest string) {
-	repo, err := s.Store.GetRepoBySlug(r.Context(), slug)
-	if err != nil {
+	lfsErr := func(status int, msg string) {
 		w.Header().Set("Content-Type", "application/vnd.git-lfs+json")
-		w.WriteHeader(http.StatusNotFound)
-		io.WriteString(w, `{"message":"gitrepo: repository not found"}`)
+		if status == http.StatusUnauthorized {
+			w.Header().Set("LFS-Authenticate", `Basic realm="gitrepo"`)
+			w.Header().Set("WWW-Authenticate", `Basic realm="gitrepo"`)
+		}
+		w.WriteHeader(status)
+		fmt.Fprintf(w, `{"message":%q}`, "gitrepo: "+msg)
+	}
+	p, perr := s.Auth.FromRequest(r)
+	if perr != nil && !strings.HasPrefix(auth.TokenFromRequest(r), "lfs1.") {
+		lfsErr(http.StatusUnauthorized, "invalid credentials")
+		return
+	}
+	repo, err := s.Store.GetRepoBySlug(r.Context(), slug)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		if p == nil {
+			lfsErr(http.StatusUnauthorized, "credentials required")
+		} else {
+			lfsErr(http.StatusNotFound, "repository not found")
+		}
+		return
+	case err != nil:
+		s.Log.Error("load repository", "repo", slug, "err", err)
+		lfsErr(http.StatusInternalServerError, "internal error")
 		return
 	}
 	authz := func(r *http.Request, slug string, write bool) error {
-		p, err := s.Auth.FromRequest(r)
-		if err != nil {
-			return lfs.ErrUnauthorized
-		}
 		if p == nil {
 			if !write && repo.Visibility == "public" {
 				return nil
@@ -158,13 +177,13 @@ func (s *Server) serveLFS(w http.ResponseWriter, r *http.Request, slug, rest str
 			scope = auth.ScopeWrite
 		}
 		if !p.Can(scope, slug) {
-			return fmt.Errorf("%w: token has no %s access to %s", lfs.ErrForbidden, scope, slug)
+			return fmt.Errorf("%w: %s has no %s access to %s", lfs.ErrForbidden, p.Name, scope, slug)
 		}
 		return nil
 	}
 	srv := *s.LFS
 	srv.Auth = authz
-	srv.Serve(w, r, lfs.Repo{Slug: slug, Dir: s.Registry.Path(slug)}, rest)
+	srv.Serve(w, r, lfs.Repo{Slug: slug, ID: repo.ID, Dir: s.Registry.Path(slug)}, rest)
 }
 
 // Access errors.

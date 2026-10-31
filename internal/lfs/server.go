@@ -29,8 +29,15 @@ const actionTTL = time.Hour
 // Repo identifies the repository a request is for.
 type Repo struct {
 	Slug string
+	ID   int64
 	Dir  string
 }
+
+// Key binds tokens to this repository.
+func (r Repo) Key() string { return RepoKey(r.Slug, r.ID) }
+
+// maxBatchObjects bounds one batch request (git-lfs sends 100).
+const maxBatchObjects = 1000
 
 // Server serves <repo>.git/info/lfs/*.
 type Server struct {
@@ -40,7 +47,10 @@ type Server struct {
 	Auth func(r *http.Request, slug string, write bool) error
 	// MaxObjectSize rejects larger uploads (0 = unlimited).
 	MaxObjectSize int64
-	Log           *slog.Logger
+	// PublicURL is the externally visible base URL for transfer links. When
+	// empty, links are derived from the request.
+	PublicURL string
+	Log       *slog.Logger
 }
 
 type batchObject struct {
@@ -99,9 +109,13 @@ func (s *Server) authErr(w http.ResponseWriter, err error) {
 	}
 }
 
-// baseURL reconstructs the externally visible URL of the repository from
-// the request, so hrefs work behind a reverse proxy that keeps the Host.
-func baseURL(r *http.Request, slug string) string {
+// baseURL is the repository's LFS endpoint for transfer links: from the
+// configured public URL when set (so links never downgrade to http behind a
+// TLS proxy), otherwise reconstructed from the request.
+func (s *Server) baseURL(r *http.Request, slug string) string {
+	if s.PublicURL != "" {
+		return strings.TrimRight(s.PublicURL, "/") + "/" + slug + ".git/info/lfs"
+	}
 	scheme := "http"
 	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
 		scheme = "https"
@@ -138,14 +152,12 @@ func (s *Server) Serve(w http.ResponseWriter, r *http.Request, repo Repo, rest s
 	case rest == "locks/verify" && r.Method == http.MethodPost:
 		// Locking is not supported; report no locks so pushes proceed
 		// without the client warning on every push.
-		if err := s.Auth(r, repo.Slug, true); err != nil {
-			s.authErr(w, err)
+		if !s.authorizeRepo(w, r, repo, "upload") {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ours": []any{}, "theirs": []any{}})
 	case rest == "locks" && r.Method == http.MethodGet:
-		if err := s.Auth(r, repo.Slug, false); err != nil {
-			s.authErr(w, err)
+		if !s.authorizeRepo(w, r, repo, "download") {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"locks": []any{}})
@@ -158,8 +170,12 @@ func (s *Server) Serve(w http.ResponseWriter, r *http.Request, repo Repo, rest s
 
 func (s *Server) batch(w http.ResponseWriter, r *http.Request, repo Repo) {
 	var req batchRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<20)).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
 		writeErr(w, http.StatusUnprocessableEntity, "invalid batch request")
+		return
+	}
+	if len(req.Objects) > maxBatchObjects {
+		writeErr(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("at most %d objects per batch request", maxBatchObjects))
 		return
 	}
 	if req.Operation != "upload" && req.Operation != "download" {
@@ -176,7 +192,7 @@ func (s *Server) batch(w http.ResponseWriter, r *http.Request, repo Repo) {
 	}
 	if tok := bearer(r); tok != "" {
 		// Repository-wide token from `git-lfs-authenticate` over SSH.
-		if err := s.Signer.Verify(tok, repo.Slug, AnyObject, req.Operation); err != nil {
+		if err := s.Signer.Verify(tok, repo.Key(), AnyObject, req.Operation); err != nil {
 			writeErr(w, http.StatusUnauthorized, err.Error())
 			return
 		}
@@ -184,7 +200,7 @@ func (s *Server) batch(w http.ResponseWriter, r *http.Request, repo Repo) {
 		s.authErr(w, err)
 		return
 	}
-	base := baseURL(r, repo.Slug)
+	base := s.baseURL(r, repo.Slug)
 	out := make([]batchResponseObject, 0, len(req.Objects))
 	for _, o := range req.Objects {
 		ro := batchResponseObject{OID: o.OID, Size: o.Size}
@@ -197,7 +213,7 @@ func (s *Server) batch(w http.ResponseWriter, r *http.Request, repo Repo) {
 				break
 			}
 			ro.Authenticated = true
-			ro.Actions = map[string]*action{"download": s.action(base+"/objects/"+o.OID, repo.Slug, o.OID, "download")}
+			ro.Actions = map[string]*action{"download": s.action(base+"/objects/"+o.OID, repo.Key(), o.OID, "download")}
 		default: // upload
 			if s.MaxObjectSize > 0 && o.Size > s.MaxObjectSize {
 				ro.Error = &objError{Code: http.StatusUnprocessableEntity, Message: fmt.Sprintf("object is larger than the %d-byte limit", s.MaxObjectSize)}
@@ -208,8 +224,8 @@ func (s *Server) batch(w http.ResponseWriter, r *http.Request, repo Repo) {
 			}
 			ro.Authenticated = true
 			ro.Actions = map[string]*action{
-				"upload": s.action(base+"/objects/"+o.OID, repo.Slug, o.OID, "upload"),
-				"verify": s.action(base+"/verify", repo.Slug, o.OID, "upload"),
+				"upload": s.action(base+"/objects/"+o.OID, repo.Key(), o.OID, "upload"),
+				"verify": s.action(base+"/verify", repo.Key(), o.OID, "upload"),
 			}
 		}
 		out = append(out, ro)
@@ -217,19 +233,36 @@ func (s *Server) batch(w http.ResponseWriter, r *http.Request, repo Repo) {
 	writeJSON(w, http.StatusOK, map[string]any{"transfer": "basic", "objects": out, "hash_algo": "sha256"})
 }
 
-func (s *Server) action(href, slug, oid, op string) *action {
+func (s *Server) action(href, repoKey, oid, op string) *action {
 	return &action{
 		Href:      href,
-		Header:    map[string]string{"Authorization": "Bearer " + s.Signer.Sign(slug, oid, op, actionTTL)},
+		Header:    map[string]string{"Authorization": "Bearer " + s.Signer.Sign(repoKey, oid, op, actionTTL)},
 		ExpiresIn: int(actionTTL / time.Second),
 	}
+}
+
+// authorizeRepo accepts a repository-wide token (git-lfs-authenticate) or
+// user credentials for a repository-level request.
+func (s *Server) authorizeRepo(w http.ResponseWriter, r *http.Request, repo Repo, op string) bool {
+	if tok := bearer(r); tok != "" {
+		if err := s.Signer.Verify(tok, repo.Key(), AnyObject, op); err != nil {
+			writeErr(w, http.StatusUnauthorized, err.Error())
+			return false
+		}
+		return true
+	}
+	if err := s.Auth(r, repo.Slug, op == "upload"); err != nil {
+		s.authErr(w, err)
+		return false
+	}
+	return true
 }
 
 // authorizeObject accepts an action token for this object or user
 // credentials with the needed scope.
 func (s *Server) authorizeObject(w http.ResponseWriter, r *http.Request, repo Repo, oid, op string) bool {
 	if tok := bearer(r); tok != "" {
-		if err := s.Signer.Verify(tok, repo.Slug, oid, op); err != nil {
+		if err := s.Signer.Verify(tok, repo.Key(), oid, op); err != nil {
 			writeErr(w, http.StatusUnauthorized, err.Error())
 			return false
 		}
@@ -270,8 +303,10 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request, repo Repo, oid s
 		return
 	}
 	final := ObjectPath(repo.Dir, oid)
-	if _, err := os.Stat(final); err == nil {
-		io.Copy(io.Discard, r.Body)
+	// Skip only an intact copy; a wrong-sized file (e.g. left by a crash) is
+	// replaced through the normal temp-and-rename path. The body is not
+	// read: the server closes the connection instead of draining it.
+	if fi, err := os.Stat(final); err == nil && r.ContentLength >= 0 && fi.Size() == r.ContentLength {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -292,6 +327,9 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request, repo Repo, oid s
 		body = io.LimitReader(r.Body, s.MaxObjectSize+1)
 	}
 	n, err := io.Copy(io.MultiWriter(tmp, h), body)
+	if err == nil {
+		err = tmp.Sync() // durable before it becomes visible under its oid
+	}
 	if cerr := tmp.Close(); err == nil {
 		err = cerr
 	}
@@ -318,6 +356,10 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request, repo Repo, oid s
 	if err := os.Rename(tmp.Name(), final); err != nil {
 		writeErr(w, http.StatusInternalServerError, "cannot store object")
 		return
+	}
+	if d, err := os.Open(filepath.Dir(final)); err == nil {
+		d.Sync()
+		d.Close()
 	}
 	if s.Log != nil {
 		s.Log.Debug("lfs object stored", "repo", repo.Slug, "oid", oid, "size", n)

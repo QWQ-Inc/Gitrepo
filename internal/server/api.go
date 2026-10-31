@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -217,9 +218,14 @@ func (s *Server) applyTargetIn(t *store.Target, in *targetIn) error {
 		default:
 			return badRequest("credential kind must be none, token, basic or ssh")
 		}
+		// An omitted username keeps the stored one (unless the kind changes).
+		if c.Username != "" || kind != t.CredKind {
+			t.CredUsername = c.Username
+		}
 		t.CredKind = kind
-		t.CredUsername = c.Username
-		t.SSHKnownHosts = c.SSHKnownHosts
+		if c.SSHKnownHosts != "" || kind != "ssh" {
+			t.SSHKnownHosts = c.SSHKnownHosts
+		}
 		if kind == "none" {
 			t.CredSecret = nil
 		} else if c.Secret != "" {
@@ -236,6 +242,18 @@ func (s *Server) applyTargetIn(t *store.Target, in *targetIn) error {
 	case "", "private", "public", "internal":
 	default:
 		return badRequest("visibility must be private, public or internal")
+	}
+	for field, v := range map[string]string{"base_url": t.BaseURL, "api_url": t.APIURL} {
+		if v == "" {
+			continue
+		}
+		u, err := url.Parse(v)
+		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.RawQuery != "" || u.User != nil {
+			return badRequest("%s must be an http(s) URL without credentials or query, e.g. https://git.example.com", field)
+		}
+		if _, err := strconv.Atoi(u.Port()); u.Port() != "" && err != nil {
+			return badRequest("%s has an invalid port", field)
+		}
 	}
 	p, err := provider.Get(t.Provider)
 	if err != nil {

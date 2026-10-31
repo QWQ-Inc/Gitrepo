@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	neturl "net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -114,7 +115,9 @@ func (g *Git) RunInput(ctx context.Context, dir string, stdin []byte, args ...st
 // run executes git. A non-empty dir must be a bare repository; it is passed
 // explicitly with --git-dir so a damaged repository can never make git
 // discover and operate on an enclosing one.
-func (g *Git) run(ctx context.Context, dir string, stdin []byte, extraEnv []string, args ...string) ([]byte, []byte, error) {
+// command builds a git command with the standard configuration overrides
+// and environment.
+func (g *Git) command(ctx context.Context, dir string, extraEnv []string, args ...string) *exec.Cmd {
 	full := append([]string{}, baseConfig...)
 	if dir != "" {
 		full = append(full, "--git-dir="+dir)
@@ -124,6 +127,11 @@ func (g *Git) run(ctx context.Context, dir string, stdin []byte, extraEnv []stri
 	cmd.Dir = dir
 	cmd.Env = append(append(os.Environ(), g.Env...), extraEnv...)
 	cmd.WaitDelay = 5 * time.Second
+	return cmd
+}
+
+func (g *Git) run(ctx context.Context, dir string, stdin []byte, extraEnv []string, args ...string) ([]byte, []byte, error) {
+	cmd := g.command(ctx, dir, extraEnv, args...)
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
@@ -147,11 +155,13 @@ func (g *Git) run(ctx context.Context, dir string, stdin []byte, extraEnv []stri
 }
 
 // runRemote executes a git command that talks to a remote, injecting cred.
-func (g *Git) runRemote(ctx context.Context, dir string, cred *Cred, args ...string) ([]byte, []byte, error) {
-	return g.runRemoteInput(ctx, dir, cred, nil, args...)
+// remoteURL is the URL the command is meant to talk to; credentials are
+// only released for prompts naming that URL's origin.
+func (g *Git) runRemote(ctx context.Context, dir string, cred *Cred, remoteURL string, args ...string) ([]byte, []byte, error) {
+	return g.runRemoteInput(ctx, dir, cred, remoteURL, nil, args...)
 }
 
-func (g *Git) runRemoteInput(ctx context.Context, dir string, cred *Cred, stdin []byte, args ...string) ([]byte, []byte, error) {
+func (g *Git) runRemoteInput(ctx context.Context, dir string, cred *Cred, remoteURL string, stdin []byte, args ...string) ([]byte, []byte, error) {
 	env := []string{"GIT_TERMINAL_PROMPT=0", "SSH_ASKPASS=", "GIT_SSH_VARIANT=ssh"}
 	var cleanup []func()
 	defer func() {
@@ -165,7 +175,7 @@ func (g *Git) runRemoteInput(ctx context.Context, dir string, cred *Cred, stdin 
 			if g.Tickets == nil || g.AskpassPath == "" {
 				return nil, nil, errors.New("askpass is not configured")
 			}
-			ticket, release := g.Tickets.Issue(*cred)
+			ticket, release := g.Tickets.Issue(*cred, Origin(remoteURL))
 			cleanup = append(cleanup, release)
 			env = append(env,
 				"GIT_ASKPASS="+g.AskpassPath,
@@ -351,7 +361,7 @@ func (g *Git) Version(ctx context.Context) (int, int, error) {
 
 // LsRemote returns the branches and tags advertised by url.
 func (g *Git) LsRemote(ctx context.Context, url string, cred *Cred) (map[string]string, error) {
-	out, _, err := g.runRemote(ctx, "", cred, "ls-remote", "--refs", url)
+	out, _, err := g.runRemote(ctx, "", cred, url, "ls-remote", "--refs", url)
 	if err != nil {
 		return nil, err
 	}
@@ -373,14 +383,18 @@ func (g *Git) LsRemote(ctx context.Context, url string, cred *Cred) (map[string]
 // Fetch fetches refspecs from url into repo.
 func (g *Git) Fetch(ctx context.Context, repo, url string, cred *Cred, refspecs ...string) error {
 	args := append([]string{"fetch", "--quiet", "--no-tags", "--no-write-fetch-head", url}, refspecs...)
-	_, _, err := g.runRemote(ctx, repo, cred, args...)
+	_, _, err := g.runRemote(ctx, repo, cred, url, args...)
 	return err
 }
 
 // LFSObjects returns the Git LFS objects (oid → size) referenced by blobs
 // reachable from tips but not from exclude. Exclude values the repository
-// does not have are ignored.
+// does not have are ignored. Everything is streamed: only candidate pointer
+// blob ids (≤ 1 KiB blobs) are held in memory.
 func (g *Git) LFSObjects(ctx context.Context, repo string, tips, exclude []string) (map[string]int64, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	rev := g.command(ctx, repo, nil, "rev-list", "--objects", "--ignore-missing", "--stdin")
 	var in strings.Builder
 	for _, t := range tips {
 		in.WriteString(t + "\n")
@@ -388,62 +402,143 @@ func (g *Git) LFSObjects(ctx context.Context, repo string, tips, exclude []strin
 	for _, x := range exclude {
 		in.WriteString("^" + x + "\n")
 	}
-	list, err := g.RunInput(ctx, repo, []byte(in.String()), "rev-list", "--objects", "--ignore-missing", "--stdin")
-	if err != nil {
-		return nil, err
-	}
-	// %(rest) makes cat-file split "sha path" input lines at the first space;
+	rev.Stdin = strings.NewReader(in.String())
+	var revErr bytes.Buffer
+	rev.Stderr = &revErr
+	// %(rest) makes cat-file split "sha path" lines at the first space;
 	// without it the whole line would be taken as the object name.
-	sizes, err := g.RunInput(ctx, repo, list, "cat-file", "--batch-check=%(objecttype) %(objectsize) %(objectname) %(rest)")
+	check := g.command(ctx, repo, nil, "cat-file", "--batch-check=%(objecttype) %(objectsize) %(objectname) %(rest)")
+	pipe, err := rev.StdoutPipe()
 	if err != nil {
 		return nil, err
 	}
-	var candidates strings.Builder
-	n := 0
-	for _, line := range strings.Split(string(sizes), "\n") {
-		f := strings.SplitN(line, " ", 4)
-		if len(f) < 3 || f[0] != "blob" {
-			continue
+	check.Stdin = pipe
+	checkOut, err := check.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := rev.Start(); err != nil {
+		return nil, err
+	}
+	if err := check.Start(); err != nil {
+		cancel()
+		rev.Wait()
+		return nil, err
+	}
+	var candidates []string
+	br := bufio.NewReaderSize(checkOut, 64<<10)
+	var readErr error
+	for {
+		line, err := br.ReadString('\n')
+		if f := strings.SplitN(strings.TrimSuffix(line, "\n"), " ", 4); len(f) >= 3 && f[0] == "blob" {
+			if size, _ := strconv.Atoi(f[1]); size >= 100 && size <= lfs.MaxPointerSize {
+				candidates = append(candidates, f[2])
+			}
 		}
-		size, _ := strconv.Atoi(f[1])
-		if size >= 100 && size <= lfs.MaxPointerSize {
-			candidates.WriteString(f[2] + "\n")
-			n++
+		if err == io.EOF {
+			break
 		}
+		if err != nil {
+			readErr = err
+			break
+		}
+	}
+	if readErr != nil {
+		cancel()
+	}
+	revWaitErr := rev.Wait()
+	checkWaitErr := check.Wait()
+	switch {
+	case readErr != nil:
+		return nil, readErr
+	case revWaitErr != nil:
+		return nil, fmt.Errorf("rev-list: %v: %s", revWaitErr, strings.TrimSpace(revErr.String()))
+	case checkWaitErr != nil:
+		return nil, fmt.Errorf("cat-file: %v", checkWaitErr)
 	}
 	out := map[string]int64{}
-	if n == 0 {
+	if len(candidates) == 0 {
 		return out, nil
 	}
-	contents, err := g.RunInput(ctx, repo, []byte(candidates.String()), "cat-file", "--batch")
+	err = g.readBlobs(ctx, repo, candidates, func(_ string, body []byte) {
+		if p, ok := lfs.ParsePointer(body); ok {
+			out[p.OID] = p.Size
+		}
+	})
+	return out, err
+}
+
+// readBlobs streams the contents of the given blobs through fn.
+func (g *Git) readBlobs(ctx context.Context, repo string, ids []string, fn func(id string, body []byte)) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	cmd := g.command(ctx, repo, nil, "cat-file", "--batch")
+	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return nil, err
+		return err
 	}
-	r := bufio.NewReader(bytes.NewReader(contents))
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go func() {
+		w := bufio.NewWriter(stdin)
+		for _, id := range ids {
+			w.WriteString(id + "\n")
+		}
+		w.Flush()
+		stdin.Close()
+	}()
+	r := bufio.NewReaderSize(stdout, 64<<10)
+	var readErr error
 	for {
 		header, err := r.ReadString('\n')
+		if err == io.EOF {
+			break
+		}
 		if err != nil {
+			readErr = err
 			break
 		}
 		f := strings.Fields(header)
 		if len(f) != 3 || f[1] != "blob" {
-			continue
+			continue // "<id> missing" or a non-blob
 		}
 		size, _ := strconv.Atoi(f[2])
+		if size > lfs.MaxPointerSize {
+			if _, err := io.CopyN(io.Discard, r, int64(size)+1); err != nil {
+				readErr = err
+				break
+			}
+			continue
+		}
 		body := make([]byte, size+1)
 		if _, err := io.ReadFull(r, body); err != nil {
-			return nil, err
+			readErr = err
+			break
 		}
-		if p, ok := lfs.ParsePointer(body[:size]); ok {
-			out[p.OID] = p.Size
-		}
+		fn(f[0], body[:size])
 	}
-	return out, nil
+	if readErr != nil {
+		cancel()
+		cmd.Wait()
+		return readErr
+	}
+	return cmd.Wait()
+}
+
+// LFSAvailable reports whether git-lfs is installed.
+func (g *Git) LFSAvailable(ctx context.Context) bool {
+	_, err := g.Run(ctx, "", "lfs", "version")
+	return err == nil
 }
 
 // RemoteHead returns the branch a remote's HEAD points to ("" if unknown).
 func (g *Git) RemoteHead(ctx context.Context, url string, cred *Cred) string {
-	out, _, err := g.runRemote(ctx, "", cred, "ls-remote", "--symref", url, "HEAD")
+	out, _, err := g.runRemote(ctx, "", cred, url, "ls-remote", "--symref", url, "HEAD")
 	if err != nil {
 		return ""
 	}
@@ -464,29 +559,122 @@ func (g *Git) FetchAll(ctx context.Context, repo, url string, cred *Cred, prune 
 		args = append(args, "--prune")
 	}
 	args = append(args, url, "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*")
-	_, _, err := g.runRemote(ctx, repo, cred, args...)
+	_, _, err := g.runRemote(ctx, repo, cred, url, args...)
 	return err
 }
 
-// LFSFetchAll downloads every LFS object referenced by any ref from the
-// LFS endpoint of url into repo.
+// lfsScratch creates a throwaway bare repository for running git-lfs on
+// behalf of repo. It borrows repo's objects through alternates and has an
+// unborn HEAD, so git-lfs cannot read a .lfsconfig (git-lfs honours lfs.url
+// and lfs.pushurl from the HEAD commit of a bare repository): content
+// pushed to the hub must never decide where LFS traffic, and the mirror
+// credentials that come with it, are sent. withRefs copies repo's branches
+// and tags for commands that scan history.
+func (g *Git) lfsScratch(ctx context.Context, repo string, withRefs bool) (string, func(), error) {
+	abs, err := filepath.Abs(repo)
+	if err != nil {
+		return "", nil, err
+	}
+	dir, err := os.MkdirTemp(g.TmpDir, "lfs-*.git")
+	if err != nil {
+		return "", nil, err
+	}
+	cleanup := func() { os.RemoveAll(dir) }
+	if _, err := g.Run(ctx, "", "init", "--quiet", "--bare", dir); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "objects", "info", "alternates"), []byte(filepath.Join(abs, "objects")+"\n"), 0o644); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	if _, err := g.Run(ctx, dir, "symbolic-ref", "HEAD", "refs/gitrepo/unborn"); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	if withRefs {
+		refs, err := g.HubRefs(ctx, repo)
+		if err != nil {
+			cleanup()
+			return "", nil, err
+		}
+		lines := make([]string, 0, len(refs))
+		for ref, sha := range refs {
+			lines = append(lines, "update "+ref+" "+sha)
+		}
+		if err := g.UpdateRefs(ctx, dir, lines); err != nil {
+			cleanup()
+			return "", nil, err
+		}
+	}
+	return dir, cleanup, nil
+}
+
+// lfsArgs are the git-lfs settings for working on repo's LFS store with url
+// as the only remote. lfs.url / lfs.pushurl are pinned to the endpoint
+// git-lfs would derive for url, as a second line of defence.
+func lfsArgs(repo, url string) ([]string, error) {
+	abs, err := filepath.Abs(repo)
+	if err != nil {
+		return nil, err
+	}
+	args := []string{
+		"-c", "lfs.storage=" + filepath.Join(abs, "lfs"),
+		"-c", "remote.gitrepo-mirror.url=" + url,
+		"-c", "lfs.locksverify=false",
+	}
+	if ep := lfsEndpoint(url); ep != "" {
+		args = append(args, "-c", "lfs.url="+ep, "-c", "lfs.pushurl="+ep)
+	}
+	return args, nil
+}
+
+// lfsEndpoint derives the LFS API URL git-lfs uses for an HTTP(S) remote
+// ("" for other transports, which git-lfs resolves over SSH).
+func lfsEndpoint(remote string) string {
+	if !strings.HasPrefix(remote, "http://") && !strings.HasPrefix(remote, "https://") {
+		return ""
+	}
+	remote = strings.TrimRight(remote, "/")
+	if strings.HasSuffix(remote, ".git") {
+		return remote + "/info/lfs"
+	}
+	return remote + ".git/info/lfs"
+}
+
+// LFSFetchAll downloads every LFS object referenced by any branch or tag
+// of repo from the LFS endpoint of url into repo's LFS store.
 func (g *Git) LFSFetchAll(ctx context.Context, repo, url string, cred *Cred) error {
-	_, _, err := g.runRemote(ctx, repo, cred,
-		"-c", "remote.gitrepo-mirror.url="+url,
-		"lfs", "fetch", "--all", "gitrepo-mirror")
+	scratch, cleanup, err := g.lfsScratch(ctx, repo, true)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	args, err := lfsArgs(repo, url)
+	if err != nil {
+		return err
+	}
+	_, _, err = g.runRemote(ctx, scratch, cred, url, append(args, "lfs", "fetch", "--all", "gitrepo-mirror")...)
 	return err
 }
 
-// LFSPush uploads the given LFS objects from repo to the LFS endpoint of
-// url (derived by git-lfs the same way as for a normal remote).
+// LFSPush uploads the given LFS objects from repo's LFS store to the LFS
+// endpoint of url.
 func (g *Git) LFSPush(ctx context.Context, repo, url string, cred *Cred, oids []string) error {
 	if len(oids) == 0 {
 		return nil
 	}
-	_, _, err := g.runRemoteInput(ctx, repo, cred, []byte(strings.Join(oids, "\n")+"\n"),
-		"-c", "remote.gitrepo-mirror.url="+url,
-		"-c", "lfs.locksverify=false",
-		"lfs", "push", "--object-id", "gitrepo-mirror", "--stdin")
+	scratch, cleanup, err := g.lfsScratch(ctx, repo, false)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	args, err := lfsArgs(repo, url)
+	if err != nil {
+		return err
+	}
+	_, _, err = g.runRemoteInput(ctx, scratch, cred, url, []byte(strings.Join(oids, "\n")+"\n"),
+		append(args, "lfs", "push", "--object-id", "gitrepo-mirror", "--stdin")...)
 	return err
 }
 
@@ -554,7 +742,7 @@ func (g *Git) Push(ctx context.Context, repo, url string, cred *Cred, ops []Push
 			args = append(args, op.New+":"+op.Ref)
 		}
 	}
-	stdout, stderr, err := g.runRemote(ctx, repo, cred, args...)
+	stdout, stderr, err := g.runRemote(ctx, repo, cred, url, args...)
 	res := &PushResult{Refs: ParsePorcelain(string(stdout)), Stderr: string(stderr)}
 	if err != nil {
 		if strings.Contains(res.Stderr, "does not support --atomic") {
@@ -603,22 +791,31 @@ func ParsePorcelain(out string) map[string]RefStatus {
 // --------------------------------------------------------------- tickets
 
 // Tickets maps one-time askpass tickets to credentials held in memory.
+// Each ticket is bound to the origin (scheme://host[:port]) of the remote it
+// was issued for, and only answers prompts that name that origin, so a
+// redirect or a repository-supplied URL cannot obtain the credential.
 type Tickets struct {
 	mu sync.Mutex
-	m  map[string]Cred
+	m  map[string]ticket
 }
 
-func NewTickets() *Tickets { return &Tickets{m: map[string]Cred{}} }
+type ticket struct {
+	cred   Cred
+	origin string
+}
 
-// Issue registers cred and returns a ticket plus a release function.
-func (t *Tickets) Issue(c Cred) (string, func()) {
+func NewTickets() *Tickets { return &Tickets{m: map[string]ticket{}} }
+
+// Issue registers cred for origin and returns a ticket plus a release
+// function.
+func (t *Tickets) Issue(c Cred, origin string) (string, func()) {
 	b := make([]byte, 24)
 	if _, err := rand.Read(b); err != nil {
 		panic(err)
 	}
 	id := hex.EncodeToString(b)
 	t.mu.Lock()
-	t.m[id] = c
+	t.m[id] = ticket{cred: c, origin: origin}
 	t.mu.Unlock()
 	return id, func() {
 		t.mu.Lock()
@@ -627,16 +824,56 @@ func (t *Tickets) Issue(c Cred) (string, func()) {
 	}
 }
 
-// Answer returns the response for a git credential prompt.
-func (t *Tickets) Answer(ticket, prompt string) (string, bool) {
+// Answer returns the response for a git credential prompt such as
+// "Username for 'https://github.com': " (git) or
+// "Password for \"https://user@github.com\"" (git-lfs).
+func (t *Tickets) Answer(ticketID, prompt string) (string, bool) {
 	t.mu.Lock()
-	c, ok := t.m[ticket]
+	tk, ok := t.m[ticketID]
 	t.mu.Unlock()
-	if !ok {
+	if !ok || tk.origin == "" || promptOrigin(prompt) != tk.origin {
 		return "", false
 	}
 	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(prompt)), "username") {
-		return c.Username, true
+		return tk.cred.Username, true
 	}
-	return c.Secret, true
+	return tk.cred.Secret, true
+}
+
+// Origin normalises a URL to scheme://host[:port] (lowercase host, default
+// ports dropped). It returns "" for URLs without a host.
+func Origin(raw string) string {
+	u, err := neturl.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Host == "" || u.Scheme == "" {
+		return ""
+	}
+	scheme := strings.ToLower(u.Scheme)
+	host := strings.ToLower(u.Hostname())
+	port := u.Port()
+	if (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
+		port = ""
+	}
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	if port != "" {
+		return scheme + "://" + host + ":" + port
+	}
+	return scheme + "://" + host
+}
+
+// promptOrigin extracts the origin of the URL quoted in a credential prompt.
+func promptOrigin(prompt string) string {
+	for _, q := range []string{"'", "\""} {
+		i := strings.Index(prompt, q)
+		if i < 0 {
+			continue
+		}
+		j := strings.Index(prompt[i+1:], q)
+		if j < 0 {
+			continue
+		}
+		return Origin(prompt[i+1 : i+1+j])
+	}
+	return ""
 }

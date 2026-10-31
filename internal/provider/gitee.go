@@ -82,7 +82,26 @@ func (g *Gitee) call(ctx context.Context, method, u, secret string, in, out any)
 	if strings.Contains(u, "?") {
 		sep = "&"
 	}
-	return doJSON(ctx, method, u+sep+"access_token="+url.QueryEscape(secret), nil, in, out)
+	status, err := doJSON(ctx, method, u+sep+"access_token="+url.QueryEscape(secret), nil, in, out)
+	return status, scrub(err, secret)
+}
+
+// scrub removes a secret from an error (and from an echoed API body)
+// while keeping *APIError intact for status checks.
+func scrub(err error, secret string) error {
+	if err == nil || secret == "" {
+		return err
+	}
+	var ae *APIError
+	if errors.As(err, &ae) {
+		ae.Body = strings.ReplaceAll(ae.Body, secret, "***")
+		ae.URL = strings.ReplaceAll(ae.URL, secret, "***")
+		return err
+	}
+	if strings.Contains(err.Error(), secret) {
+		return errors.New(strings.ReplaceAll(err.Error(), secret, "***"))
+	}
+	return err
 }
 
 func (g *Gitee) repoAPI(t *store.Target, spec RepoSpec) string {

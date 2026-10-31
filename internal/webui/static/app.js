@@ -480,7 +480,8 @@ function editTarget(t, container) {
     if (t.provider === 'generic') body.url_template = d.url_template;
     else body.base_url = d.base_url;
     if (d.max_file_size !== '') body.max_file_size = Number(d.max_file_size) * 1024 * 1024;
-    if (d.secret) body.credential = { kind: t.credential_kind, username: t.credential_username || '', secret: d.secret };
+    // Username omitted: the server keeps it, or looks it up again (Gitee).
+    if (d.secret) body.credential = { kind: t.credential_kind, secret: d.secret };
     await api('PATCH', '/api/targets/' + enc(t.name), body);
     close();
     rerender();

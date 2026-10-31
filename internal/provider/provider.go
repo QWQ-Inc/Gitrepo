@@ -118,6 +118,15 @@ func (e *APIError) Error() string {
 func redactURL(u string) string {
 	p, err := url.Parse(u)
 	if err != nil {
+		// Unparsable: drop everything that could hold a credential.
+		if i := strings.IndexAny(u, "?#"); i >= 0 {
+			u = u[:i]
+		}
+		if i := strings.Index(u, "@"); i >= 0 {
+			if j := strings.Index(u, "://"); j >= 0 && j < i {
+				u = u[:j+3] + u[i+1:]
+			}
+		}
 		return u
 	}
 	p.User = nil
@@ -138,7 +147,7 @@ func doJSON(ctx context.Context, method, u string, headers map[string]string, in
 	}
 	req, err := http.NewRequestWithContext(ctx, method, u, body)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("%s %s: invalid request URL", method, redactURL(u))
 	}
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
