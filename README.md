@@ -22,7 +22,7 @@
 - **在入口挡住注定失败的 push**：单文件大小上限取所有镜像中最严的（GitHub 是 100 MiB），超限的 push 在 Hub 就被拒绝，不会在某个镜像上一直失败。
 - **出事会通知**：分叉、连续失败、恢复、凭据即将过期、同步完成（带 ref 和 SHA，可用来触发下游构建）都可以推送到带签名的 webhook，或直接推到 Slack、企业微信、飞书、钉钉。
 
-> 当前处于 M1 阶段，并已包含 M2（通知、Web 控制台）以及 M4 的 Gitea/Forgejo 适配器和 Git LFS。读取路由和镜像加速见 [路线图](#路线图)。
+> 当前处于 M1 阶段，并已包含 M2（通知、Web 控制台）以及 M4 的 Gitea/Forgejo、Gitee 适配器和 Git LFS。读取路由和镜像加速见 [路线图](#路线图)。
 
 ## 快速开始
 
@@ -62,6 +62,9 @@ gr target add corp-gitlab --provider gitlab --base-url https://gitlab.example.co
 
 # 自建 Gitea / Forgejo：access token，需要 repository 读写权限（在组织下建仓还需要 organization 写权限）
 gr target add forgejo --provider gitea --base-url https://git.example.com --namespace backup --token-env FORGEJO_TOKEN
+
+# Gitee：私人令牌勾选 projects 权限；git 用户名会自动从令牌查出
+gr target add gitee --provider gitee --namespace acme --token-env GITEE_TOKEN   # 单文件上限随套餐不同，可加 --max-file-size
 
 # 任意 Git 服务器（没有 API，仓库需事先存在）
 gr target add backup --provider generic \
@@ -264,7 +267,7 @@ Git 地址：`/{org}/{name}.git`（smart HTTP，协议 v2）。
 - **M1（已完成）**：target / binding / token，push 自动建仓，pre/post-receive，force-with-lease 同步，分叉检测与备份，巡检与重试，`gr status`。
 - **M2**：~~出站 webhook 与告警~~、~~Web 控制台~~（已完成）。
 - **M3**：只读边缘节点、bundle-uri / 源码包 CDN、按区域读取路由。
-- **M4**：~~Gitea / Forgejo 适配器~~、~~Git LFS~~（已完成）、Gitee 适配器、按需同步 Release。
+- **M4**：~~Gitea / Forgejo 适配器~~、~~Git LFS~~、~~Gitee 适配器~~（已完成）、按需同步 Release。
 
 ## 发布
 

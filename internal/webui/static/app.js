@@ -348,6 +348,7 @@ const PROVIDERS = [
   ['github', 'GitHub / GitHub Enterprise'],
   ['gitlab', 'GitLab（gitlab.com 或自建）'],
   ['gitea', 'Gitea / Forgejo'],
+  ['gitee', 'Gitee（码云）'],
   ['generic', '其他 Git 服务器（无 API）'],
 ];
 
@@ -394,6 +395,7 @@ function targetForm() {
     github: 'Fine-grained token：Contents 读写；自动建仓还需 Administration 读写。命名空间填拥有镜像的用户或组织。',
     gitlab: 'Access token：api + write_repository。命名空间填用户或 group 路径（可含子 group）。自建实例填写站点地址。',
     gitea: 'Access token：repository 读写；在组织下建仓需 organization 写权限。站点地址必填。',
+    gitee: '私人令牌：勾选 projects 权限。命名空间填个人空间或组织路径；git 用户名会自动从令牌查出。',
     generic: '没有 API，仓库需事先存在。URL 模板中 {namespace} 和 {name} 会被替换。',
   };
 
@@ -406,7 +408,8 @@ function targetForm() {
       nodes.push(field('URL 模板', h('input', { name: 'url_template', required: true, placeholder: 'https://git.example.com/{namespace}/{name}.git' }), 'wide'));
       kind.disabled = false;
     } else {
-      nodes.push(field('站点地址' + (p === 'gitea' ? '' : '（自建时填写）'), h('input', { name: 'base_url', required: p === 'gitea', placeholder: p === 'github' ? 'https://github.com' : p === 'gitlab' ? 'https://gitlab.com' : 'https://git.example.com' })));
+      const site = { github: 'https://github.com', gitlab: 'https://gitlab.com', gitee: 'https://gitee.com', gitea: 'https://git.example.com' };
+      nodes.push(field('站点地址' + (p === 'gitea' ? '' : '（自建时填写）'), h('input', { name: 'base_url', required: p === 'gitea', placeholder: site[p] })));
       kind.value = 'token';
       kind.disabled = true;
     }

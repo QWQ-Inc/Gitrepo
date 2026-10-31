@@ -1,6 +1,8 @@
 package provider
 
 import (
+	"context"
+	"strings"
 	"testing"
 
 	"github.com/qwq-inc/gitrepo/internal/store"
@@ -20,6 +22,7 @@ func TestRepoURLs(t *testing.T) {
 		{"generic", store.Target{URLTemplate: "https://git.example.com/{namespace}/{name}.git"}, "", "https://git.example.com/demo.git"},
 		{"generic", store.Target{BaseURL: "https://git.example.com"}, "ns", "https://git.example.com/ns/demo.git"},
 		{"gitea", store.Target{BaseURL: "https://forgejo.example.com/", Namespace: "acme"}, "", "https://forgejo.example.com/acme/demo.git"},
+		{"gitee", store.Target{Namespace: "acme"}, "", "https://gitee.com/acme/demo.git"},
 	}
 	for _, c := range cases {
 		p, _ := Get(c.kind)
@@ -60,5 +63,13 @@ func TestValidate(t *testing.T) {
 	gen, _ := Get("generic")
 	if err := gen.Validate(&store.Target{URLTemplate: "https://x/{namespace}.git", CredKind: "none"}); err == nil {
 		t.Error("template without {name} accepted")
+	}
+}
+
+// Transport errors must not echo URLs, which can carry access tokens.
+func TestErrorsDoNotLeakTokens(t *testing.T) {
+	_, err := doJSON(context.Background(), "GET", "http://127.0.0.1:1/api/v5/user?access_token=SECRET123", nil, nil, nil)
+	if err == nil || strings.Contains(err.Error(), "SECRET123") {
+		t.Fatalf("error leaks the token: %v", err)
 	}
 }

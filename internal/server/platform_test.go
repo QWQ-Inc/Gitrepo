@@ -29,6 +29,7 @@ const (
 	ghToken = "gh-token"
 	glToken = "gl-token"
 	gtToken = "gt-token"
+	geToken = "ge-token"
 )
 
 // glProtectHook makes the fake GitLab refuse non-fast-forward pushes to main
@@ -73,7 +74,7 @@ func (f *fakePlatforms) initRepo(platform, path string) {
 	if out, err := gitCmd("", "init", "-q", "--bare", "-b", "main", dir); err != nil {
 		f.t.Fatalf("init %s: %v %s", dir, err, out)
 	}
-	if platform == "gl" || platform == "gt" {
+	if platform == "gl" || platform == "gt" || platform == "ge" {
 		if err := os.WriteFile(filepath.Join(dir, "hooks", "pre-receive"), []byte(glProtectHook), 0o755); err != nil {
 			f.t.Fatal(err)
 		}
@@ -106,6 +107,12 @@ func (f *fakePlatforms) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		f.gitlab(w, r, strings.TrimPrefix(p, "/gl/api/v4"))
+	case strings.HasPrefix(p, "/ge/api/v5/"):
+		if r.URL.Query().Get("access_token") != geToken {
+			writeJSONResp(w, 401, map[string]string{"message": "401 Unauthorized: Access token does not exist"})
+			return
+		}
+		f.gitee(w, r, strings.TrimPrefix(p, "/ge/api/v5"))
 	case strings.HasPrefix(p, "/gt/api/v1/"):
 		if r.Header.Get("Authorization") != "token "+gtToken {
 			writeJSONResp(w, 401, map[string]string{"message": "token is required"})
@@ -120,6 +127,8 @@ func (f *fakePlatforms) serve(w http.ResponseWriter, r *http.Request) {
 			wantUser, wantPass = "oauth2", glToken
 		case "gt":
 			wantUser, wantPass = "oauth2", gtToken
+		case "ge":
+			wantUser, wantPass = "gitee-user", geToken // Gitee needs the real login
 		}
 		u, pw, ok := r.BasicAuth()
 		if !ok || u != wantUser || pw != wantPass {
@@ -250,6 +259,46 @@ func (f *fakePlatforms) gitea(w http.ResponseWriter, r *http.Request, p string) 
 	}
 }
 
+func (f *fakePlatforms) gitee(w http.ResponseWriter, r *http.Request, p string) {
+	var body map[string]any
+	json.NewDecoder(r.Body).Decode(&body)
+	seg := strings.Split(strings.TrimPrefix(p, "/"), "/")
+	switch {
+	case r.Method == "GET" && p == "/user":
+		writeJSONResp(w, 200, map[string]string{"login": "gitee-user"})
+	case r.Method == "POST" && len(seg) == 3 && seg[0] == "orgs" && seg[2] == "repos":
+		name, _ := body["path"].(string)
+		f.record("ge create org " + seg[1] + "/" + name + " private=" + jsonStr(body["private"]))
+		f.initRepo("ge", seg[1]+"/"+name)
+		writeJSONResp(w, 201, map[string]any{})
+	case len(seg) >= 3 && seg[0] == "repos":
+		project := seg[1] + "/" + seg[2]
+		if !f.exists("ge", project) {
+			writeJSONResp(w, 404, map[string]string{"message": "Not Found Project"})
+			return
+		}
+		repoDir := filepath.Join(f.dir, "ge", project+".git")
+		_, unprotected := os.Stat(filepath.Join(repoDir, "allow_force"))
+		switch {
+		case r.Method == "GET" && len(seg) == 3:
+			writeJSONResp(w, 200, map[string]any{})
+		case r.Method == "PATCH" && len(seg) == 3:
+			f.record("ge default_branch " + project + "=" + jsonStr(body["default_branch"]) + " name=" + jsonStr(body["name"]))
+			writeJSONResp(w, 200, map[string]any{})
+		case r.Method == "GET" && len(seg) == 5 && seg[3] == "branches":
+			writeJSONResp(w, 200, map[string]any{"name": seg[4], "protected": unprotected != nil})
+		case r.Method == "DELETE" && len(seg) == 6 && seg[3] == "branches" && seg[5] == "protection":
+			f.record("ge unprotect " + project + " " + seg[4])
+			os.WriteFile(filepath.Join(repoDir, "allow_force"), nil, 0o644)
+			w.WriteHeader(204)
+		default:
+			writeJSONResp(w, 404, map[string]string{"message": "Not Found"})
+		}
+	default:
+		writeJSONResp(w, 404, map[string]string{"message": "Not Found"})
+	}
+}
+
 func TestPlatformAdapters(t *testing.T) {
 	e := newEnv(t)
 	fake := newFakePlatforms(t)
@@ -268,6 +317,17 @@ func TestPlatformAdapters(t *testing.T) {
 		"name": "forgejo", "provider": "gitea", "namespace": "acme", "base_url": fake.srv.URL + "/gt",
 		"credential": map[string]any{"kind": "token", "secret": gtToken},
 	}, nil)
+
+	var gitee struct {
+		CredUsername string `json:"credential_username"`
+	}
+	e.do(http.MethodPost, "/api/targets", map[string]any{
+		"name": "gitee", "provider": "gitee", "namespace": "acme", "base_url": fake.srv.URL + "/ge",
+		"credential": map[string]any{"kind": "token", "secret": geToken},
+	}, &gitee)
+	if gitee.CredUsername != "gitee-user" {
+		t.Fatalf("gitee login was not filled in: %+v", gitee)
+	}
 
 	t.Run("credential check reports the platform identity", func(t *testing.T) {
 		var res struct {
@@ -291,6 +351,7 @@ func TestPlatformAdapters(t *testing.T) {
 	e.do(http.MethodPost, "/api/bindings", map[string]any{"org": "*", "target": "github"}, nil)
 	e.do(http.MethodPost, "/api/bindings", map[string]any{"org": "*", "target": "gitlab"}, nil)
 	e.do(http.MethodPost, "/api/bindings", map[string]any{"org": "*", "target": "forgejo"}, nil)
+	e.do(http.MethodPost, "/api/bindings", map[string]any{"org": "*", "target": "gitee"}, nil)
 	var dev struct {
 		Token string `json:"token"`
 	}
@@ -303,10 +364,11 @@ func TestPlatformAdapters(t *testing.T) {
 	ghRepo := filepath.Join(fake.dir, "gh", "acme", "svc.git")
 	glRepo := filepath.Join(fake.dir, "gl", "acme-group", "svc.git")
 	gtRepo := filepath.Join(fake.dir, "gt", "acme", "svc.git")
+	geRepo := filepath.Join(fake.dir, "ge", "acme", "svc.git")
 
 	t.Run("first push creates the repositories through the APIs", func(t *testing.T) {
 		out := e.run(work, "push", hub, "main")
-		mustContain(t, out, "[ok]       github:acme/svc", "[ok]       gitlab:acme-group/svc", "[ok]       forgejo:acme/svc")
+		mustContain(t, out, "[ok]       github:acme/svc", "[ok]       gitlab:acme-group/svc", "[ok]       forgejo:acme/svc", "[ok]       gitee:acme/svc")
 		for _, c := range []string{
 			"gh create org acme/svc private=true",
 			"gl create ns=7 svc visibility=private",
@@ -314,6 +376,8 @@ func TestPlatformAdapters(t *testing.T) {
 			"gh default_branch acme/svc=main",
 			"gl default_branch acme-group/svc=main",
 			"gt default_branch acme/svc=main",
+			"ge create org acme/svc private=true",
+			"ge default_branch acme/svc=main name=svc",
 		} {
 			if !fake.called(c) {
 				t.Errorf("expected API call %q; got %v", c, fake.calls)
@@ -323,13 +387,14 @@ func TestPlatformAdapters(t *testing.T) {
 		sameRefs(t, "github", e.refs(ghRepo), want)
 		sameRefs(t, "gitlab", e.refs(glRepo), want)
 		sameRefs(t, "forgejo", e.refs(gtRepo), want)
+		sameRefs(t, "gitee", e.refs(geRepo), want)
 	})
 
-	t.Run("force push lifts GitLab and Gitea branch protection first", func(t *testing.T) {
+	t.Run("force push lifts branch protection on GitLab, Gitea and Gitee first", func(t *testing.T) {
 		e.run(work, "commit", "-q", "--amend", "-m", "rewritten")
 		out := e.run(work, "push", "--force", hub, "main")
-		mustContain(t, out, "[ok]       github:acme/svc", "[ok]       gitlab:acme-group/svc", "[ok]       forgejo:acme/svc")
-		for _, c := range []string{"gl allow_force_push acme-group/svc main=true", "gt enable_force_push acme/svc main=true"} {
+		mustContain(t, out, "[ok]       github:acme/svc", "[ok]       gitlab:acme-group/svc", "[ok]       forgejo:acme/svc", "[ok]       gitee:acme/svc")
+		for _, c := range []string{"gl allow_force_push acme-group/svc main=true", "gt enable_force_push acme/svc main=true", "ge unprotect acme/svc main"} {
 			if !fake.called(c) {
 				t.Fatalf("protection was not relaxed (%s); calls: %v", c, fake.calls)
 			}
@@ -338,5 +403,6 @@ func TestPlatformAdapters(t *testing.T) {
 		sameRefs(t, "gitlab", e.refs(glRepo), want)
 		sameRefs(t, "forgejo", e.refs(gtRepo), want)
 		sameRefs(t, "github", e.refs(ghRepo), want)
+		sameRefs(t, "gitee", e.refs(geRepo), want)
 	})
 }

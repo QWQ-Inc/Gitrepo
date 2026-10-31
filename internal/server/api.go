@@ -273,6 +273,10 @@ func (s *Server) apiCreateTarget(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	if err := s.fillLoginUsername(r.Context(), t, &in); err != nil {
+		s.fail(w, err)
+		return
+	}
 	if err := s.store.CreateTarget(r.Context(), t); err != nil {
 		s.fail(w, err)
 		return
@@ -317,6 +321,10 @@ func (s *Server) apiUpdateTarget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.applyTargetIn(t, &in); err != nil {
+		s.fail(w, err)
+		return
+	}
+	if err := s.fillLoginUsername(r.Context(), t, &in); err != nil {
 		s.fail(w, err)
 		return
 	}
@@ -367,6 +375,27 @@ func (s *Server) apiCheckTarget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "identity": who})
+}
+
+// fillLoginUsername asks the platform for the token owner's login when the
+// provider needs it as the Git username and none was given.
+func (s *Server) fillLoginUsername(ctx context.Context, t *store.Target, in *targetIn) error {
+	p, err := provider.Get(t.Provider)
+	if err != nil {
+		return err
+	}
+	lu, ok := p.(provider.LoginUsername)
+	if !ok || !lu.UsesLoginUsername() || in.Credential == nil || in.Credential.Secret == "" || in.Credential.Username != "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	login, err := p.Check(ctx, t, in.Credential.Secret)
+	if err != nil {
+		return badRequest("cannot look up the token owner's login (pass --username): %v", err)
+	}
+	t.CredUsername = login
+	return nil
 }
 
 func (s *Server) targetSecret(t *store.Target) (string, error) {

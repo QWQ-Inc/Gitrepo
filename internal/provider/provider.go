@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -61,6 +62,13 @@ type Provider interface {
 	Check(ctx context.Context, t *store.Target, secret string) (string, error)
 }
 
+// LoginUsername is implemented by providers whose Git-over-HTTPS username
+// must be the token owner's login. When a target has no username, the API
+// fills it in from Check.
+type LoginUsername interface {
+	UsesLoginUsername() bool
+}
+
 var registry = map[string]Provider{}
 
 func register(p Provider) { registry[p.Kind()] = p }
@@ -76,13 +84,14 @@ func Get(kind string) (Provider, error) {
 
 // Kinds lists registered provider kinds.
 func Kinds() []string {
-	return []string{"github", "gitlab", "gitea", "generic"}
+	return []string{"github", "gitlab", "gitea", "gitee", "generic"}
 }
 
 func init() {
 	register(&GitHub{})
 	register(&GitLab{})
 	register(&Gitea{})
+	register(&Gitee{})
 	register(&Generic{})
 }
 
@@ -140,7 +149,12 @@ func doJSON(ctx context.Context, method, u string, headers map[string]string, in
 	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return 0, err
+		// Transport errors embed the full URL, which may carry a token.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
+		return 0, fmt.Errorf("%s %s: %w", method, redactURL(u), err)
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))

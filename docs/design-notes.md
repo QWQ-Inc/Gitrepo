@@ -77,6 +77,10 @@ M1 完成后做了一次独立的代码评审，修正了以下问题，每一�
   - GitLab、Gitea 不再为了删除分支而删除通配保护规则。
 - **记录在案但不修改**：备份对象可以按 SHA 通过协议 v2 取回。保留协议 v2 的性能收益，风险与 GitHub 的悬空提交相同，已写入 README。
 
+## Gitee
+
+`--provider gitee` 使用 API v5。access token 按 Gitee 的要求放在 `access_token` 参数里；provider 层的错误信息会去掉 URL 查询串，所以 token 不会出现在日志或 `last_error` 里。通过 HTTPS 推送时，Gitee 要求用户名必须是令牌所属账号的登录名，因此创建 target 时，如果没填 `--username`，会通过 `/user` 自动查出并填入（`provider.LoginUsername` 接口）。分支受保护时，强推或删除之前会先取消保护。单文件大小上限取决于套餐，不内置默认值，请用 `--max-file-size` 设置。
+
 ## Git LFS
 
 Hub 自己实现了 LFS 服务端（`internal/lfs`）：

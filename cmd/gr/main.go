@@ -124,7 +124,7 @@ type targetFlags struct {
 
 func (f *targetFlags) register(c *cobra.Command, create bool) {
 	fl := c.Flags()
-	fl.StringVar(&f.provider, "provider", "", "github | gitlab | gitea (also Forgejo) | generic")
+	fl.StringVar(&f.provider, "provider", "", "github | gitlab | gitea (also Forgejo) | gitee | generic")
 	fl.StringVar(&f.baseURL, "base-url", "", "web base URL for self-hosted instances (e.g. https://gitlab.example.com)")
 	fl.StringVar(&f.apiURL, "api-url", "", "API base URL if it cannot be derived from --base-url")
 	fl.StringVar(&f.namespace, "namespace", "", "default owner: GitHub user/org, GitLab user/group path")
