@@ -77,7 +77,10 @@ rh target check github     # 用平台 API 验证凭据
 rh bind '*' github                    # 所有组织的新仓库都备份到 github
 rh bind '*' gitlab
 rh bind acme backup                   # 只有 acme 组织的仓库额外备份到 backup
+rh bind '*' github --name-template '{org}-{name}'   # 多个组织共用一个命名空间时避免重名
 ```
+
+一个镜像位置（平台 + 命名空间 + 仓库名）只能属于一个 Hub 仓库。如果规则算出的位置已被占用，就跳过这条规则，push 输出里会说明原因。
 
 ### 4. 拿到地址，push
 
@@ -130,7 +133,7 @@ remote: repohub:   [diverged] gitlab:acme-group/demo  refs/heads/main
 | 与 Hub 一致 | 无需操作 |
 | 不存在 | 创建（lease 要求"不存在"） |
 | 等于 repohub 上次推送的值 | 更新或删除（必要时强推） |
-| 是 Hub 值的祖先 | 快进（不丢任何东西，也用于接管已有仓库） |
+| 是 Hub 值的祖先 | 快进（不丢任何东西；只对分支生效，别人打的标签永远不会被移动） |
 | 其他情况 | 分叉：告警，或先备份再覆盖 |
 
 每个推送操作都把刚观测到的远端值作为 lease。如果观测和推送之间远端又被改动，远端会拒绝这次推送，下一轮同步把它识别为分叉。
@@ -160,6 +163,16 @@ rh webhook test 2
 
 JSON 投递带以下请求头：`X-Repohub-Event`、`X-Repohub-Delivery`；配置了 secret 时还带 `X-Repohub-Signature-256: sha256=<HMAC-SHA256(secret, body)>`，校验方式与 GitHub webhook 相同。失败的投递会在 5s、30s、2m 后重试。`--repos 'acme/*'` 可以只接收部分仓库的事件。飞书和钉钉机器人的"签名校验"安全设置暂不支持，请改用关键词（例如 `repohub`）或 IP 白名单。
 
+## 接管已有仓库
+
+如果镜像仓库里已经有 repohub 没写过的内容（比如以前直接在 GitHub 上维护的项目），repohub 不会自动往里写，首次同步会失败并提示：
+
+```
+remote: repohub:   [failed]   github:acme/app  adoption required: the mirror repository already contains 3 ref(s) repohub did not write …
+```
+
+确认它就是这个 Hub 仓库对应的镜像后再接管：`rh remote adopt acme/app github`（或在 `rh remote add` 时加 `--adopt`）。接管后，已有的分支只会快进或被报告为分叉，不会被覆盖。这样可以防止某条备份规则把一个新的 Hub 仓库指向别人已有的项目。
+
 ## 策略
 
 在 Hub 的 pre-receive 阶段执行：
@@ -179,6 +192,8 @@ JSON 投递带以下请求头：`X-Repohub-Event`、`X-Repohub-Delivery`；配�
 
 `rh token create ci --scopes read --repos 'acme/*'` 可以把 token 限制在部分仓库。token 只存 SHA-256 哈希。`--public` 仓库允许匿名读。
 
+注意：`refs/backup/*` 不会出现在 clone 和 ls-remote 的结果里，但它们引用的对象仍在 Hub 仓库中。有读权限、又知道 SHA 的人可以通过协议 v2 按 SHA 取回这些对象，保留期默认 30 天。这和 GitHub 上悬空提交的情况一样，所以被强推删掉的密钥依然要轮换。
+
 ## CLI 速查
 
 ```
@@ -186,7 +201,7 @@ rh target  add|update|list|rm|check      平台账号
 rh bind    ORG|'*' TARGET                新仓库的默认镜像
 rh binding list|rm
 rh repo    add|list|rm                   （push 新地址也会自动建仓）
-rh remote  add|list|pause|resume|set|rm  单个仓库的镜像
+rh remote  add|list|adopt|pause|resume|set|rm  单个仓库的镜像
 rh sync    ORG/NAME [--overwrite] [--remote ID]
 rh status  [ORG/NAME]
 rh runs    ORG/NAME

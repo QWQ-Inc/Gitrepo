@@ -14,6 +14,7 @@ import (
 	"github.com/qwq-inc/gitrepo/internal/gitexec"
 	"github.com/qwq-inc/gitrepo/internal/githooks"
 	"github.com/qwq-inc/gitrepo/internal/notify"
+	"github.com/qwq-inc/gitrepo/internal/registry"
 	"github.com/qwq-inc/gitrepo/internal/store"
 	"github.com/qwq-inc/gitrepo/internal/syncer"
 )
@@ -52,10 +53,9 @@ func (s *Server) handlePostReceive(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	ctx := r.Context()
-	repo, err := s.store.GetRepoBySlug(ctx, req.Repo)
+	org, name, err := registry.ParseSlug(req.Repo)
 	if err != nil {
-		http.Error(w, "unknown repository", http.StatusNotFound)
+		http.Error(w, "bad repository", http.StatusBadRequest)
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -67,16 +67,28 @@ func (s *Server) handlePostReceive(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	path := s.reg.Path(repo.Slug)
+	// Back up overwritten refs first, before anything that can fail, and
+	// independent of the client: if it disconnects, the backup still lands.
+	path := s.reg.Path(org + "/" + name)
 	updates := make([]syncer.RefUpdate, 0, len(req.Updates))
 	for _, u := range req.Updates {
 		updates = append(updates, syncer.RefUpdate{Old: u.Old, New: u.New, Ref: u.Ref})
 	}
-	if n, err := syncer.BackupHubUpdates(ctx, s.git, path, updates); err != nil {
-		s.log.Error("back up overwritten refs", "repo", repo.Slug, "err", err)
-		say("warning: could not back up overwritten refs: %v", err)
+	bctx, bcancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	n, berr := syncer.BackupHubUpdates(bctx, s.git, path, updates)
+	bcancel()
+	if berr != nil {
+		s.log.Error("back up overwritten refs", "repo", req.Repo, "err", berr)
+		say("warning: could not back up overwritten refs: %v", berr)
 	} else if n > 0 {
 		say("kept %d overwritten/deleted ref(s) under refs/backup/ on the hub", n)
+	}
+
+	ctx := r.Context()
+	repo, err := s.store.GetRepoBySlug(ctx, org+"/"+name)
+	if err != nil {
+		say("warning: repository is not registered: %v", err)
+		return
 	}
 	if err := s.fixHead(ctx, repo, path, updates); err != nil {
 		s.log.Warn("update HEAD", "repo", repo.Slug, "err", err)
@@ -96,6 +108,7 @@ func (s *Server) handlePostReceive(w http.ResponseWriter, r *http.Request) {
 		say("warning: %v", err)
 		return
 	}
+	s.reportSkippedBindings(ctx, repo, remotes, say)
 	if len(remotes) == 0 {
 		say("no mirrors configured for %s; the push is stored on the hub only", repo.Slug)
 		say("add one with `rh remote add %s <target>` or `rh bind %s <target>`", repo.Slug, strings.SplitN(repo.Slug, "/", 2)[0])
@@ -146,6 +159,30 @@ func (s *Server) handlePostReceive(w http.ResponseWriter, r *http.Request) {
 			return
 		case <-ctx.Done():
 			return
+		}
+	}
+}
+
+// reportSkippedBindings explains bindings of the repository's org that have
+// no remote, which happens when the mirror location was already taken by
+// another hub repository.
+func (s *Server) reportSkippedBindings(ctx context.Context, repo *store.Repo, remotes []*store.Remote, say func(string, ...any)) {
+	org, name, _ := strings.Cut(repo.Slug, "/")
+	bindings, err := s.store.ListBindings(ctx, org)
+	if err != nil {
+		return
+	}
+	have := map[int64]bool{}
+	for _, r := range remotes {
+		have[r.TargetID] = true
+	}
+	for _, b := range bindings {
+		if have[b.TargetID] {
+			continue
+		}
+		if err := s.reg.LocationConflict(ctx, repo.ID, b.TargetID, b.Namespace, b.MirrorName(org, name), ""); err != nil {
+			say("binding %s → %s was not applied: %v", b.Org, b.TargetName, err)
+			say("give the mirror another name with `rh remote add %s %s --name …`, or use --name-template '{org}-{name}' on the binding", repo.Slug, b.TargetName)
 		}
 	}
 }

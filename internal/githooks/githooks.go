@@ -153,31 +153,57 @@ func oversizedBlobs(tips []string, limit int64) ([]string, error) {
 		rev.Wait()
 		return nil, err
 	}
+	// Read with no line-length limit (paths can be arbitrarily long). On any
+	// read error both processes are killed before waiting, so neither can be
+	// left blocked on a full pipe.
 	var big []string
-	sc := bufio.NewScanner(out)
-	sc.Buffer(make([]byte, 64*1024), 1<<20)
-	for sc.Scan() {
-		f := strings.SplitN(sc.Text(), " ", 4)
-		if len(f) < 3 || f[0] != "blob" {
-			continue
-		}
-		size, _ := strconv.ParseInt(f[1], 10, 64)
-		if size > limit {
-			path := f[2][:12]
-			if len(f) == 4 && f[3] != "" {
-				path = f[3]
+	br := bufio.NewReaderSize(out, 64<<10)
+	var readErr error
+	for {
+		line, err := br.ReadString('\n')
+		if line = strings.TrimSuffix(line, "\n"); line != "" {
+			f := strings.SplitN(line, " ", 4)
+			if len(f) >= 3 && f[0] == "blob" {
+				size, _ := strconv.ParseInt(f[1], 10, 64)
+				if size > limit {
+					path := f[2]
+					if len(path) > 12 {
+						path = path[:12]
+					}
+					if len(f) == 4 && f[3] != "" {
+						path = f[3]
+						if len(path) > 200 {
+							path = "…" + path[len(path)-200:]
+						}
+					}
+					big = append(big, fmt.Sprintf("%s (%s)", path, humanSize(size)))
+				}
 			}
-			big = append(big, fmt.Sprintf("%s (%s)", path, humanSize(size)))
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			readErr = err
+			break
 		}
 	}
+	if readErr != nil {
+		rev.Process.Kill()
+		check.Process.Kill()
+		rev.Wait()
+		check.Wait()
+		return nil, readErr
+	}
 	if err := rev.Wait(); err != nil {
+		check.Process.Kill()
 		check.Wait()
 		return nil, fmt.Errorf("rev-list: %v: %s", err, strings.TrimSpace(revErr.String()))
 	}
 	if err := check.Wait(); err != nil {
 		return nil, fmt.Errorf("cat-file: %v", err)
 	}
-	return big, sc.Err()
+	return big, nil
 }
 
 func humanSize(n int64) string {

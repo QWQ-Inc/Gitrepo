@@ -93,15 +93,7 @@ func (r *Registry) CreateRepo(ctx context.Context, slug, visibility string, with
 			return nil, false, err
 		}
 		for _, b := range bindings {
-			rem := &store.Remote{
-				RepoID:       repo.ID,
-				TargetID:     b.TargetID,
-				Namespace:    b.Namespace,
-				Name:         name,
-				OnDivergence: b.OnDivergence,
-				Enabled:      true,
-			}
-			if err := r.Store.CreateRemote(ctx, rem); err != nil && !errors.Is(err, store.ErrConflict) {
+			if _, err := r.addBindingRemote(ctx, repo, b); err != nil && !errors.Is(err, ErrLocationTaken) {
 				return nil, false, fmt.Errorf("create remote for binding %s: %w", b.TargetName, err)
 			}
 		}
@@ -109,8 +101,60 @@ func (r *Registry) CreateRepo(ctx context.Context, slug, visibility string, with
 	return repo, true, nil
 }
 
-// AddRemote attaches a target to a repository.
-func (r *Registry) AddRemote(ctx context.Context, repo *store.Repo, targetName, namespace, name, url, onDivergence string) (*store.Remote, error) {
+// ErrLocationTaken means another hub repository already mirrors to the
+// requested place; two hub repositories pushing to one mirror would fight
+// over it forever.
+var ErrLocationTaken = errors.New("mirror location already in use")
+
+// LocationConflict reports which repository already uses a mirror location.
+func (r *Registry) LocationConflict(ctx context.Context, repoID, targetID int64, namespace, name, url string) error {
+	other, err := r.Store.RemoteUsingLocation(ctx, repoID, targetID, namespace, name, url)
+	if err != nil {
+		return err
+	}
+	if other == nil {
+		return nil
+	}
+	owner, err := r.Store.GetRepo(ctx, other.RepoID)
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf("%w: %s is already the mirror of %s", ErrLocationTaken, other.Label(), owner.Slug)
+}
+
+// addBindingRemote creates the remote a binding implies for repo. Remotes
+// created this way never adopt a non-empty pre-existing repository on their
+// own: an administrator has to confirm that (see Remote.Adopt).
+func (r *Registry) addBindingRemote(ctx context.Context, repo *store.Repo, b *store.Binding) (*store.Remote, error) {
+	org, name, _ := strings.Cut(repo.Slug, "/")
+	rem := &store.Remote{
+		RepoID:       repo.ID,
+		TargetID:     b.TargetID,
+		Namespace:    b.Namespace,
+		Name:         b.MirrorName(org, name),
+		OnDivergence: b.OnDivergence,
+		Enabled:      true,
+	}
+	if err := r.LocationConflict(ctx, repo.ID, rem.TargetID, rem.Namespace, rem.Name, ""); err != nil {
+		return nil, err
+	}
+	if err := r.Store.CreateRemote(ctx, rem); err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			return nil, ErrLocationTaken
+		}
+		return nil, err
+	}
+	return rem, nil
+}
+
+// ApplyBinding adds the remote implied by b to an existing repository.
+func (r *Registry) ApplyBinding(ctx context.Context, repo *store.Repo, b *store.Binding) (*store.Remote, error) {
+	return r.addBindingRemote(ctx, repo, b)
+}
+
+// AddRemote attaches a target to a repository. adopt allows the first sync
+// to write into a mirror repository that already contains other refs.
+func (r *Registry) AddRemote(ctx context.Context, repo *store.Repo, targetName, namespace, name, url, onDivergence string, adopt bool) (*store.Remote, error) {
 	t, err := r.Store.GetTargetByName(ctx, targetName)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -136,9 +180,12 @@ func (r *Registry) AddRemote(ctx context.Context, repo *store.Repo, targetName, 
 			return nil, err
 		}
 	}
+	if err := r.LocationConflict(ctx, repo.ID, t.ID, namespace, name, url); err != nil {
+		return nil, err
+	}
 	rem := &store.Remote{
 		RepoID: repo.ID, TargetID: t.ID, Namespace: namespace, Name: name, URL: url,
-		OnDivergence: onDivergence, Enabled: true,
+		OnDivergence: onDivergence, Enabled: true, Adopt: adopt,
 	}
 	if err := r.Store.CreateRemote(ctx, rem); err != nil {
 		if errors.Is(err, store.ErrConflict) {

@@ -114,6 +114,19 @@ func TestMakePlan(t *testing.T) {
 			ops:    []Op{{Ref: "refs/tags/v1", Action: ActionUpdate, New: "B", Expect: "A", Force: true}},
 		},
 		{
+			name:   "foreign tag is never moved, even forward",
+			hub:    map[string]string{"refs/tags/v2": "B"},
+			remote: map[string]string{"refs/tags/v2": "A"},
+			divs:   []string{"refs/tags/v2"},
+		},
+		{
+			name:      "foreign tag is moved only with overwrite (and backed up)",
+			hub:       map[string]string{"refs/tags/v2": "B"},
+			remote:    map[string]string{"refs/tags/v2": "A"},
+			overwrite: true,
+			ops:       []Op{{Ref: "refs/tags/v2", Action: ActionUpdate, New: "B", Expect: "A", Force: true, Overwrite: true}},
+		},
+		{
 			name:   "one divergent ref does not block the others",
 			hub:    map[string]string{"refs/heads/main": "B", "refs/heads/dev": "C"},
 			remote: map[string]string{"refs/heads/main": "Z", "refs/heads/dev": "B"},

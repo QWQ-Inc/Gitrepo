@@ -125,8 +125,9 @@ func (p giteaProtection) name() string {
 }
 
 // AllowForce enables force pushes on matching protection rules (Gitea ≥ 1.22
-// / Forgejo ≥ 7) and deletes rules covering branches that must be deleted.
-// Older servers without enable_force_push get the rule removed instead.
+// / Forgejo ≥ 7) and deletes exact-name rules of branches that must be
+// deleted. Older servers without enable_force_push get an exact-name rule
+// removed instead; pattern rules are never removed.
 func (g *Gitea) AllowForce(ctx context.Context, t *store.Target, secret string, spec RepoSpec, force, del []string) error {
 	if len(force) == 0 && len(del) == 0 {
 		return nil
@@ -146,6 +147,10 @@ func (g *Gitea) AllowForce(ctx context.Context, t *store.Target, secret string, 
 		ruleURL := base + "/" + url.PathEscape(name)
 		switch {
 		case matchesAny(name, del):
+			if strings.ContainsAny(name, "*?[") {
+				errs = append(errs, fmt.Errorf("cannot delete a branch protected by pattern rule %q; remove the rule or the branch manually", name))
+				continue
+			}
 			if _, err := doJSON(ctx, http.MethodDelete, ruleURL, h, nil, nil); err != nil && statusOf(err) != http.StatusNotFound {
 				errs = append(errs, fmt.Errorf("remove protection %s: %w", name, err))
 			}
@@ -154,9 +159,12 @@ func (g *Gitea) AllowForce(ctx context.Context, t *store.Target, secret string, 
 				continue
 			}
 			var err error
-			if rule.EnableForcePush != nil {
+			switch {
+			case rule.EnableForcePush != nil:
 				_, err = doJSON(ctx, http.MethodPatch, ruleURL, h, map[string]any{"enable_force_push": true}, nil)
-			} else {
+			case strings.ContainsAny(name, "*?["):
+				err = fmt.Errorf("this server cannot allow force pushes on pattern rule %q; adjust it manually", name)
+			default:
 				_, err = doJSON(ctx, http.MethodDelete, ruleURL, h, nil, nil)
 			}
 			if err != nil {

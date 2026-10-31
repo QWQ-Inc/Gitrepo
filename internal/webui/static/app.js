@@ -260,6 +260,14 @@ async function viewRepo(org, name) {
   const remoteRows = repo.remotes.map((m) => {
     const path = base + '/remotes/' + m.id;
     const details = [];
+    if (m.needs_adoption) {
+      details.push(h('div', { class: 'row' }, h('span', { class: 'muted' }, '镜像仓库里已有 repohub 没写过的内容。确认是正确的仓库后再接管：'),
+        h('button', { class: 'small', onclick: action(async () => {
+          if (!confirm(`确认 ${m.url} 是 ${slug} 的镜像，交给 repohub 管理？\n已有分支只会快进或报告分叉，不会被覆盖。`)) return false;
+          await api('PATCH', path, { adopt: true });
+          rerender();
+        }, '已接管，正在同步') }, '接管')));
+    }
     if (m.last_error) details.push(h('div', { class: 'error-text' }, `${m.last_error}（连续失败 ${m.consecutive_failures || 0} 次，${m.next_retry_at ? '下次重试 ' + ago(m.next_retry_at) : ''}）`));
     if (m.divergences && m.divergences.length) {
       details.push(h('ul', { class: 'div-list' }, m.divergences.map((d) => h('li', {},
@@ -476,6 +484,7 @@ async function viewBindings() {
     h('td', {}, b.org === '*' ? '所有组织（*）' : b.org),
     h('td', {}, b.target),
     h('td', {}, b.namespace || h('span', { class: 'muted' }, '凭据默认')),
+    h('td', { class: 'mono' }, b.name_template),
     h('td', {}, b.on_divergence === 'overwrite' ? '备份后覆盖' : '告警'),
     h('td', { class: 'actions' }, h('button', { class: 'danger small', onclick: action(async () => {
       if (!confirm('删除这条规则？已有仓库的镜像不受影响。')) return false;
@@ -486,18 +495,21 @@ async function viewBindings() {
     const d = formData(ev.target);
     const res = await api('POST', '/api/bindings', d);
     rerender();
+    if (res.skipped && res.skipped.length) throw new Error(`已添加；${res.skipped.length} 个仓库因镜像名冲突被跳过：\n` + res.skipped.join('\n'));
     return d.apply_existing ? `已添加，并应用到 ${res.applied_to_repos} 个已有仓库` : '已添加';
   }) },
   field('组织（* 表示全部）', h('input', { name: 'org', value: '*', required: true })),
   field('平台凭据', select('target', targets.map((t) => [t.name, `${t.name}（${t.provider}）`]))),
   field('命名空间（可选）', h('input', { name: 'namespace', placeholder: '默认使用凭据上的命名空间' })),
+  field('镜像仓库名', h('input', { name: 'name_template', value: '{name}', required: true, title: '{org} 和 {name} 是 Hub 仓库的组织和名称' })),
   field('分叉时', select('on_divergence', [['alert', '告警，不覆盖'], ['overwrite', '备份后覆盖']], 'alert')),
   h('label', { class: 'check' }, h('input', { type: 'checkbox', name: 'apply_existing' }), '同时应用到已有仓库'),
   h('div', {}, h('button', { type: 'submit', disabled: !targets.length }, '添加规则')));
   app.replaceChildren(
     h('h1', {}, '备份规则'),
     h('p', { class: 'hint' }, '新仓库创建时（包括 push 自动创建），按规则自动添加镜像。'),
-    table(['组织', '平台凭据', '命名空间', '分叉时', ''], rows, '还没有规则。'),
+    h('p', { class: 'hint' }, '多个组织备份到同一个命名空间时，把镜像仓库名设为 {org}-{name} 以免重名；同一个镜像位置只能属于一个 Hub 仓库。'),
+    table(['组织', '平台凭据', '命名空间', '镜像仓库名', '分叉时', ''], rows, '还没有规则。'),
     h('h2', {}, '添加规则'),
     h('div', { class: 'panel' }, targets.length ? form : h('p', {}, '请先', h('a', { href: '#/targets' }, '添加平台凭据'), '。')));
 }

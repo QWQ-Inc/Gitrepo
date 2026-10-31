@@ -13,6 +13,7 @@ import (
 
 	"github.com/qwq-inc/gitrepo/internal/auth"
 	"github.com/qwq-inc/gitrepo/internal/provider"
+	"github.com/qwq-inc/gitrepo/internal/registry"
 	"github.com/qwq-inc/gitrepo/internal/store"
 	"github.com/qwq-inc/gitrepo/internal/syncer"
 )
@@ -384,6 +385,7 @@ type bindingOut struct {
 	Target       string `json:"target"`
 	Namespace    string `json:"namespace,omitempty"`
 	OnDivergence string `json:"on_divergence"`
+	NameTemplate string `json:"name_template"`
 }
 
 func (s *Server) apiListBindings(w http.ResponseWriter, r *http.Request) {
@@ -394,7 +396,7 @@ func (s *Server) apiListBindings(w http.ResponseWriter, r *http.Request) {
 	}
 	out := []bindingOut{}
 	for _, b := range bs {
-		out = append(out, bindingOut{ID: b.ID, Org: b.Org, Target: b.TargetName, Namespace: b.Namespace, OnDivergence: b.OnDivergence})
+		out = append(out, bindingOut{ID: b.ID, Org: b.Org, Target: b.TargetName, Namespace: b.Namespace, OnDivergence: b.OnDivergence, NameTemplate: b.NameTemplate})
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -405,6 +407,7 @@ func (s *Server) apiCreateBinding(w http.ResponseWriter, r *http.Request) {
 		Target        string `json:"target"`
 		Namespace     string `json:"namespace"`
 		OnDivergence  string `json:"on_divergence"`
+		NameTemplate  string `json:"name_template"`
 		ApplyExisting bool   `json:"apply_existing"`
 	}
 	if err := decode(r, &in); err != nil {
@@ -426,17 +429,25 @@ func (s *Server) apiCreateBinding(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, badRequest("on_divergence must be alert or overwrite"))
 		return
 	}
+	if in.NameTemplate == "" {
+		in.NameTemplate = "{name}"
+	}
+	if !strings.Contains(in.NameTemplate, "{name}") || strings.ContainsAny(strings.NewReplacer("{org}", "", "{name}", "").Replace(in.NameTemplate), "/{} ") {
+		s.fail(w, badRequest("name_template must contain {name} and may add {org} and literal text, e.g. {org}-{name}"))
+		return
+	}
 	t, err := s.store.GetTargetByName(r.Context(), in.Target)
 	if err != nil {
 		s.fail(w, badRequest("target %q not found", in.Target))
 		return
 	}
-	b := &store.Binding{Org: in.Org, TargetID: t.ID, Namespace: in.Namespace, OnDivergence: in.OnDivergence}
+	b := &store.Binding{Org: in.Org, TargetID: t.ID, TargetName: t.Name, Namespace: in.Namespace, OnDivergence: in.OnDivergence, NameTemplate: in.NameTemplate}
 	if err := s.store.CreateBinding(r.Context(), b); err != nil {
 		s.fail(w, err)
 		return
 	}
 	applied := 0
+	skipped := []string{}
 	if in.ApplyExisting {
 		repos, err := s.store.ListRepos(r.Context())
 		if err != nil {
@@ -444,19 +455,30 @@ func (s *Server) apiCreateBinding(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for _, repo := range repos {
-			org, name, _ := strings.Cut(repo.Slug, "/")
+			org, _, _ := strings.Cut(repo.Slug, "/")
 			if in.Org != "*" && in.Org != org {
 				continue
 			}
-			if _, err := s.reg.AddRemote(r.Context(), repo, t.Name, in.Namespace, name, "", in.OnDivergence); err == nil {
+			// A non-empty pre-existing mirror still has to be adopted.
+			rem, err := s.reg.ApplyBinding(r.Context(), repo, b)
+			switch {
+			case err == nil:
 				applied++
-				s.mgr.Enqueue(repo.ID, syncer.Request{Trigger: syncer.TriggerManual})
+				s.mgr.Enqueue(repo.ID, syncer.Request{Trigger: syncer.TriggerManual, RemoteIDs: []int64{rem.ID}})
+			case errors.Is(err, registry.ErrLocationTaken):
+				skipped = append(skipped, repo.Slug+": "+err.Error())
+			case errors.Is(err, store.ErrConflict):
+				// already mirrored to this target
+			default:
+				s.fail(w, err)
+				return
 			}
 		}
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"binding":          bindingOut{ID: b.ID, Org: b.Org, Target: t.Name, Namespace: b.Namespace, OnDivergence: b.OnDivergence},
+		"binding":          bindingOut{ID: b.ID, Org: b.Org, Target: t.Name, Namespace: b.Namespace, OnDivergence: b.OnDivergence, NameTemplate: b.NameTemplate},
 		"applied_to_repos": applied,
+		"skipped":          skipped,
 	})
 }
 
@@ -494,6 +516,8 @@ type remoteOut struct {
 	URL                 string     `json:"url"`
 	OnDivergence        string     `json:"on_divergence"`
 	Enabled             bool       `json:"enabled"`
+	Adopt               bool       `json:"adopt"`
+	NeedsAdoption       bool       `json:"needs_adoption,omitempty"`
 	State               string     `json:"state"`
 	LastError           string     `json:"last_error,omitempty"`
 	ConsecutiveFailures int        `json:"consecutive_failures,omitempty"`
@@ -551,6 +575,7 @@ func (s *Server) repoOut(ctx context.Context, repo *store.Repo, withDivergences 
 		ro := remoteOut{
 			ID: rem.ID, Label: rem.Label(), Target: rem.TargetName, Provider: rem.Provider, Namespace: rem.EffectiveNamespace(),
 			Name: rem.Name, URL: url, OnDivergence: rem.OnDivergence, Enabled: rem.Enabled, State: rem.State,
+			Adopt: rem.Adopt, NeedsAdoption: !rem.Adopt && strings.HasPrefix(rem.LastError, syncer.ErrNeedsAdoption.Error()),
 			LastError: rem.LastError, ConsecutiveFailures: rem.ConsecutiveFailures,
 			LastSyncAt: ts(rem.LastSyncAt), LastSuccessAt: ts(rem.LastSuccessAt), NextRetryAt: ts(rem.NextRetryAt),
 		}
@@ -625,7 +650,7 @@ func (s *Server) apiCreateRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, t := range in.Targets {
-		if _, err := s.reg.AddRemote(r.Context(), repo, t, "", "", "", ""); err != nil {
+		if _, err := s.reg.AddRemote(r.Context(), repo, t, "", "", "", "", false); err != nil {
 			s.fail(w, badRequest("add remote %s: %v", t, err))
 			return
 		}
@@ -682,14 +707,19 @@ func (s *Server) apiAddRemote(w http.ResponseWriter, r *http.Request) {
 		Name         string `json:"name"`
 		URL          string `json:"url"`
 		OnDivergence string `json:"on_divergence"`
+		Adopt        bool   `json:"adopt"`
 	}
 	if err := decode(r, &in); err != nil {
 		s.fail(w, err)
 		return
 	}
-	rem, err := s.reg.AddRemote(r.Context(), repo, in.Target, in.Namespace, in.Name, in.URL, in.OnDivergence)
+	rem, err := s.reg.AddRemote(r.Context(), repo, in.Target, in.Namespace, in.Name, in.URL, in.OnDivergence, in.Adopt)
 	if err != nil {
-		s.fail(w, badRequest("%v", err))
+		status := http.StatusBadRequest
+		if errors.Is(err, registry.ErrLocationTaken) {
+			status = http.StatusConflict
+		}
+		s.fail(w, &apiError{status: status, err: err})
 		return
 	}
 	s.mgr.Enqueue(repo.ID, syncer.Request{Trigger: syncer.TriggerManual, RemoteIDs: []int64{rem.ID}})
@@ -728,6 +758,7 @@ func (s *Server) apiUpdateRemote(w http.ResponseWriter, r *http.Request) {
 		Enabled      *bool   `json:"enabled"`
 		OnDivergence *string `json:"on_divergence"`
 		URL          *string `json:"url"`
+		Adopt        *bool   `json:"adopt"`
 	}
 	if err := decode(r, &in); err != nil {
 		s.fail(w, err)
@@ -745,6 +776,13 @@ func (s *Server) apiUpdateRemote(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.URL != nil {
 		rem.URL = strings.TrimSpace(*in.URL)
+		if err := s.reg.LocationConflict(r.Context(), repo.ID, rem.TargetID, rem.Namespace, rem.Name, rem.URL); err != nil {
+			s.fail(w, &apiError{status: http.StatusConflict, err: err})
+			return
+		}
+	}
+	if in.Adopt != nil {
+		rem.Adopt = *in.Adopt
 	}
 	if err := s.store.UpdateRemoteConfig(r.Context(), rem); err != nil {
 		s.fail(w, err)

@@ -56,7 +56,19 @@ type Binding struct {
 	TargetName   string
 	Namespace    string
 	OnDivergence string
+	// NameTemplate names the mirror repository; {org} and {name} are the
+	// hub repository's org and name.
+	NameTemplate string
 	CreatedAt    int64
+}
+
+// MirrorName applies the binding's name template.
+func (b *Binding) MirrorName(org, name string) string {
+	t := b.NameTemplate
+	if t == "" {
+		t = "{name}"
+	}
+	return strings.NewReplacer("{org}", org, "{name}", name).Replace(t)
 }
 
 type Repo struct {
@@ -69,19 +81,22 @@ type Repo struct {
 }
 
 type Remote struct {
-	ID                  int64
-	RepoID              int64
-	TargetID            int64
-	TargetName          string
-	TargetNamespace     string
-	Provider            string
-	Namespace           string
-	Name                string
-	URL                 string
-	OnDivergence        string
-	Enabled             bool
-	Provisioned         bool
-	AtomicUnsupported   bool
+	ID                int64
+	RepoID            int64
+	TargetID          int64
+	TargetName        string
+	TargetNamespace   string
+	Provider          string
+	Namespace         string
+	Name              string
+	URL               string
+	OnDivergence      string
+	Enabled           bool
+	Provisioned       bool
+	AtomicUnsupported bool
+	// Adopt allows writing into a mirror repository that already holds refs
+	// repohub did not create.
+	Adopt               bool
 	State               string
 	LastError           string
 	ConsecutiveFailures int
@@ -221,8 +236,11 @@ func (s *Store) DeleteTarget(ctx context.Context, id int64) error {
 
 func (s *Store) CreateBinding(ctx context.Context, b *Binding) error {
 	b.CreatedAt = Now()
-	res, err := s.db.ExecContext(ctx, `INSERT INTO bindings (org, target_id, namespace, on_divergence, created_at) VALUES (?,?,?,?,?)`,
-		b.Org, b.TargetID, b.Namespace, b.OnDivergence, b.CreatedAt)
+	if b.NameTemplate == "" {
+		b.NameTemplate = "{name}"
+	}
+	res, err := s.db.ExecContext(ctx, `INSERT INTO bindings (org, target_id, namespace, on_divergence, name_template, created_at) VALUES (?,?,?,?,?,?)`,
+		b.Org, b.TargetID, b.Namespace, b.OnDivergence, b.NameTemplate, b.CreatedAt)
 	if err != nil {
 		return wrapErr(err)
 	}
@@ -244,7 +262,7 @@ func (s *Store) DeleteBinding(ctx context.Context, id int64) error {
 // ListBindings returns bindings, optionally only those applying to org
 // (exact match or "*").
 func (s *Store) ListBindings(ctx context.Context, org string) ([]*Binding, error) {
-	q := `SELECT b.id, b.org, b.target_id, t.name, b.namespace, b.on_divergence, b.created_at
+	q := `SELECT b.id, b.org, b.target_id, t.name, b.namespace, b.on_divergence, b.name_template, b.created_at
 FROM bindings b JOIN targets t ON t.id = b.target_id`
 	var args []any
 	if org != "" {
@@ -260,7 +278,7 @@ FROM bindings b JOIN targets t ON t.id = b.target_id`
 	var out []*Binding
 	for rows.Next() {
 		var b Binding
-		if err := rows.Scan(&b.ID, &b.Org, &b.TargetID, &b.TargetName, &b.Namespace, &b.OnDivergence, &b.CreatedAt); err != nil {
+		if err := rows.Scan(&b.ID, &b.Org, &b.TargetID, &b.TargetName, &b.Namespace, &b.OnDivergence, &b.NameTemplate, &b.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, &b)
@@ -332,21 +350,21 @@ func (s *Store) DeleteRepo(ctx context.Context, id int64) error {
 // ---------------------------------------------------------------- remotes
 
 const remoteCols = `r.id, r.repo_id, r.target_id, t.name, t.namespace, t.provider, r.namespace, r.name, r.url, r.on_divergence, r.enabled,
-r.provisioned, r.atomic_unsupported, r.state, r.last_error, r.consecutive_failures, r.next_retry_at, r.last_sync_at,
+r.provisioned, r.atomic_unsupported, r.adopt, r.state, r.last_error, r.consecutive_failures, r.next_retry_at, r.last_sync_at,
 r.last_success_at, r.created_at`
 
 const remoteFrom = ` FROM remotes r JOIN targets t ON t.id = r.target_id`
 
 func scanRemote(sc interface{ Scan(...any) error }) (*Remote, error) {
 	var r Remote
-	var enabled, prov, atomic int
+	var enabled, prov, atomic, adopt int
 	err := sc.Scan(&r.ID, &r.RepoID, &r.TargetID, &r.TargetName, &r.TargetNamespace, &r.Provider, &r.Namespace, &r.Name, &r.URL, &r.OnDivergence, &enabled,
-		&prov, &atomic, &r.State, &r.LastError, &r.ConsecutiveFailures, &r.NextRetryAt, &r.LastSyncAt,
+		&prov, &atomic, &adopt, &r.State, &r.LastError, &r.ConsecutiveFailures, &r.NextRetryAt, &r.LastSyncAt,
 		&r.LastSuccessAt, &r.CreatedAt)
 	if err != nil {
 		return nil, wrapErr(err)
 	}
-	r.Enabled, r.Provisioned, r.AtomicUnsupported = enabled != 0, prov != 0, atomic != 0
+	r.Enabled, r.Provisioned, r.AtomicUnsupported, r.Adopt = enabled != 0, prov != 0, atomic != 0, adopt != 0
 	return &r, nil
 }
 
@@ -355,8 +373,8 @@ func (s *Store) CreateRemote(ctx context.Context, r *Remote) error {
 	if r.State == "" {
 		r.State = StatePending
 	}
-	res, err := s.db.ExecContext(ctx, `INSERT INTO remotes (repo_id, target_id, namespace, name, url, on_divergence, enabled, state, created_at)
-VALUES (?,?,?,?,?,?,?,?,?)`, r.RepoID, r.TargetID, r.Namespace, r.Name, r.URL, r.OnDivergence, b2i(r.Enabled), r.State, r.CreatedAt)
+	res, err := s.db.ExecContext(ctx, `INSERT INTO remotes (repo_id, target_id, namespace, name, url, on_divergence, enabled, adopt, state, created_at)
+VALUES (?,?,?,?,?,?,?,?,?,?)`, r.RepoID, r.TargetID, r.Namespace, r.Name, r.URL, r.OnDivergence, b2i(r.Enabled), b2i(r.Adopt), r.State, r.CreatedAt)
 	if err != nil {
 		return wrapErr(err)
 	}
@@ -399,8 +417,28 @@ func (s *Store) queryRemotes(ctx context.Context, q string, args ...any) ([]*Rem
 }
 
 func (s *Store) UpdateRemoteConfig(ctx context.Context, r *Remote) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE remotes SET url=?, on_divergence=?, enabled=? WHERE id=?`, r.URL, r.OnDivergence, b2i(r.Enabled), r.ID)
+	_, err := s.db.ExecContext(ctx, `UPDATE remotes SET url=?, on_divergence=?, enabled=?, adopt=? WHERE id=?`, r.URL, r.OnDivergence, b2i(r.Enabled), b2i(r.Adopt), r.ID)
 	return wrapErr(err)
+}
+
+// RemoteUsingLocation returns a remote of another repository that already
+// mirrors to the same place: the same explicit URL, or the same target,
+// effective namespace and name (compared case-insensitively, as platforms
+// do). It returns nil when the location is free.
+func (s *Store) RemoteUsingLocation(ctx context.Context, repoID, targetID int64, namespace, name, url string) (*Remote, error) {
+	var rows []*Remote
+	var err error
+	if url != "" {
+		rows, err = s.queryRemotes(ctx, `SELECT `+remoteCols+remoteFrom+` WHERE r.url = ? AND r.repo_id != ? LIMIT 1`, url, repoID)
+	} else {
+		rows, err = s.queryRemotes(ctx, `SELECT `+remoteCols+remoteFrom+` WHERE r.url = '' AND r.target_id = ? AND r.repo_id != ?
+AND lower(COALESCE(NULLIF(r.namespace, ''), t.namespace)) = lower(COALESCE(NULLIF(?, ''), t.namespace)) AND lower(r.name) = lower(?) LIMIT 1`,
+			targetID, repoID, namespace, name)
+	}
+	if err != nil || len(rows) == 0 {
+		return nil, err
+	}
+	return rows[0], nil
 }
 
 func (s *Store) DeleteRemote(ctx context.Context, id int64) error {

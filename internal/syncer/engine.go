@@ -160,8 +160,43 @@ func (m *Manager) syncRemote(parent context.Context, repo *store.Repo, rem *stor
 		return out
 	}
 
+	// A mirror that already holds refs repohub did not write is only taken
+	// over after an administrator confirms it is the intended repository;
+	// otherwise a binding could point a new hub repository at someone
+	// else's existing project.
+	if !rem.Adopt && len(pushed) == 0 {
+		var foreign []string
+		for ref, sha := range remoteRefs {
+			if hub[ref] != sha {
+				foreign = append(foreign, ref)
+			}
+		}
+		if len(foreign) > 0 {
+			sort.Strings(foreign)
+			divs = nil
+			planned = false
+			return fail("%s: the mirror repository already contains %d ref(s) repohub did not write (e.g. %s); if it is the right repository, adopt it: rh remote adopt %s %d",
+				ErrNeedsAdoption, len(foreign), foreign[0], repo.Slug, rem.ID)
+		}
+	}
+
 	ops := plan.Ops
 	failures := map[string]string{}
+
+	// An empty hub would turn every mirror ref into a delete. That is almost
+	// always a broken hub repository rather than intent, so it needs an
+	// explicit overwrite.
+	if len(hub) == 0 && !req.Overwrite {
+		kept := ops[:0]
+		for _, op := range ops {
+			if op.Action == ActionDelete {
+				failures[op.Ref] = "hub has no branches or tags; refusing to empty the mirror (sync with --overwrite to force)"
+				continue
+			}
+			kept = append(kept, op)
+		}
+		ops = kept
+	}
 
 	// 4. Back up remote data that is about to be overwritten.
 	var toBackup []Op
@@ -187,6 +222,21 @@ func (m *Manager) syncRemote(parent context.Context, repo *store.Repo, rem *stor
 		}
 	}
 
+	// Values repohub itself pushed are about to be replaced. Make sure the
+	// hub still references them, independent of whether the post-receive
+	// hook managed to record its own backup.
+	if errs := m.backupOwn(ctx, repoPath, ops); len(errs) > 0 {
+		kept := ops[:0]
+		for _, op := range ops {
+			if e, bad := errs[op.Ref]; bad {
+				failures[op.Ref] = "back up previous value failed: " + e.Error()
+				continue
+			}
+			kept = append(kept, op)
+		}
+		ops = kept
+	}
+
 	// 5. Relax branch protection where a forced update or delete is needed.
 	if prov.Caps().BranchProtection {
 		var force, del []string
@@ -208,9 +258,25 @@ func (m *Manager) syncRemote(parent context.Context, repo *store.Repo, rem *stor
 
 	// 6. Push.
 	if len(ops) > 0 {
-		statuses, err := m.push(ctx, repoPath, url, cred, rem, ops)
-		if err != nil {
-			return fail("push: %v", err)
+		statuses, pushErr := m.push(ctx, repoPath, url, cred, rem, ops)
+		// Record what the mirror accepted right away, so a later failure
+		// (verify, timeout) cannot make our own refs look foreign next time.
+		accepted := map[string]string{}
+		var removed []string
+		for _, op := range ops {
+			if st, ok := statuses[op.Ref]; ok && st.OK() {
+				if op.Action == ActionDelete {
+					removed = append(removed, op.Ref)
+				} else {
+					accepted[op.Ref] = op.New
+				}
+			}
+		}
+		if err := m.store.ApplyPushedState(context.Background(), rem.ID, accepted, removed); err != nil {
+			return fail("record pushed state: %v", err)
+		}
+		if pushErr != nil {
+			return fail("push: %v", pushErr)
 		}
 		for _, op := range ops {
 			st := statuses[op.Ref]
@@ -304,6 +370,8 @@ func (m *Manager) syncRemote(parent context.Context, repo *store.Repo, rem *stor
 func (m *Manager) push(ctx context.Context, repoPath, url string, cred *gitexec.Cred, rem *store.Remote, ops []Op) (map[string]gitexec.RefStatus, error) {
 	atomic := !rem.AtomicUnsupported
 	final := map[string]gitexec.RefStatus{}
+	all := ops
+	defer func() { m.isolateRejections(ctx, repoPath, url, cred, all, final) }()
 	for attempt := 0; attempt < 4 && len(ops) > 0; attempt++ {
 		pushOps := make([]gitexec.PushOp, 0, len(ops))
 		for _, op := range ops {
@@ -342,6 +410,68 @@ func (m *Manager) push(ctx context.Context, repoPath, url string, cred *gitexec.
 	return final, nil
 }
 
+// isolateRejections handles servers whose hooks reject a whole push (GitLab
+// and Gitea protected branches decline every ref in pre-receive): when
+// several refs failed with the same server-side reason, each is retried on
+// its own so one protected branch cannot hold back all the others.
+func (m *Manager) isolateRejections(ctx context.Context, repoPath, url string, cred *gitexec.Cred, ops []Op, final map[string]gitexec.RefStatus) {
+	const maxIsolated = 100
+	var rejected []Op
+	reasons := map[string]bool{}
+	for _, op := range ops {
+		if st, ok := final[op.Ref]; ok && st.RemoteRejected() {
+			rejected = append(rejected, op)
+			reasons[st.Reason] = true
+		}
+	}
+	if len(rejected) < 2 || len(rejected) > maxIsolated || len(reasons) != 1 || ctx.Err() != nil {
+		return
+	}
+	for _, op := range rejected {
+		res, err := m.git.Push(ctx, repoPath, url, cred, []gitexec.PushOp{{Ref: op.Ref, New: op.New, Expect: op.Expect}}, false)
+		if err != nil {
+			continue
+		}
+		if st, ok := res.Refs[op.Ref]; ok {
+			final[op.Ref] = st
+		}
+	}
+}
+
+// ErrNeedsAdoption marks a mirror that must be adopted before first use.
+var ErrNeedsAdoption = errors.New("adoption required")
+
+// backupOwn keeps values repohub pushed earlier reachable on the hub before
+// they are force-replaced or deleted on a mirror. Branch values still
+// contained in some hub ref (including refs/backup/*) need nothing; tag
+// objects are always kept because a moved tag object is never contained.
+func (m *Manager) backupOwn(ctx context.Context, repoPath string, ops []Op) map[string]error {
+	stamp := backupStamp(time.Now())
+	var lines []string
+	var refs []string
+	for _, op := range ops {
+		if op.Overwrite || op.Expect == "" || !(op.Force || op.Action == ActionDelete) {
+			continue
+		}
+		if !m.git.HasObject(ctx, repoPath, op.Expect) {
+			continue // nothing left to preserve on the hub
+		}
+		if !strings.HasPrefix(op.Ref, "refs/tags/") && m.git.Referenced(ctx, repoPath, op.Expect) {
+			continue
+		}
+		lines = append(lines, "update refs/backup/"+stamp+"/"+op.Ref+" "+op.Expect)
+		refs = append(refs, op.Ref)
+	}
+	if err := m.git.UpdateRefs(ctx, repoPath, lines); err != nil {
+		errs := map[string]error{}
+		for _, r := range refs {
+			errs[r] = err
+		}
+		return errs
+	}
+	return nil
+}
+
 func looksMissing(err error) bool {
 	s := strings.ToLower(err.Error())
 	return strings.Contains(s, "not found") || strings.Contains(s, "does not exist") || strings.Contains(s, "could not be found")
@@ -374,6 +504,19 @@ func (m *Manager) backupRemote(ctx context.Context, repoPath, url string, cred *
 		if err := m.git.Fetch(ctx, repoPath, url, cred, specs...); err != nil {
 			for _, op := range fetched {
 				errs[op.Ref] = err
+			}
+		} else {
+			// The remote may have moved since it was observed; the backup must
+			// hold exactly the value the lease will overwrite.
+			prefix := fmt.Sprintf("refs/backup/%s/remotes/%d/", stamp, remoteID)
+			got, err := m.git.ForEachRef(ctx, repoPath, prefix)
+			for _, op := range fetched {
+				switch {
+				case err != nil:
+					errs[op.Ref] = err
+				case got[prefix+op.Ref] != op.Expect:
+					errs[op.Ref] = errors.New("remote changed while it was being backed up")
+				}
 			}
 		}
 	}

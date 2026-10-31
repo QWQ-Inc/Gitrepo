@@ -66,6 +66,7 @@ type PlanInput struct {
 //     deleted on the mirror loses nothing)
 //   - remote == last pushed                 → update/delete; it is ours
 //   - remote is an ancestor of hub          → fast-forward; loses nothing
+//     (branches only: a foreign tag is never moved)
 //   - otherwise                             → divergent: alert, or back up and
 //     overwrite when the remote is configured to do so
 //
@@ -98,17 +99,21 @@ func MakePlan(in PlanInput) Plan {
 			p.Ops = append(p.Ops, Op{Ref: ref, Action: ActionCreate, New: h})
 
 		case h != "" && r != "":
-			ff := in.IsAncestor(r, h)
 			switch {
 			case r == pushed:
-				p.Ops = append(p.Ops, Op{Ref: ref, Action: ActionUpdate, New: h, Expect: r, Force: !ff || isTag})
-			case ff:
-				p.Ops = append(p.Ops, Op{Ref: ref, Action: ActionUpdate, New: h, Expect: r, Force: isTag})
+				p.Ops = append(p.Ops, Op{Ref: ref, Action: ActionUpdate, New: h, Expect: r, Force: isTag || !in.IsAncestor(r, h)})
+			case !isTag && in.IsAncestor(r, h):
+				// A fast-forward keeps every commit. Tags are excluded: moving
+				// someone else's tag (e.g. a release) loses what it named.
+				p.Ops = append(p.Ops, Op{Ref: ref, Action: ActionUpdate, New: h, Expect: r})
 			case in.Overwrite:
 				p.Ops = append(p.Ops, Op{Ref: ref, Action: ActionUpdate, New: h, Expect: r, Force: true, Overwrite: true})
 			default:
 				reason := "remote has commits the hub does not"
-				if pushed == "" {
+				switch {
+				case isTag:
+					reason = "tag on the remote points elsewhere and was not written by repohub"
+				case pushed == "":
 					reason = "remote ref was not created by repohub"
 				}
 				p.Divergent = append(p.Divergent, Div{Ref: ref, HubSHA: h, RemoteSHA: r, Expected: pushed, Reason: reason})

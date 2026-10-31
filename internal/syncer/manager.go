@@ -31,6 +31,9 @@ const (
 	TriggerManual = "manual"
 )
 
+// leaseTTL bounds how long a crashed process can block a repository.
+const leaseTTL = 2 * time.Minute
+
 var triggerRank = map[string]int{TriggerPatrol: 1, TriggerRetry: 2, TriggerPush: 3, TriggerManual: 4}
 
 // Request asks for a sync of a repository.
@@ -93,11 +96,14 @@ type repoQueue struct {
 }
 
 type pendingRun struct {
-	trigger   string
-	overwrite bool
-	all       bool
-	ids       map[int64]bool
-	waiters   []chan Event
+	trigger string
+	all     bool
+	ids     map[int64]bool
+	// Overwrite is decided per remote: coalescing a targeted
+	// `--overwrite --remote N` with a push must not overwrite the others.
+	overwriteAll bool
+	overwriteIDs map[int64]bool
+	waiters      []chan Event
 }
 
 func New(st *store.Store, g *gitexec.Git, box *secrets.Box, reg *registry.Registry, log *slog.Logger, opts Options) *Manager {
@@ -131,18 +137,21 @@ func (m *Manager) Enqueue(repoID int64, req Request) <-chan Event {
 		m.queues[repoID] = q
 	}
 	if q.pending == nil {
-		q.pending = &pendingRun{trigger: req.Trigger, ids: map[int64]bool{}}
+		q.pending = &pendingRun{trigger: req.Trigger, ids: map[int64]bool{}, overwriteIDs: map[int64]bool{}}
 	}
 	p := q.pending
 	if triggerRank[req.Trigger] > triggerRank[p.trigger] {
 		p.trigger = req.Trigger
 	}
-	p.overwrite = p.overwrite || req.Overwrite
 	if len(req.RemoteIDs) == 0 {
 		p.all = true
+		p.overwriteAll = p.overwriteAll || req.Overwrite
 	}
 	for _, id := range req.RemoteIDs {
 		p.ids[id] = true
+		if req.Overwrite {
+			p.overwriteIDs[id] = true
+		}
 	}
 	p.waiters = append(p.waiters, ch)
 	if !q.running {
@@ -175,8 +184,36 @@ func (m *Manager) Busy(repoID int64) bool {
 
 // Shutdown cancels in-flight runs and waits for them to stop.
 func (m *Manager) Shutdown() {
+	m.mu.Lock() // no Enqueue can start a loop after this
 	m.cancel()
+	m.mu.Unlock()
 	m.wg.Wait()
+}
+
+// requeue schedules p again after a delay (without its waiters), keeping
+// its scope and per-remote overwrite decisions.
+func (m *Manager) requeue(repoID int64, p *pendingRun, delay time.Duration) {
+	time.AfterFunc(delay, func() {
+		if m.ctx.Err() != nil {
+			return
+		}
+		var plain, over []int64
+		for id := range p.ids {
+			if p.overwriteIDs[id] {
+				over = append(over, id)
+			} else {
+				plain = append(plain, id)
+			}
+		}
+		if p.all {
+			m.Enqueue(repoID, Request{Trigger: p.trigger, Overwrite: p.overwriteAll})
+		} else if len(plain) > 0 {
+			m.Enqueue(repoID, Request{Trigger: p.trigger, RemoteIDs: plain})
+		}
+		if len(over) > 0 && !p.overwriteAll {
+			m.Enqueue(repoID, Request{Trigger: p.trigger, Overwrite: true, RemoteIDs: over})
+		}
+	})
 }
 
 func (m *Manager) loop(repoID int64) {
@@ -219,19 +256,39 @@ func (m *Manager) runRepo(repoID int64, p *pendingRun) {
 	ctx := m.ctx
 	log := m.log.With("repo_id", repoID, "trigger", p.trigger)
 
+	// The lease is short and renewed while the run is alive, so a crashed
+	// holder blocks the repository for at most leaseTTL.
 	leaseName := "repo:" + strconv.FormatInt(repoID, 10)
-	ttl := (2*m.opts.PushTimeout + time.Minute).Milliseconds()
-	ok, err := m.store.AcquireLease(ctx, leaseName, m.holder, ttl)
+	ok, err := m.store.AcquireLease(ctx, leaseName, m.holder, leaseTTL.Milliseconds())
 	if err != nil || !ok {
-		msg := "another repohub instance holds the sync lease"
+		msg := "another repohub instance holds the sync lease; retrying in 30s"
 		if err != nil {
-			msg = err.Error()
+			msg = err.Error() + "; retrying in 30s"
 		}
-		log.Warn("skip run", "reason", msg)
+		log.Warn("defer run", "reason", msg)
+		m.requeue(repoID, p, 30*time.Second)
 		emit(Event{Type: "done", Error: msg})
 		return
 	}
-	defer m.store.ReleaseLease(context.Background(), leaseName, m.holder)
+	renewDone := make(chan struct{})
+	go func() {
+		t := time.NewTicker(leaseTTL / 3)
+		defer t.Stop()
+		for {
+			select {
+			case <-renewDone:
+				return
+			case <-t.C:
+				if _, err := m.store.AcquireLease(context.Background(), leaseName, m.holder, leaseTTL.Milliseconds()); err != nil {
+					log.Warn("renew sync lease", "err", err)
+				}
+			}
+		}
+	}()
+	defer func() {
+		close(renewDone)
+		m.store.ReleaseLease(context.Background(), leaseName, m.holder)
+	}()
 
 	repo, err := m.store.GetRepo(ctx, repoID)
 	if err != nil {
@@ -261,7 +318,6 @@ func (m *Manager) runRepo(repoID int64, p *pendingRun) {
 		return
 	}
 	emit(Event{Type: "start", Total: len(remotes)})
-	req := Request{Trigger: p.trigger, Overwrite: p.overwrite}
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -276,6 +332,7 @@ func (m *Manager) runRepo(repoID int64, p *pendingRun) {
 				return
 			}
 			defer func() { <-m.sem }()
+			req := Request{Trigger: p.trigger, Overwrite: p.overwriteAll || p.overwriteIDs[rem.ID]}
 			out := m.syncRemote(ctx, repo, rem, hub, req)
 			if out.State == store.StateFailed {
 				log.Warn("remote sync failed", "remote", out.Label, "err", out.Error)

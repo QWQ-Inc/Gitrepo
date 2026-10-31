@@ -173,6 +173,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if write {
 		env = append(env, githooks.EnvMaxFileSize+"="+strconv.FormatInt(s.maxFileSize(ctx, repo), 10))
 	}
+	// Hand http-backend exactly the service that was authorized: it reads
+	// the last "service" parameter while authorization used the first.
+	if rest == "info/refs" {
+		r.URL.RawQuery = "service=" + service
+	} else {
+		r.URL.RawQuery = ""
+	}
 	RunBackend(w, r, s.GitBin, "/"+slug+".git/"+rest, env, s.Log)
 }
 

@@ -201,6 +201,11 @@ CREATE TABLE webhooks (
   created_at       INTEGER NOT NULL
 );
 `,
+	// 3: adoption of pre-existing mirror repositories; binding name templates.
+	`
+ALTER TABLE remotes ADD COLUMN adopt INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE bindings ADD COLUMN name_template TEXT NOT NULL DEFAULT '{name}';
+`,
 }
 
 func (s *Store) migrate(ctx context.Context) error {

@@ -119,8 +119,10 @@ type glProtected struct {
 }
 
 // AllowForce enables allow_force_push on protection rules matching branches
-// that must be force-updated, and removes rules matching branches that must
-// be deleted (GitLab never lets a push delete a protected branch).
+// that must be force-updated (the mirror is managed by repohub, so this is
+// left in place), and removes exact-name rules of branches that must be
+// deleted (GitLab never lets a push delete a protected branch). Wildcard
+// rules are never removed.
 func (g *GitLab) AllowForce(ctx context.Context, t *store.Target, secret string, spec RepoSpec, force, del []string) error {
 	if len(force) == 0 && len(del) == 0 {
 		return nil
@@ -145,6 +147,12 @@ func (g *GitLab) AllowForce(ctx context.Context, t *store.Target, secret string,
 	for _, rule := range rules {
 		ruleURL := base + "/" + url.PathEscape(rule.Name)
 		if matchesAny(rule.Name, del) {
+			if strings.Contains(rule.Name, "*") {
+				// Removing a wildcard rule would unprotect every branch it
+				// covers; leave that decision to a human.
+				errs = append(errs, fmt.Errorf("cannot delete a branch protected by wildcard rule %q; remove the rule or the branch manually", rule.Name))
+				continue
+			}
 			if _, err := doJSON(ctx, http.MethodDelete, ruleURL, h, nil, nil); err != nil && statusOf(err) != http.StatusNotFound {
 				errs = append(errs, fmt.Errorf("unprotect %s: %w", rule.Name, err))
 			}

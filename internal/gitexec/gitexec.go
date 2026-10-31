@@ -108,8 +108,15 @@ func (g *Git) RunInput(ctx context.Context, dir string, stdin []byte, args ...st
 	return out, err
 }
 
+// run executes git. A non-empty dir must be a bare repository; it is passed
+// explicitly with --git-dir so a damaged repository can never make git
+// discover and operate on an enclosing one.
 func (g *Git) run(ctx context.Context, dir string, stdin []byte, extraEnv []string, args ...string) ([]byte, []byte, error) {
-	full := append(append([]string{}, baseConfig...), args...)
+	full := append([]string{}, baseConfig...)
+	if dir != "" {
+		full = append(full, "--git-dir="+dir)
+	}
+	full = append(full, args...)
 	cmd := exec.CommandContext(ctx, g.Bin, full...)
 	cmd.Dir = dir
 	cmd.Env = append(append(os.Environ(), g.Env...), extraEnv...)
@@ -282,6 +289,13 @@ func (g *Git) IsAncestor(ctx context.Context, repo, anc, desc string) bool {
 	return err == nil
 }
 
+// Referenced reports whether some ref of the repository (hidden ones
+// included) contains the commit sha, i.e. whether it is safe from gc.
+func (g *Git) Referenced(ctx context.Context, repo, sha string) bool {
+	out, err := g.Run(ctx, repo, "for-each-ref", "--count=1", "--format=%(refname)", "--contains", sha+"^{commit}")
+	return err == nil && len(bytes.TrimSpace(out)) > 0
+}
+
 // UpdateRefs applies "update <ref> <sha>" / "delete <ref>" lines atomically.
 func (g *Git) UpdateRefs(ctx context.Context, repo string, lines []string) error {
 	if len(lines) == 0 {
@@ -380,9 +394,16 @@ func (s RefStatus) OK() bool { return s.Flag != '!' }
 func (s RefStatus) StaleLease() bool { return s.Flag == '!' && s.Reason == "stale info" }
 
 // AtomicCollateral reports a ref rejected only because another ref in the
-// same atomic push failed.
+// same atomic push failed. The client says "atomic push failed" when it
+// aborts before sending; receive-pack says "atomic push failure" when the
+// server rejected a sibling ref (e.g. an update hook enforcing ACLs).
 func (s RefStatus) AtomicCollateral() bool {
-	return s.Flag == '!' && strings.Contains(s.Reason, "atomic push failed")
+	return s.Flag == '!' && (strings.Contains(s.Reason, "atomic push failed") || strings.Contains(s.Reason, "atomic push failure"))
+}
+
+// RemoteRejected reports a rejection decided by the server's hooks or rules.
+func (s RefStatus) RemoteRejected() bool {
+	return s.Flag == '!' && s.Summary == "[remote rejected]" && !s.AtomicCollateral()
 }
 
 // ErrAtomicUnsupported means the remote does not advertise atomic pushes.

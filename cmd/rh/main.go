@@ -344,17 +344,19 @@ func targetCmd() *cobra.Command {
 // ----------------------------------------------------------------- binding
 
 type bindFlags struct {
-	namespace, onDivergence string
-	applyExisting           bool
+	namespace, onDivergence, nameTemplate string
+	applyExisting                         bool
 }
 
 func addBinding(f *bindFlags, org, target string) error {
 	var res struct {
 		Binding client.Binding `json:"binding"`
 		Applied int            `json:"applied_to_repos"`
+		Skipped []string       `json:"skipped"`
 	}
 	err := call(http.MethodPost, "/api/bindings", map[string]any{
-		"org": org, "target": target, "namespace": f.namespace, "on_divergence": f.onDivergence, "apply_existing": f.applyExisting,
+		"org": org, "target": target, "namespace": f.namespace, "on_divergence": f.onDivergence,
+		"name_template": f.nameTemplate, "apply_existing": f.applyExisting,
 	}, &res)
 	if err != nil {
 		return err
@@ -369,6 +371,9 @@ func addBinding(f *bindFlags, org, target string) error {
 	fmt.Printf("new repositories in %s will mirror to %s (binding %d)\n", scope, target, res.Binding.ID)
 	if f.applyExisting {
 		fmt.Printf("added to %d existing repositories\n", res.Applied)
+		for _, s := range res.Skipped {
+			fmt.Println("  skipped", s)
+		}
 	}
 	return nil
 }
@@ -377,6 +382,7 @@ func (f *bindFlags) register(c *cobra.Command) {
 	c.Flags().StringVar(&f.namespace, "namespace", "", "namespace on the target (default: the target's namespace)")
 	c.Flags().StringVar(&f.onDivergence, "on-divergence", "alert", "alert | overwrite")
 	c.Flags().BoolVar(&f.applyExisting, "apply-existing", false, "also add the mirror to existing repositories of the org")
+	c.Flags().StringVar(&f.nameTemplate, "name-template", "{name}", "mirror repository name; {org} and {name} are the hub repository's, e.g. '{org}-{name}' when several orgs share one namespace")
 }
 
 func bindCmd() *cobra.Command {
@@ -411,13 +417,13 @@ func bindingCmd() *cobra.Command {
 				return printJSON(bs)
 			}
 			w := table()
-			fmt.Fprintln(w, "ID\tORG\tTARGET\tNAMESPACE\tON-DIVERGENCE")
+			fmt.Fprintln(w, "ID\tORG\tTARGET\tNAMESPACE\tMIRROR NAME\tON-DIVERGENCE")
 			for _, b := range bs {
 				ns := b.Namespace
 				if ns == "" {
 					ns = "(target default)"
 				}
-				fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\n", b.ID, b.Org, b.Target, ns, b.OnDivergence)
+				fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\n", b.ID, b.Org, b.Target, ns, b.NameTemplate, b.OnDivergence)
 			}
 			return w.Flush()
 		},
@@ -529,6 +535,7 @@ func findRemote(slug, ref string) (*client.Repo, *client.Remote, error) {
 func remoteCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "remote", Short: "Mirrors of a repository"}
 	var namespace, name, rawURL, onDiv string
+	var adopt bool
 	add := &cobra.Command{
 		Use:     "add ORG/NAME TARGET",
 		Short:   "Mirror a repository to a target",
@@ -541,7 +548,7 @@ func remoteCmd() *cobra.Command {
 			}
 			var r client.Repo
 			if err := call(http.MethodPost, p+"/remotes", map[string]any{
-				"target": args[1], "namespace": namespace, "name": name, "url": rawURL, "on_divergence": onDiv,
+				"target": args[1], "namespace": namespace, "name": name, "url": rawURL, "on_divergence": onDiv, "adopt": adopt,
 			}, &r); err != nil {
 				return err
 			}
@@ -556,6 +563,7 @@ func remoteCmd() *cobra.Command {
 	add.Flags().StringVar(&name, "name", "", "repository name on the target (default: same as on the hub)")
 	add.Flags().StringVar(&rawURL, "url", "", "explicit Git URL (overrides target URL derivation)")
 	add.Flags().StringVar(&onDiv, "on-divergence", "alert", "alert | overwrite")
+	add.Flags().BoolVar(&adopt, "adopt", false, "the mirror repository already has content: let repohub manage it (existing branches are fast-forwarded or reported, never overwritten)")
 
 	list := &cobra.Command{
 		Use: "list ORG/NAME", Aliases: []string{"ls"}, Short: "List mirrors", Args: cobra.ExactArgs(1),
@@ -578,6 +586,7 @@ func remoteCmd() *cobra.Command {
 			},
 		}
 	}
+	adoptCmd := patch("adopt", "Let repohub manage a mirror repository that already had content", func() map[string]any { return map[string]any{"adopt": true} }, "adopted; syncing now (foreign refs are fast-forwarded or reported as divergent, never overwritten)")
 	pause := patch("pause", "Stop pushing to a mirror (it is still checked)", func() map[string]any { return map[string]any{"enabled": false} }, "paused")
 	resume := patch("resume", "Resume pushing to a mirror", func() map[string]any { return map[string]any{"enabled": true} }, "resumed")
 	var setDiv string
@@ -598,7 +607,7 @@ func remoteCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.AddCommand(add, list, pause, resume, set, rm)
+	cmd.AddCommand(add, list, adoptCmd, pause, resume, set, rm)
 	return cmd
 }
 
@@ -774,6 +783,9 @@ func statusOne(slug string) error {
 	for _, rem := range r.Remotes {
 		if rem.LastError != "" {
 			fmt.Printf("\n%s error (%d consecutive failure(s), next retry %s):\n  %s\n", rem.Label, rem.ConsecutiveFailures, ago(rem.NextRetryAt), rem.LastError)
+		}
+		if rem.NeedsAdoption {
+			fmt.Printf("  if %s is the right repository: rh remote adopt %s %d\n", rem.URL, r.Slug, rem.ID)
 		}
 		if len(rem.Divergences) > 0 {
 			fmt.Printf("\n%s diverged:\n", rem.Label)

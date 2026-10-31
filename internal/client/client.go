@@ -103,6 +103,7 @@ type Binding struct {
 	Target       string `json:"target"`
 	Namespace    string `json:"namespace,omitempty"`
 	OnDivergence string `json:"on_divergence"`
+	NameTemplate string `json:"name_template"`
 }
 
 type Divergence struct {
@@ -124,6 +125,8 @@ type Remote struct {
 	URL                 string       `json:"url"`
 	OnDivergence        string       `json:"on_divergence"`
 	Enabled             bool         `json:"enabled"`
+	Adopt               bool         `json:"adopt"`
+	NeedsAdoption       bool         `json:"needs_adoption,omitempty"`
 	State               string       `json:"state"`
 	LastError           string       `json:"last_error,omitempty"`
 	ConsecutiveFailures int          `json:"consecutive_failures,omitempty"`
