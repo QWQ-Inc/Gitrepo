@@ -82,6 +82,8 @@ type PolicyConfig struct {
 	// limits of all remotes the repository mirrors to (e.g. GitHub's 100 MiB).
 	// Zero means "derive from remotes only".
 	MaxFileSize ByteSize `yaml:"max_file_size"`
+	// MaxLFSObjectSize rejects larger Git LFS uploads (0 = unlimited).
+	MaxLFSObjectSize ByteSize `yaml:"max_lfs_object_size"`
 }
 
 // Default returns a configuration with all defaults applied.

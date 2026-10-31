@@ -36,6 +36,7 @@ jobs:
         run: |
           docker run --rm gitrepo:ci version
           docker run --rm --entrypoint git gitrepo:ci --version
+          docker run --rm --entrypoint git gitrepo:ci lfs version
           docker run -d --name gitrepo -p 8080:8080 \
             -e GITREPO_SECRET_KEY="$(docker run --rm gitrepo:ci keygen)" \
             -e GITREPO_ADMIN_TOKEN=ci-admin gitrepo:ci

@@ -48,7 +48,7 @@ GitHub 和 GitLab 的 API 调用直接用 `net/http` 实现（每个平台只用
 ## M1 有意不做的事
 
 - 多实例：Hub 按单实例运行。SQLite 中的 lease 只防止两个进程误用同一个数据目录。
-- Git LFS：Hub 需要自己实现 LFS batch API 和对象存储才能接收 LFS 推送，计划在 M4。
+- Git LFS：已在 M1 之后实现，见下文。
 - 读取路由、熔断、镜像加速：Git 入口和 Hub 在同一个进程里，在有独立部署的边缘节点之前，路由带不来可用性收益。
 
 ## M1 之后补充的功能
@@ -76,3 +76,13 @@ M1 完成后做了一次独立的代码评审，修正了以下问题，每一�
   - 备份抓取后校验值是否与 lease 一致。
   - GitLab、Gitea 不再为了删除分支而删除通配保护规则。
 - **记录在案但不修改**：备份对象可以按 SHA 通过协议 v2 取回。保留协议 v2 的性能收益，风险与 GitHub 的悬空提交相同，已写入 README。
+
+## Git LFS
+
+Hub 自己实现了 LFS 服务端（`internal/lfs`）：
+
+- 协议：batch API，basic 传输，verify，以及一个空的锁 API（`locks/verify` 返回无锁，避免客户端每次推送都告警；创建锁返回 501）。
+- 鉴权：batch 请求和 git 使用同一套令牌与权限。上传、下载、verify 的 href 带有短期（1 小时）HMAC 签名令牌，绑定"仓库 + 对象 + 操作"，密钥由主密钥派生，服务重启后仍然有效。
+- 存储：对象放在 bare 仓库的 `lfs/objects/<aa>/<bb>/<oid>`，与 git-lfs 自己的布局一致。上传时边写临时文件边计算 SHA-256，校验通过才 rename 到最终位置。
+- 入口检查：pre-receive 读取新增的、可能是指针的小 blob（100～1024 字节），对象不在 Hub 上就拒绝推送。
+- 同步：推送 ref 之前，先用 `rev-list --objects --ignore-missing --stdin` 算出"新值可达、而镜像现有值不可达"的指针，再用 `git lfs push --object-id --stdin` 上传。镜像的地址通过 `-c remote.gitrepo-mirror.url=` 临时注入，凭据沿用 askpass 或 SSH 的同一套机制，并关闭 `lfs.locksverify`。LFS 上传失败时，这一轮不推送 ref。

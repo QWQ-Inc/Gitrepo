@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/qwq-inc/gitrepo/internal/gitexec"
+	"github.com/qwq-inc/gitrepo/internal/lfs"
 	"github.com/qwq-inc/gitrepo/internal/provider"
 	"github.com/qwq-inc/gitrepo/internal/store"
 )
@@ -256,7 +257,22 @@ func (m *Manager) syncRemote(parent context.Context, repo *store.Repo, rem *stor
 		}
 	}
 
-	// 6. Push.
+	// 6. Upload the LFS objects the new refs reference before the refs
+	// themselves, so the mirror never holds pointers without content.
+	if len(ops) > 0 && lfs.HasObjects(repoPath) {
+		n, missing, err := m.syncLFS(ctx, repoPath, url, cred, ops, remoteRefs)
+		if err != nil {
+			return fail("upload LFS objects: %v", err)
+		}
+		if n > 0 {
+			detail = append(detail, fmt.Sprintf("uploaded %d LFS object(s)", n))
+		}
+		if missing > 0 {
+			out.Warnings = append(out.Warnings, fmt.Sprintf("%d referenced LFS object(s) are not stored on the hub and were not uploaded", missing))
+		}
+	}
+
+	// 7. Push.
 	if len(ops) > 0 {
 		statuses, pushErr := m.push(ctx, repoPath, url, cred, rem, ops)
 		// Record what the mirror accepted right away, so a later failure
@@ -297,7 +313,7 @@ func (m *Manager) syncRemote(parent context.Context, repo *store.Repo, rem *stor
 		}
 	}
 
-	// 7. Verify.
+	// 8. Verify.
 	after, err := m.git.LsRemote(ctx, url, cred)
 	if err != nil {
 		return fail("verify (ls-remote): %v", err)
@@ -408,6 +424,40 @@ func (m *Manager) push(ctx context.Context, repoPath, url string, cred *gitexec.
 		ops = retry
 	}
 	return final, nil
+}
+
+// syncLFS uploads the LFS objects introduced by ops, i.e. referenced from
+// the new values but not from anything the mirror already has.
+func (m *Manager) syncLFS(ctx context.Context, repoPath, url string, cred *gitexec.Cred, ops []Op, remoteRefs map[string]string) (uploaded, missing int, err error) {
+	var tips, exclude []string
+	for _, op := range ops {
+		if op.Action != ActionDelete {
+			tips = append(tips, op.New)
+		}
+	}
+	if len(tips) == 0 {
+		return 0, 0, nil
+	}
+	for _, sha := range remoteRefs {
+		exclude = append(exclude, sha)
+	}
+	objs, err := m.git.LFSObjects(ctx, repoPath, tips, exclude)
+	if err != nil {
+		return 0, 0, err
+	}
+	var oids []string
+	for oid, size := range objs {
+		if lfs.Has(repoPath, oid, size) {
+			oids = append(oids, oid)
+		} else {
+			missing++
+		}
+	}
+	sort.Strings(oids)
+	if err := m.git.LFSPush(ctx, repoPath, url, cred, oids); err != nil {
+		return 0, missing, err
+	}
+	return len(oids), missing, nil
 }
 
 // isolateRejections handles servers whose hooks reject a whole push (GitLab

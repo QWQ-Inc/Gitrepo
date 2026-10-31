@@ -34,6 +34,8 @@ policy:
   # Hard cap per file. The effective limit for a repository is the smallest of
   # this and each mirror's limit (GitHub: 100 MiB). 0 = mirrors only.
   max_file_size: 0
+  # Largest Git LFS object accepted by the hub. 0 = unlimited.
+  max_lfs_object_size: 0
 
 alerts:
   failure_threshold: 3            # remote.failed after this many consecutive failures

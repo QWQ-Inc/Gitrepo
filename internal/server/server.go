@@ -23,6 +23,7 @@ import (
 	"github.com/qwq-inc/gitrepo/internal/config"
 	"github.com/qwq-inc/gitrepo/internal/gitexec"
 	"github.com/qwq-inc/gitrepo/internal/gitserve"
+	"github.com/qwq-inc/gitrepo/internal/lfs"
 	"github.com/qwq-inc/gitrepo/internal/notify"
 	"github.com/qwq-inc/gitrepo/internal/registry"
 	"github.com/qwq-inc/gitrepo/internal/secrets"
@@ -72,6 +73,7 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	lfsSigner := lfs.NewSigner(key)
 	box, err := secrets.New(key)
 	if err != nil {
 		return nil, err
@@ -153,6 +155,7 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*Server, error) {
 		HookToken:       s.hookToken,
 		MaxFileSize:     int64(cfg.Policy.MaxFileSize),
 		PostReceiveWait: cfg.Sync.PostReceiveWait.D(),
+		LFS:             &lfs.Server{Signer: lfsSigner, MaxObjectSize: int64(cfg.Policy.MaxLFSObjectSize), Log: log},
 	}
 	return s, nil
 }

@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -497,20 +496,6 @@ func TestEndToEnd(t *testing.T) {
 		out := e.run(work, "push", hub, "main")
 		mustContain(t, out, "[ok]       mirror-a:demo", "[ok]       mirror-b:demo")
 		sameRefs(t, "mirror-a", e.refs(remA), e.refs(hubDir))
-	})
-
-	t.Run("lfs requests get an explanation", func(t *testing.T) {
-		req, _ := http.NewRequest(http.MethodPost, "http://"+e.hubAddr+"/"+slug+".git/info/lfs/objects/batch", strings.NewReader("{}"))
-		req.SetBasicAuth("x", dev.Token)
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusNotImplemented || !strings.Contains(string(body), "not supported") {
-			t.Fatalf("lfs response %d %s", resp.StatusCode, body)
-		}
 	})
 
 	t.Run("push option gitrepo.wait=0 returns immediately", func(t *testing.T) {

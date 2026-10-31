@@ -16,6 +16,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,6 +24,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/qwq-inc/gitrepo/internal/lfs"
 )
 
 // ZeroSHA is git's all-zero object name used for creations and deletions.
@@ -145,6 +148,10 @@ func (g *Git) run(ctx context.Context, dir string, stdin []byte, extraEnv []stri
 
 // runRemote executes a git command that talks to a remote, injecting cred.
 func (g *Git) runRemote(ctx context.Context, dir string, cred *Cred, args ...string) ([]byte, []byte, error) {
+	return g.runRemoteInput(ctx, dir, cred, nil, args...)
+}
+
+func (g *Git) runRemoteInput(ctx context.Context, dir string, cred *Cred, stdin []byte, args ...string) ([]byte, []byte, error) {
 	env := []string{"GIT_TERMINAL_PROMPT=0", "SSH_ASKPASS=", "GIT_SSH_VARIANT=ssh"}
 	var cleanup []func()
 	defer func() {
@@ -174,7 +181,7 @@ func (g *Git) runRemote(ctx context.Context, dir string, cred *Cred, args ...str
 			env = append(env, "GIT_SSH_COMMAND="+sshCmd)
 		}
 	}
-	return g.run(ctx, dir, nil, env, args...)
+	return g.run(ctx, dir, stdin, env, args...)
 }
 
 func (g *Git) sshCommand(cred *Cred) (string, func(), error) {
@@ -367,6 +374,83 @@ func (g *Git) LsRemote(ctx context.Context, url string, cred *Cred) (map[string]
 func (g *Git) Fetch(ctx context.Context, repo, url string, cred *Cred, refspecs ...string) error {
 	args := append([]string{"fetch", "--quiet", "--no-tags", "--no-write-fetch-head", url}, refspecs...)
 	_, _, err := g.runRemote(ctx, repo, cred, args...)
+	return err
+}
+
+// LFSObjects returns the Git LFS objects (oid → size) referenced by blobs
+// reachable from tips but not from exclude. Exclude values the repository
+// does not have are ignored.
+func (g *Git) LFSObjects(ctx context.Context, repo string, tips, exclude []string) (map[string]int64, error) {
+	var in strings.Builder
+	for _, t := range tips {
+		in.WriteString(t + "\n")
+	}
+	for _, x := range exclude {
+		in.WriteString("^" + x + "\n")
+	}
+	list, err := g.RunInput(ctx, repo, []byte(in.String()), "rev-list", "--objects", "--ignore-missing", "--stdin")
+	if err != nil {
+		return nil, err
+	}
+	// %(rest) makes cat-file split "sha path" input lines at the first space;
+	// without it the whole line would be taken as the object name.
+	sizes, err := g.RunInput(ctx, repo, list, "cat-file", "--batch-check=%(objecttype) %(objectsize) %(objectname) %(rest)")
+	if err != nil {
+		return nil, err
+	}
+	var candidates strings.Builder
+	n := 0
+	for _, line := range strings.Split(string(sizes), "\n") {
+		f := strings.SplitN(line, " ", 4)
+		if len(f) < 3 || f[0] != "blob" {
+			continue
+		}
+		size, _ := strconv.Atoi(f[1])
+		if size >= 100 && size <= lfs.MaxPointerSize {
+			candidates.WriteString(f[2] + "\n")
+			n++
+		}
+	}
+	out := map[string]int64{}
+	if n == 0 {
+		return out, nil
+	}
+	contents, err := g.RunInput(ctx, repo, []byte(candidates.String()), "cat-file", "--batch")
+	if err != nil {
+		return nil, err
+	}
+	r := bufio.NewReader(bytes.NewReader(contents))
+	for {
+		header, err := r.ReadString('\n')
+		if err != nil {
+			break
+		}
+		f := strings.Fields(header)
+		if len(f) != 3 || f[1] != "blob" {
+			continue
+		}
+		size, _ := strconv.Atoi(f[2])
+		body := make([]byte, size+1)
+		if _, err := io.ReadFull(r, body); err != nil {
+			return nil, err
+		}
+		if p, ok := lfs.ParsePointer(body[:size]); ok {
+			out[p.OID] = p.Size
+		}
+	}
+	return out, nil
+}
+
+// LFSPush uploads the given LFS objects from repo to the LFS endpoint of
+// url (derived by git-lfs the same way as for a normal remote).
+func (g *Git) LFSPush(ctx context.Context, repo, url string, cred *Cred, oids []string) error {
+	if len(oids) == 0 {
+		return nil
+	}
+	_, _, err := g.runRemoteInput(ctx, repo, cred, []byte(strings.Join(oids, "\n")+"\n"),
+		"-c", "remote.gitrepo-mirror.url="+url,
+		"-c", "lfs.locksverify=false",
+		"lfs", "push", "--object-id", "gitrepo-mirror", "--stdin")
 	return err
 }
 

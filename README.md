@@ -22,7 +22,7 @@
 - **在入口挡住注定失败的 push**：单文件大小上限取所有镜像中最严的（GitHub 是 100 MiB），超限的 push 在 Hub 就被拒绝，不会在某个镜像上一直失败。
 - **出事会通知**：分叉、连续失败、恢复、凭据即将过期、同步完成（带 ref 和 SHA，可用来触发下游构建）都可以推送到带签名的 webhook，或直接推到 Slack、企业微信、飞书、钉钉。
 
-> 当前处于 M1 阶段，并已包含 M2（通知、Web 控制台）和 M4 的 Gitea/Forgejo 适配器。读取路由、镜像加速和 LFS 见 [路线图](#路线图)。
+> 当前处于 M1 阶段，并已包含 M2（通知、Web 控制台）以及 M4 的 Gitea/Forgejo 适配器和 Git LFS。读取路由和镜像加速见 [路线图](#路线图)。
 
 ## 快速开始
 
@@ -44,7 +44,7 @@ GITREPO_SECRET_KEY=... GITREPO_ADMIN_TOKEN=... docker compose -f deploy/docker-c
 
 镜像内置健康检查（`gitrepo healthcheck`）。
 
-运行时依赖系统 `git`（≥ 2.31）。生产环境请放在 TLS 反向代理后面。
+运行时依赖系统 `git`（≥ 2.31）；仓库用到 Git LFS 时还需要 `git-lfs`（Docker 镜像已自带）。生产环境请放在 TLS 反向代理后面。
 
 打开 `https://git.example.com/` 进入 Web 控制台，用管理令牌登录，之后的第 2～5 步都可以在控制台里完成。下面以 CLI 为例。
 
@@ -175,13 +175,23 @@ remote: gitrepo:   [failed]   github:acme/app  adoption required: the mirror rep
 
 确认它就是这个 Hub 仓库对应的镜像后再接管：`gr remote adopt acme/app github`（或在 `gr remote add` 时加 `--adopt`）。接管后，已有的分支只会快进或被报告为分叉，不会被覆盖。这样可以防止某条备份规则把一个新的 Hub 仓库指向别人已有的项目。
 
+## Git LFS
+
+客户端照常使用：`git lfs track`、`git push`。Hub 本身就是 LFS 服务器（`<仓库地址>/info/lfs`），使用相同的令牌和权限。读权限可以下载，写权限可以上传，公开仓库允许匿名下载。
+
+同步时，Gitrepo 先把本次新引用的 LFS 对象用 `git lfs push` 上传到各镜像，再推送 ref，所以镜像上不会出现缺内容的指针。只上传本次同步新增的对象，不会每次重传整个历史。
+
+- 镜像平台要开启 LFS：GitHub 默认开启，但有存储配额；GitLab 默认开启；Gitea/Forgejo 需要服务端启用 LFS。通过 SSH 访问的通用镜像，需要服务端支持 `git-lfs-authenticate`。
+- 单个对象大小可以用 `policy.max_lfs_object_size` 限制。对象存放在 Hub 仓库目录下的 `lfs/objects/`，备份数据目录时会一并备份。
+- 暂不支持 LFS 文件锁：`git lfs lock` 会返回明确的错误；推送时的锁检查会通过，不会产生警告。
+
 ## 策略
 
 在 Hub 的 pre-receive 阶段执行：
 
 - 只允许推送 `refs/heads/*` 和 `refs/tags/*`（像 `refs/pull/*` 这样的 ref 推到别的平台会被拒绝）；
 - 单个文件不能超过所有镜像中最严的上限：GitHub 为 100 MiB，可以用 `--max-file-size` 按 target 覆盖，也可以用 `policy.max_file_size` 设全局上限；
-- Git LFS 暂不支持，LFS 客户端会收到明确的错误提示。
+- 推送的 LFS 指针必须有对应的对象已上传到 Hub，否则拒绝，避免镜像上出现"有指针、没内容"的文件。
 
 ## 访问控制
 
@@ -254,7 +264,7 @@ Git 地址：`/{org}/{name}.git`（smart HTTP，协议 v2）。
 - **M1（已完成）**：target / binding / token，push 自动建仓，pre/post-receive，force-with-lease 同步，分叉检测与备份，巡检与重试，`gr status`。
 - **M2**：~~出站 webhook 与告警~~、~~Web 控制台~~（已完成）。
 - **M3**：只读边缘节点、bundle-uri / 源码包 CDN、按区域读取路由。
-- **M4**：~~Gitea / Forgejo 适配器~~（已完成）、Gitee 适配器、Git LFS、按需同步 Release。
+- **M4**：~~Gitea / Forgejo 适配器~~、~~Git LFS~~（已完成）、Gitee 适配器、按需同步 Release。
 
 ## 发布
 

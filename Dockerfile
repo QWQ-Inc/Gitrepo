@@ -12,7 +12,7 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags 
 
 FROM debian:bookworm-slim
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git openssh-client ca-certificates \
+ && apt-get install -y --no-install-recommends git git-lfs openssh-client ca-certificates \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --system --uid 10001 --home-dir /data gitrepo \
  && mkdir -p /data && chown gitrepo /data
