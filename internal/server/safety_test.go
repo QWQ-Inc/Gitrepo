@@ -65,7 +65,7 @@ func TestMirrorSafety(t *testing.T) {
 		e.run(other, "push", "-q", legacy, "main")
 
 		out := e.run(work, "push", e.hubURL(dev.Token, "legacy/app"), "main", "feature")
-		mustContain(t, out, "[failed]   existing:app", "adoption required", "rh remote adopt legacy/app")
+		mustContain(t, out, "[failed]   existing:app", "adoption required", "gr remote adopt legacy/app")
 		if refs := e.refs(legacy); len(refs) != 1 || refs["refs/heads/main"] != foreign {
 			t.Fatalf("pre-existing mirror was modified before adoption: %v", refs)
 		}

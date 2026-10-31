@@ -4,5 +4,5 @@
 *.db
 *.db-wal
 *.db-shm
-repohub.yaml
-!deploy/repohub.example.yaml
+gitrepo.yaml
+!deploy/gitrepo.example.yaml

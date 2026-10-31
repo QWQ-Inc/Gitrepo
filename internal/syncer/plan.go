@@ -25,17 +25,17 @@ type Op struct {
 	// Force: the update is not a fast-forward (or is a delete / tag move), so
 	// branch protection may have to be relaxed.
 	Force bool
-	// Overwrite: the remote value was not written by repohub and is being
+	// Overwrite: the remote value was not written by Gitrepo and is being
 	// replaced because of on_divergence=overwrite; it must be backed up first.
 	Overwrite bool
 }
 
-// Div describes a ref where the remote holds changes repohub did not make.
+// Div describes a ref where the remote holds changes Gitrepo did not make.
 type Div struct {
 	Ref       string
 	HubSHA    string
 	RemoteSHA string
-	Expected  string // last SHA repohub pushed ("" if never)
+	Expected  string // last SHA Gitrepo pushed ("" if never)
 	Reason    string
 }
 
@@ -50,7 +50,7 @@ type Plan struct {
 type PlanInput struct {
 	Hub    map[string]string // refs on the hub (the source of truth)
 	Remote map[string]string // refs observed on the remote just now
-	Pushed map[string]string // what repohub last pushed to the remote
+	Pushed map[string]string // what Gitrepo last pushed to the remote
 	// IsAncestor reports whether a is an ancestor of b in the hub repository
 	// (false if either object is unknown to the hub).
 	IsAncestor func(a, b string) bool
@@ -59,7 +59,7 @@ type PlanInput struct {
 }
 
 // MakePlan decides, per ref, how to bring the remote in line with the hub
-// without ever silently destroying data repohub did not write:
+// without ever silently destroying data Gitrepo did not write:
 //
 //   - remote == hub                         → nothing to do
 //   - remote missing                        → create (re-creating a ref someone
@@ -112,9 +112,9 @@ func MakePlan(in PlanInput) Plan {
 				reason := "remote has commits the hub does not"
 				switch {
 				case isTag:
-					reason = "tag on the remote points elsewhere and was not written by repohub"
+					reason = "tag on the remote points elsewhere and was not written by Gitrepo"
 				case pushed == "":
-					reason = "remote ref was not created by repohub"
+					reason = "remote ref was not created by Gitrepo"
 				}
 				p.Divergent = append(p.Divergent, Div{Ref: ref, HubSHA: h, RemoteSHA: r, Expected: pushed, Reason: reason})
 			}

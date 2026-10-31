@@ -26,8 +26,8 @@ var scopeRank = map[string]int{ScopeRead: 1, ScopeWrite: 2, ScopeCreate: 3, Scop
 // ValidScope reports whether s is a known scope.
 func ValidScope(s string) bool { _, ok := scopeRank[s]; return ok }
 
-// TokenPrefix marks repohub tokens so they are easy to spot in leaks.
-const TokenPrefix = "rhp_"
+// TokenPrefix marks Gitrepo tokens so they are easy to spot in leaks.
+const TokenPrefix = "grp_"
 
 // NewToken returns a new random token and its storage hash.
 func NewToken() (plain, hash string) {

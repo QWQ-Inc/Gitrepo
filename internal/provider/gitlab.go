@@ -102,7 +102,7 @@ func (g *GitLab) EnsureRepo(ctx context.Context, t *store.Target, secret string,
 		"namespace_id":           nsInfo.ID,
 		"visibility":             vis,
 		"initialize_with_readme": false,
-		"description":            "Mirror managed by repohub",
+		"description":            "Mirror managed by Gitrepo",
 	}
 	if _, err := doJSON(ctx, http.MethodPost, g.api(t)+"/projects", h, body, nil); err != nil {
 		if statusOf(err) == http.StatusBadRequest && strings.Contains(err.Error(), "has already been taken") {
@@ -119,7 +119,7 @@ type glProtected struct {
 }
 
 // AllowForce enables allow_force_push on protection rules matching branches
-// that must be force-updated (the mirror is managed by repohub, so this is
+// that must be force-updated (the mirror is managed by Gitrepo, so this is
 // left in place), and removes exact-name rules of branches that must be
 // deleted (GitLab never lets a push delete a protected branch). Wildcard
 // rules are never removed.

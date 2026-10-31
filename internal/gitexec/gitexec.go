@@ -3,7 +3,7 @@
 // support behave exactly like upstream.
 //
 // Credentials never appear on the command line or in URLs: HTTPS remotes get
-// them through GIT_ASKPASS (a repohub shim that asks the server over a unix
+// them through GIT_ASKPASS (a Gitrepo shim that asks the server over a unix
 // socket using a one-time ticket), SSH remotes through a temporary key file
 // referenced by GIT_SSH_COMMAND.
 package gitexec
@@ -162,8 +162,8 @@ func (g *Git) runRemote(ctx context.Context, dir string, cred *Cred, args ...str
 			cleanup = append(cleanup, release)
 			env = append(env,
 				"GIT_ASKPASS="+g.AskpassPath,
-				"REPOHUB_SOCKET="+g.SocketPath,
-				"REPOHUB_ASKPASS_TICKET="+ticket,
+				"GITREPO_SOCKET="+g.SocketPath,
+				"GITREPO_ASKPASS_TICKET="+ticket,
 			)
 		case "ssh":
 			sshCmd, rm, err := g.sshCommand(cred)

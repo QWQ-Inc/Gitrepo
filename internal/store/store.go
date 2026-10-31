@@ -1,4 +1,4 @@
-// Package store persists repohub state in SQLite (pure-Go driver, no cgo).
+// Package store persists Gitrepo state in SQLite (pure-Go driver, no cgo).
 // The schema avoids SQLite-only features so it can move to Postgres later.
 //
 // Timestamps are stored as Unix milliseconds; 0 means "unset".
@@ -39,7 +39,7 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	// One connection serialises access; repohub's write volume is tiny and
+	// One connection serialises access; Gitrepo's write volume is tiny and
 	// this rules out SQLITE_BUSY between goroutines. Callers must never hold
 	// a *sql.Rows open while issuing another query.
 	db.SetMaxOpenConns(1)

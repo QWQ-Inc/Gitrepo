@@ -160,7 +160,7 @@ func (m *Manager) syncRemote(parent context.Context, repo *store.Repo, rem *stor
 		return out
 	}
 
-	// A mirror that already holds refs repohub did not write is only taken
+	// A mirror that already holds refs Gitrepo did not write is only taken
 	// over after an administrator confirms it is the intended repository;
 	// otherwise a binding could point a new hub repository at someone
 	// else's existing project.
@@ -175,7 +175,7 @@ func (m *Manager) syncRemote(parent context.Context, repo *store.Repo, rem *stor
 			sort.Strings(foreign)
 			divs = nil
 			planned = false
-			return fail("%s: the mirror repository already contains %d ref(s) repohub did not write (e.g. %s); if it is the right repository, adopt it: rh remote adopt %s %d",
+			return fail("%s: the mirror repository already contains %d ref(s) Gitrepo did not write (e.g. %s); if it is the right repository, adopt it: gr remote adopt %s %d",
 				ErrNeedsAdoption, len(foreign), foreign[0], repo.Slug, rem.ID)
 		}
 	}
@@ -222,7 +222,7 @@ func (m *Manager) syncRemote(parent context.Context, repo *store.Repo, rem *stor
 		}
 	}
 
-	// Values repohub itself pushed are about to be replaced. Make sure the
+	// Values Gitrepo itself pushed are about to be replaced. Make sure the
 	// hub still references them, independent of whether the post-receive
 	// hook managed to record its own backup.
 	if errs := m.backupOwn(ctx, repoPath, ops); len(errs) > 0 {
@@ -441,7 +441,7 @@ func (m *Manager) isolateRejections(ctx context.Context, repoPath, url string, c
 // ErrNeedsAdoption marks a mirror that must be adopted before first use.
 var ErrNeedsAdoption = errors.New("adoption required")
 
-// backupOwn keeps values repohub pushed earlier reachable on the hub before
+// backupOwn keeps values Gitrepo pushed earlier reachable on the hub before
 // they are force-replaced or deleted on a mirror. Branch values still
 // contained in some hub ref (including refs/backup/*) need nothing; tag
 // objects are always kept because a moved tag object is never contained.

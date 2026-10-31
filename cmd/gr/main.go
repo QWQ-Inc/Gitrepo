@@ -1,10 +1,10 @@
-// Command rh is the repohub command-line client.
+// Command gr is the Gitrepo command-line client.
 //
-//	export REPOHUB_URL=https://git.example.com REPOHUB_TOKEN=…
-//	rh target add github --provider github --namespace acme --token-env GITHUB_TOKEN
-//	rh bind '*' github
+//	export GITREPO_URL=https://git.example.com GITREPO_TOKEN=…
+//	gr target add github --provider github --namespace acme --token-env GITHUB_TOKEN
+//	gr bind '*' github
 //	git push https://git.example.com/acme/demo.git main
-//	rh status acme/demo
+//	gr status acme/demo
 package main
 
 import (
@@ -36,14 +36,14 @@ var (
 
 func main() {
 	root := &cobra.Command{
-		Use:           "rh",
-		Short:         "repohub client: manage targets, mirrors and sync status",
+		Use:           "gr",
+		Short:         "Gitrepo client: manage targets, mirrors and sync status",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Version:       version,
 	}
-	root.PersistentFlags().StringVar(&flagURL, "url", envOr("REPOHUB_URL", "http://localhost:8080"), "repohub server URL (env REPOHUB_URL)")
-	root.PersistentFlags().StringVar(&flagToken, "token", os.Getenv("REPOHUB_TOKEN"), "admin token (env REPOHUB_TOKEN)")
+	root.PersistentFlags().StringVar(&flagURL, "url", envOr("GITREPO_URL", "http://localhost:8080"), "gitrepo server URL (env GITREPO_URL)")
+	root.PersistentFlags().StringVar(&flagToken, "token", os.Getenv("GITREPO_TOKEN"), "admin token (env GITREPO_TOKEN)")
 	root.PersistentFlags().BoolVar(&flagJSON, "json", false, "print raw JSON")
 
 	root.AddCommand(targetCmd(), bindCmd(), bindingCmd(), repoCmd(), remoteCmd(), syncCmd(), statusCmd(), runsCmd(), tokenCmd(), webhookCmd())
@@ -224,9 +224,9 @@ func targetCmd() *cobra.Command {
 	add := &cobra.Command{
 		Use:   "add NAME",
 		Short: "Add a target",
-		Example: `  rh target add github --provider github --namespace acme --token-env GITHUB_TOKEN
-  rh target add gitlab --provider gitlab --namespace acme-group --token-stdin < token.txt
-  rh target add internal --provider generic --url-template 'ssh://git@git.example.com/{namespace}/{name}.git' --ssh-key-file ~/.ssh/mirror`,
+		Example: `  gr target add github --provider github --namespace acme --token-env GITHUB_TOKEN
+  gr target add gitlab --provider gitlab --namespace acme-group --token-stdin < token.txt
+  gr target add internal --provider generic --url-template 'ssh://git@git.example.com/{namespace}/{name}.git' --ssh-key-file ~/.ssh/mirror`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			b, err := af.body(c)
@@ -248,7 +248,7 @@ func targetCmd() *cobra.Command {
 				return printJSON(t)
 			}
 			fmt.Printf("target %s added (%s, namespace %q)\n", t.Name, t.Provider, t.Namespace)
-			fmt.Printf("next: rh target check %s   and   rh bind '*' %s\n", t.Name, t.Name)
+			fmt.Printf("next: gr target check %s   and   gr bind '*' %s\n", t.Name, t.Name)
 			return nil
 		},
 	}
@@ -390,7 +390,7 @@ func bindCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:     "bind ORG|'*' TARGET",
 		Short:   "Mirror every new repository of an org (or all orgs) to a target",
-		Example: "  rh bind '*' github\n  rh bind acme gitlab --namespace acme-mirrors",
+		Example: "  gr bind '*' github\n  gr bind acme gitlab --namespace acme-mirrors",
 		Args:    cobra.ExactArgs(2),
 		RunE:    func(c *cobra.Command, args []string) error { return addBinding(&f, args[0], args[1]) },
 	}
@@ -402,7 +402,7 @@ func bindingCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "binding", Short: "Org → target defaults applied to new repositories"}
 	var f bindFlags
 	add := &cobra.Command{
-		Use: "add ORG|'*' TARGET", Short: "Same as rh bind", Args: cobra.ExactArgs(2),
+		Use: "add ORG|'*' TARGET", Short: "Same as gr bind", Args: cobra.ExactArgs(2),
 		RunE: func(c *cobra.Command, args []string) error { return addBinding(&f, args[0], args[1]) },
 	}
 	f.register(add)
@@ -471,7 +471,7 @@ func repoCmd() *cobra.Command {
 				fmt.Printf("  mirror:  %s  %s\n", rem.Label, rem.URL)
 			}
 			if len(r.Remotes) == 0 {
-				fmt.Println("  no mirrors yet: rh remote add", r.Slug, "<target>")
+				fmt.Println("  no mirrors yet: gr remote add", r.Slug, "<target>")
 			}
 			return nil
 		},
@@ -524,7 +524,7 @@ func findRemote(slug, ref string) (*client.Repo, *client.Remote, error) {
 	}
 	switch len(match) {
 	case 0:
-		return nil, nil, fmt.Errorf("no remote %q on %s (see rh remote list %s)", ref, slug, slug)
+		return nil, nil, fmt.Errorf("no remote %q on %s (see gr remote list %s)", ref, slug, slug)
 	case 1:
 		return &r, match[0], nil
 	default:
@@ -539,7 +539,7 @@ func remoteCmd() *cobra.Command {
 	add := &cobra.Command{
 		Use:     "add ORG/NAME TARGET",
 		Short:   "Mirror a repository to a target",
-		Example: "  rh remote add acme/demo gitlab\n  rh remote add acme/demo internal --url ssh://git@git.example.com/backup/demo.git",
+		Example: "  gr remote add acme/demo gitlab\n  gr remote add acme/demo internal --url ssh://git@git.example.com/backup/demo.git",
 		Args:    cobra.ExactArgs(2),
 		RunE: func(c *cobra.Command, args []string) error {
 			p, err := repoPath(args[0])
@@ -555,7 +555,7 @@ func remoteCmd() *cobra.Command {
 			if flagJSON {
 				return printJSON(r)
 			}
-			fmt.Printf("mirror added; first sync queued (rh status %s)\n", r.Slug)
+			fmt.Printf("mirror added; first sync queued (gr status %s)\n", r.Slug)
 			return nil
 		},
 	}
@@ -563,7 +563,7 @@ func remoteCmd() *cobra.Command {
 	add.Flags().StringVar(&name, "name", "", "repository name on the target (default: same as on the hub)")
 	add.Flags().StringVar(&rawURL, "url", "", "explicit Git URL (overrides target URL derivation)")
 	add.Flags().StringVar(&onDiv, "on-divergence", "alert", "alert | overwrite")
-	add.Flags().BoolVar(&adopt, "adopt", false, "the mirror repository already has content: let repohub manage it (existing branches are fast-forwarded or reported, never overwritten)")
+	add.Flags().BoolVar(&adopt, "adopt", false, "the mirror repository already has content: let Gitrepo manage it (existing branches are fast-forwarded or reported, never overwritten)")
 
 	list := &cobra.Command{
 		Use: "list ORG/NAME", Aliases: []string{"ls"}, Short: "List mirrors", Args: cobra.ExactArgs(1),
@@ -586,7 +586,7 @@ func remoteCmd() *cobra.Command {
 			},
 		}
 	}
-	adoptCmd := patch("adopt", "Let repohub manage a mirror repository that already had content", func() map[string]any { return map[string]any{"adopt": true} }, "adopted; syncing now (foreign refs are fast-forwarded or reported as divergent, never overwritten)")
+	adoptCmd := patch("adopt", "Let Gitrepo manage a mirror repository that already had content", func() map[string]any { return map[string]any{"adopt": true} }, "adopted; syncing now (foreign refs are fast-forwarded or reported as divergent, never overwritten)")
 	pause := patch("pause", "Stop pushing to a mirror (it is still checked)", func() map[string]any { return map[string]any{"enabled": false} }, "paused")
 	resume := patch("resume", "Resume pushing to a mirror", func() map[string]any { return map[string]any{"enabled": true} }, "resumed")
 	var setDiv string
@@ -679,7 +679,7 @@ refs/backup/<time>/remotes/<id>/… first.`,
 				}
 			}
 			if res.Timeout {
-				fmt.Println("still running; check rh status", args[0])
+				fmt.Println("still running; check gr status", args[0])
 			}
 			if failed {
 				return errors.New("not all mirrors are in sync")
@@ -767,7 +767,7 @@ func statusOne(slug string) error {
 	fmt.Printf("push/clone: %s\n", r.CloneURL)
 	fmt.Printf("state:      %s%s\n\n", r.State, busy)
 	if len(r.Remotes) == 0 {
-		fmt.Println("no mirrors — rh remote add", r.Slug, "<target>")
+		fmt.Println("no mirrors — gr remote add", r.Slug, "<target>")
 		return nil
 	}
 	w := table()
@@ -785,14 +785,14 @@ func statusOne(slug string) error {
 			fmt.Printf("\n%s error (%d consecutive failure(s), next retry %s):\n  %s\n", rem.Label, rem.ConsecutiveFailures, ago(rem.NextRetryAt), rem.LastError)
 		}
 		if rem.NeedsAdoption {
-			fmt.Printf("  if %s is the right repository: rh remote adopt %s %d\n", rem.URL, r.Slug, rem.ID)
+			fmt.Printf("  if %s is the right repository: gr remote adopt %s %d\n", rem.URL, r.Slug, rem.ID)
 		}
 		if len(rem.Divergences) > 0 {
 			fmt.Printf("\n%s diverged:\n", rem.Label)
 			for _, d := range rem.Divergences {
 				fmt.Printf("  %s  %s (mirror %s, hub %s, last pushed %s)\n", d.Ref, d.Reason, short(d.RemoteSHA), short(d.HubSHA), short(d.ExpectedSHA))
 			}
-			fmt.Printf("  resolve: merge the mirror's commits and push to the hub, or: rh sync %s --overwrite --remote %d\n", r.Slug, rem.ID)
+			fmt.Printf("  resolve: merge the mirror's commits and push to the hub, or: gr sync %s --overwrite --remote %d\n", r.Slug, rem.ID)
 		}
 	}
 	return nil
@@ -846,7 +846,7 @@ func tokenCmd() *cobra.Command {
 	create := &cobra.Command{
 		Use:     "create NAME",
 		Short:   "Create a token (shown once)",
-		Example: "  rh token create laptop --scopes create\n  rh token create ci --scopes read --repos 'acme/*'",
+		Example: "  gr token create laptop --scopes create\n  gr token create ci --scopes read --repos 'acme/*'",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			var t client.Token
@@ -925,14 +925,14 @@ func webhookCmd() *cobra.Command {
 Events: push, sync.completed, remote.diverged, remote.failed, remote.recovered,
 credential.expiring; "remote.*" or "*" subscribe to groups.
 
-JSON deliveries carry X-Repohub-Event, X-Repohub-Delivery and, with a secret,
-X-Repohub-Signature-256: sha256=HMAC-SHA256(secret, body).
+JSON deliveries carry X-Gitrepo-Event, X-Gitrepo-Delivery and, with a secret,
+X-Gitrepo-Signature-256: sha256=HMAC-SHA256(secret, body).
 
 Chat-bot URLs contain their access key; pass them with --url-env to keep them
 out of shell history. They are stored encrypted.`,
-		Example: `  rh webhook add ci --url https://ci.example.com/hooks/repohub --events sync.completed --secret-env HOOK_SECRET
-  rh webhook add oncall --format wecom --url-env WECOM_BOT_URL --events 'remote.*,credential.expiring'
-  rh webhook add team --format slack --url-env SLACK_WEBHOOK_URL --repos 'acme/*'`,
+		Example: `  gr webhook add ci --url https://ci.example.com/hooks/gitrepo --events sync.completed --secret-env HOOK_SECRET
+  gr webhook add oncall --format wecom --url-env WECOM_BOT_URL --events 'remote.*,credential.expiring'
+  gr webhook add team --format slack --url-env SLACK_WEBHOOK_URL --repos 'acme/*'`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			u := rawURL
@@ -957,7 +957,7 @@ out of shell history. They are stored encrypted.`,
 			if flagJSON {
 				return printJSON(h)
 			}
-			fmt.Printf("webhook %s added (id %d, %s → %s); try it: rh webhook test %d\n", h.Name, h.ID, h.Format, h.Host, h.ID)
+			fmt.Printf("webhook %s added (id %d, %s → %s); try it: gr webhook test %d\n", h.Name, h.ID, h.Format, h.Host, h.ID)
 			return nil
 		},
 	}

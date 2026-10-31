@@ -26,17 +26,17 @@ import (
 	"github.com/qwq-inc/gitrepo/internal/server"
 )
 
-var repohubBin string
+var gitrepoBin string
 
 func TestMain(m *testing.M) {
-	dir, err := os.MkdirTemp("", "repohub-bin")
+	dir, err := os.MkdirTemp("", "gitrepo-bin")
 	if err != nil {
 		panic(err)
 	}
-	repohubBin = filepath.Join(dir, "repohub")
-	out, err := exec.Command("go", "build", "-o", repohubBin, "github.com/qwq-inc/gitrepo/cmd/repohub").CombinedOutput()
+	gitrepoBin = filepath.Join(dir, "gitrepo")
+	out, err := exec.Command("go", "build", "-o", gitrepoBin, "github.com/qwq-inc/gitrepo/cmd/gitrepo").CombinedOutput()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "build repohub: %v\n%s", err, out)
+		fmt.Fprintf(os.Stderr, "build gitrepo: %v\n%s", err, out)
 		os.Exit(1)
 	}
 	code := m.Run()
@@ -116,7 +116,7 @@ func newEnv(t *testing.T, tweaks ...func(*config.Config)) *env {
 
 	cfg := config.Default()
 	cfg.DataDir = filepath.Join(tmp, "data")
-	cfg.Git.SelfPath = repohubBin
+	cfg.Git.SelfPath = gitrepoBin
 	cfg.SecretKeyEnv = "RH_TEST_SECRET_KEY"
 	cfg.AdminTokenEnv = "RH_TEST_ADMIN_TOKEN"
 	cfg.Sync.PostReceiveWait = config.Duration(30 * time.Second)
@@ -385,7 +385,7 @@ func TestEndToEnd(t *testing.T) {
 		featTip := e.commit(work, "feature.txt", "feature 2\n")
 		e.run(work, "checkout", "-q", "main")
 		out := e.run(work, "push", hub, "main", "feature")
-		mustContain(t, out, "[ok]       mirror-a:demo", "[diverged] mirror-b:demo  refs/heads/main", "rh sync acme/demo --overwrite")
+		mustContain(t, out, "[ok]       mirror-a:demo", "[diverged] mirror-b:demo  refs/heads/main", "gr sync acme/demo --overwrite")
 
 		if e.refs(remA)["refs/heads/main"] != mainTip {
 			t.Fatal("mirror-a main not updated")
@@ -513,9 +513,9 @@ func TestEndToEnd(t *testing.T) {
 		}
 	})
 
-	t.Run("push option repohub.wait=0 returns immediately", func(t *testing.T) {
+	t.Run("push option gitrepo.wait=0 returns immediately", func(t *testing.T) {
 		tip := e.commit(work, "async.txt", "async\n")
-		out := e.run(work, "push", "-o", "repohub.wait=0", hub, "main")
+		out := e.run(work, "push", "-o", "gitrepo.wait=0", hub, "main")
 		mustContain(t, out, "sync to 2 mirror(s) queued")
 		deadline := time.Now().Add(30 * time.Second)
 		for e.refs(remA)["refs/heads/main"] != tip || e.refs(remB)["refs/heads/main"] != tip {

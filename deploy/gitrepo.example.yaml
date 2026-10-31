@@ -1,25 +1,25 @@
-# repohub configuration. Every key is optional; the values shown are the
-# defaults unless noted. REPOHUB_LISTEN / REPOHUB_PUBLIC_URL / REPOHUB_DATA_DIR
+# Gitrepo configuration. Every key is optional; the values shown are the
+# defaults unless noted. GITREPO_LISTEN / GITREPO_PUBLIC_URL / GITREPO_DATA_DIR
 # environment variables override the corresponding keys.
 version: 1
 
 listen: ":8080"
-# The address clients push to; used for clone URLs printed by the API and rh.
+# The address clients push to; used for clone URLs printed by the API and gr.
 public_url: "https://git.example.com"     # default: http://localhost:8080
 data_dir: "/data"                          # default: ./data
 
 # Environment variable holding the 32-byte master key that encrypts platform
-# credentials (base64 or hex). Generate with `repohub keygen`. Losing it
+# credentials (base64 or hex). Generate with `gitrepo keygen`. Losing it
 # means re-entering all target credentials.
-secret_key_env: REPOHUB_SECRET_KEY
-# secret_key_file: /run/secrets/repohub_key
+secret_key_env: GITREPO_SECRET_KEY
+# secret_key_file: /run/secrets/gitrepo_key
 
 # Environment variable holding the bootstrap admin token.
-admin_token_env: REPOHUB_ADMIN_TOKEN
+admin_token_env: GITREPO_ADMIN_TOKEN
 
 git:
   binary: git          # git >= 2.31 is required
-  # self_path: /usr/local/bin/repohub   # executable used by hooks/askpass; default: this binary
+  # self_path: /usr/local/bin/gitrepo   # executable used by hooks/askpass; default: this binary
 
 sync:
   workers: 4                 # concurrent remote operations, all repositories

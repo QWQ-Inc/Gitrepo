@@ -37,7 +37,7 @@ func TestBodies(t *testing.T) {
 		if err := json.Unmarshal(b, &m); err != nil || m[key] == nil {
 			t.Errorf("%s body %s lacks %q", format, b, key)
 		}
-		if format != "json" && !strings.Contains(string(b), "rh sync acme/demo --overwrite") {
+		if format != "json" && !strings.Contains(string(b), "gr sync acme/demo --overwrite") {
 			t.Errorf("%s body lacks the remedy: %s", format, b)
 		}
 	}

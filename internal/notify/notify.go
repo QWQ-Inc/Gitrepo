@@ -1,4 +1,4 @@
-// Package notify delivers repohub events to outbound webhooks: generic
+// Package notify delivers Gitrepo events to outbound webhooks: generic
 // JSON (HMAC-signed) for downstream automation, or text messages for Slack,
 // WeCom (企业微信), Feishu (飞书) and DingTalk (钉钉) bots.
 package notify
@@ -78,13 +78,13 @@ func (e *Event) Text() string {
 	var b strings.Builder
 	switch e.Event {
 	case EventPush:
-		fmt.Fprintf(&b, "[repohub] %s received a push", e.Repo)
+		fmt.Fprintf(&b, "[Gitrepo] %s received a push", e.Repo)
 		if e.Pusher != "" {
 			fmt.Fprintf(&b, " from %s", e.Pusher)
 		}
 		writeRefs(&b, e.Refs)
 	case EventSyncCompleted:
-		fmt.Fprintf(&b, "[repohub] %s synced to mirrors (%s)", e.Repo, e.Trigger)
+		fmt.Fprintf(&b, "[Gitrepo] %s synced to mirrors (%s)", e.Repo, e.Trigger)
 		for _, r := range e.Remotes {
 			fmt.Fprintf(&b, "\n- %s: %s", r.Remote, r.State)
 			if r.Changed > 0 {
@@ -95,22 +95,22 @@ func (e *Event) Text() string {
 			}
 		}
 	case EventRemoteDiverged:
-		fmt.Fprintf(&b, "[repohub] mirror %s of %s has diverged: %s\nSomeone changed the mirror directly. Merge its commits and push to the hub, or run: rh sync %s --overwrite",
+		fmt.Fprintf(&b, "[Gitrepo] mirror %s of %s has diverged: %s\nSomeone changed the mirror directly. Merge its commits and push to the hub, or run: gr sync %s --overwrite",
 			e.Remote, e.Repo, strings.Join(e.Divergent, ", "), e.Repo)
 	case EventRemoteFailed:
-		fmt.Fprintf(&b, "[repohub] mirror %s of %s failed %d times in a row: %s", e.Remote, e.Repo, e.Failures, e.Error)
+		fmt.Fprintf(&b, "[Gitrepo] mirror %s of %s failed %d times in a row: %s", e.Remote, e.Repo, e.Failures, e.Error)
 	case EventRemoteRecovered:
-		fmt.Fprintf(&b, "[repohub] mirror %s of %s is in sync again", e.Remote, e.Repo)
+		fmt.Fprintf(&b, "[Gitrepo] mirror %s of %s is in sync again", e.Remote, e.Repo)
 	case EventCredentialExpiring:
 		when := "soon"
 		if e.ExpiresAt != nil {
 			when = "on " + e.ExpiresAt.Format("2006-01-02")
 		}
-		fmt.Fprintf(&b, "[repohub] the credential of target %s expires %s; rotate it with: rh target update %s --token-env VAR", e.Target, when, e.Target)
+		fmt.Fprintf(&b, "[Gitrepo] the credential of target %s expires %s; rotate it with: gr target update %s --token-env VAR", e.Target, when, e.Target)
 	case EventPing:
-		b.WriteString("[repohub] webhook test")
+		b.WriteString("[Gitrepo] webhook test")
 	default:
-		fmt.Fprintf(&b, "[repohub] %s %s", e.Event, e.Repo)
+		fmt.Fprintf(&b, "[Gitrepo] %s %s", e.Event, e.Repo)
 	}
 	return b.String()
 }
@@ -151,7 +151,7 @@ func Body(format string, e *Event) ([]byte, error) {
 	}
 }
 
-// Sign returns the X-Repohub-Signature-256 header value for body.
+// Sign returns the X-Gitrepo-Signature-256 header value for body.
 func Sign(secret, body []byte) string {
 	m := hmac.New(sha256.New, secret)
 	m.Write(body)
@@ -310,15 +310,15 @@ func (n *Notifier) deliver(ctx context.Context, h *store.Webhook, e *Event) (str
 		return "error: invalid url", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "repohub-webhook")
-	req.Header.Set("X-Repohub-Event", e.Event)
-	req.Header.Set("X-Repohub-Delivery", e.ID)
+	req.Header.Set("User-Agent", "gitrepo-webhook")
+	req.Header.Set("X-Gitrepo-Event", e.Event)
+	req.Header.Set("X-Gitrepo-Delivery", e.ID)
 	if len(h.Secret) > 0 {
 		secret, err := n.box.Open(h.Secret, h.WebhookAAD("secret"))
 		if err != nil {
 			return "error: " + err.Error(), err
 		}
-		req.Header.Set("X-Repohub-Signature-256", Sign(secret, body))
+		req.Header.Set("X-Gitrepo-Signature-256", Sign(secret, body))
 	}
 	resp, err := n.client.Do(req)
 	if err != nil {

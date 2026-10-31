@@ -1,11 +1,11 @@
 'use strict';
 
-// repohub admin console. Talks to /api with the admin token kept in
+// Gitrepo admin console. Talks to /api with the admin token kept in
 // sessionStorage (cleared when the tab closes). All DOM is built with
 // textContent and DOM nodes, never HTML strings, so API data cannot inject
 // markup.
 
-const TOKEN_KEY = 'repohub.token';
+const TOKEN_KEY = 'gitrepo.token';
 let token = sessionStorage.getItem(TOKEN_KEY) || '';
 const app = document.getElementById('app');
 
@@ -174,7 +174,7 @@ render();
 // -------------------------------------------------------------------- login
 
 function viewLogin() {
-  const input = h('input', { type: 'password', name: 'token', autocomplete: 'current-password', placeholder: 'REPOHUB_ADMIN_TOKEN 或 admin 令牌', required: true });
+  const input = h('input', { type: 'password', name: 'token', autocomplete: 'current-password', placeholder: 'GITREPO_ADMIN_TOKEN 或 admin 令牌', required: true });
   const err = h('p', { class: 'error-text' });
   const form = h('form', { class: 'panel', onsubmit: async (ev) => {
     ev.preventDefault();
@@ -188,8 +188,8 @@ function viewLogin() {
       err.textContent = e.message;
     }
   } },
-  h('h1', {}, '登录 repohub'),
-  h('p', { class: 'hint' }, '使用部署时设置的管理令牌（REPOHUB_ADMIN_TOKEN），或具有 admin 权限的令牌。令牌只保存在当前标签页。'),
+  h('h1', {}, '登录 Gitrepo'),
+  h('p', { class: 'hint' }, '使用部署时设置的管理令牌（GITREPO_ADMIN_TOKEN），或具有 admin 权限的令牌。令牌只保存在当前标签页。'),
   field('管理令牌', input), h('p'), h('button', { type: 'submit' }, '登录'), err);
   app.replaceChildren(h('div', { class: 'login' }, form));
   input.focus();
@@ -261,9 +261,9 @@ async function viewRepo(org, name) {
     const path = base + '/remotes/' + m.id;
     const details = [];
     if (m.needs_adoption) {
-      details.push(h('div', { class: 'row' }, h('span', { class: 'muted' }, '镜像仓库里已有 repohub 没写过的内容。确认是正确的仓库后再接管：'),
+      details.push(h('div', { class: 'row' }, h('span', { class: 'muted' }, '镜像仓库里已有 Gitrepo 没写过的内容。确认是正确的仓库后再接管：'),
         h('button', { class: 'small', onclick: action(async () => {
-          if (!confirm(`确认 ${m.url} 是 ${slug} 的镜像，交给 repohub 管理？\n已有分支只会快进或报告分叉，不会被覆盖。`)) return false;
+          if (!confirm(`确认 ${m.url} 是 ${slug} 的镜像，交给 Gitrepo 管理？\n已有分支只会快进或报告分叉，不会被覆盖。`)) return false;
           await api('PATCH', path, { adopt: true });
           rerender();
         }, '已接管，正在同步') }, '接管')));

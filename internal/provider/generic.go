@@ -11,7 +11,7 @@ import (
 
 // Generic is any Git server reachable over HTTPS or SSH without a supported
 // API (gitolite, plain sshd, Gitea/Forgejo until their adapters land, …).
-// Repositories must already exist; repohub only pushes.
+// Repositories must already exist; Gitrepo only pushes.
 //
 // The URL comes from the target's url_template, where {namespace} and {name}
 // are substituted, e.g. "https://git.example.com/{namespace}/{name}.git" or

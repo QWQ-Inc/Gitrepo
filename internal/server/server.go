@@ -1,4 +1,4 @@
-// Package server wires repohub together: the public HTTP listener (Git smart
+// Package server wires Gitrepo together: the public HTTP listener (Git smart
 // HTTP + admin API + metrics), the internal unix socket used by hooks and
 // GIT_ASKPASS, the sync manager and the background patrol/retry loops.
 package server
@@ -87,7 +87,7 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*Server, error) {
 	self := cfg.Git.SelfPath
 	if self == "" {
 		if self, err = os.Executable(); err != nil {
-			return nil, fmt.Errorf("locate repohub executable: %w", err)
+			return nil, fmt.Errorf("locate gitrepo executable: %w", err)
 		}
 	}
 	if resolved, err := filepath.EvalSymlinks(self); err == nil {
@@ -167,7 +167,7 @@ func loadSecretKey(cfg *config.Config) ([]byte, error) {
 		raw = string(b)
 	}
 	if raw == "" {
-		return nil, fmt.Errorf("no secret key: set %s (generate one with `repohub keygen`)", cfg.SecretKeyEnv)
+		return nil, fmt.Errorf("no secret key: set %s (generate one with `gitrepo keygen`)", cfg.SecretKeyEnv)
 	}
 	return secrets.ParseKey(raw)
 }
@@ -182,12 +182,12 @@ func randomHex(n int) string {
 
 // socketPath keeps the unix socket path under the OS limit (~104 bytes).
 func socketPath(cfg *config.Config) string {
-	p := filepath.Join(cfg.RunDir(), "repohub.sock")
+	p := filepath.Join(cfg.RunDir(), "gitrepo.sock")
 	if len(p) < 100 {
 		return p
 	}
 	sum := sha256.Sum256([]byte(cfg.DataDir))
-	return filepath.Join(os.TempDir(), "repohub-"+hex.EncodeToString(sum[:6])+".sock")
+	return filepath.Join(os.TempDir(), "gitrepo-"+hex.EncodeToString(sum[:6])+".sock")
 }
 
 func (s *Server) checkGit() error {
@@ -204,7 +204,7 @@ func (s *Server) checkGit() error {
 }
 
 // writeShims installs the hook and askpass entry points. They are tiny
-// shell scripts so git can exec them regardless of how repohub is installed.
+// shell scripts so git can exec them regardless of how Gitrepo is installed.
 func (s *Server) writeShims() error {
 	q := "'" + strings.ReplaceAll(s.selfPath, "'", `'\''`) + "'"
 	shims := map[string]string{

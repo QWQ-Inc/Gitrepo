@@ -9,7 +9,7 @@ import (
 
 func TestLoad(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "repohub.yaml")
+	path := filepath.Join(dir, "gitrepo.yaml")
 	os.WriteFile(path, []byte(`version: 1
 listen: ":9000"
 public_url: "https://git.example.com/"
@@ -21,7 +21,7 @@ sync:
 policy:
   max_file_size: 50MiB
 `), 0o644)
-	t.Setenv("REPOHUB_LISTEN", ":9100")
+	t.Setenv("GITREPO_LISTEN", ":9100")
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatal(err)

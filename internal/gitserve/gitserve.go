@@ -66,7 +66,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(rest, "info/lfs") {
 		w.Header().Set("Content-Type", "application/vnd.git-lfs+json")
 		w.WriteHeader(http.StatusNotImplemented)
-		io.WriteString(w, `{"message":"repohub: Git LFS is not supported yet; remove LFS tracking or push LFS objects directly to the mirrors"}`)
+		io.WriteString(w, `{"message":"gitrepo: Git LFS is not supported yet; remove LFS tracking or push LFS objects directly to the mirrors"}`)
 		return
 	}
 
@@ -75,7 +75,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case rest == "info/refs" && (r.Method == http.MethodGet || r.Method == http.MethodHead):
 		service = r.URL.Query().Get("service")
 		if service != svcUpload && service != svcReceive {
-			http.Error(w, "repohub: the dumb HTTP protocol is not supported; use a git client with smart HTTP", http.StatusForbidden)
+			http.Error(w, "gitrepo: the dumb HTTP protocol is not supported; use a git client with smart HTTP", http.StatusForbidden)
 			return
 		}
 	case rest == svcUpload && r.Method == http.MethodPost:
@@ -108,13 +108,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !(write && rest == "info/refs" && p.Can(auth.ScopeCreate, slug)) {
-			http.Error(w, "repohub: repository not found", http.StatusNotFound)
+			http.Error(w, "gitrepo: repository not found", http.StatusNotFound)
 			return
 		}
 		repo, _, err = s.Registry.CreateRepo(ctx, slug, "private", true)
 		if err != nil {
 			s.Log.Error("create repository on push", "repo", slug, "err", err)
-			http.Error(w, "repohub: cannot create repository: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, "gitrepo: cannot create repository: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		s.Log.Info("repository created by push", "repo", slug, "by", p.Name)
@@ -133,7 +133,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !p.Can(auth.ScopeWrite, slug) {
-			http.Error(w, "repohub: token has no write access to "+slug, http.StatusForbidden)
+			http.Error(w, "gitrepo: token has no write access to "+slug, http.StatusForbidden)
 			return
 		}
 	} else if repo.Visibility != "public" {
@@ -142,7 +142,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !p.Can(auth.ScopeRead, slug) {
-			http.Error(w, "repohub: token has no read access to "+slug, http.StatusForbidden)
+			http.Error(w, "gitrepo: token has no read access to "+slug, http.StatusForbidden)
 			return
 		}
 	}
@@ -184,8 +184,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func unauthorized(w http.ResponseWriter, msg string) {
-	w.Header().Set("WWW-Authenticate", `Basic realm="repohub"`)
-	http.Error(w, "repohub: "+msg, http.StatusUnauthorized)
+	w.Header().Set("WWW-Authenticate", `Basic realm="gitrepo"`)
+	http.Error(w, "gitrepo: "+msg, http.StatusUnauthorized)
 }
 
 // gitConfigEnv injects configuration through GIT_CONFIG_COUNT (git ≥ 2.31),
@@ -245,7 +245,7 @@ func RunBackend(w http.ResponseWriter, r *http.Request, gitBin, pathInfo string,
 		"PATH=" + os.Getenv("PATH"),
 		"GATEWAY_INTERFACE=CGI/1.1",
 		"SERVER_PROTOCOL=" + r.Proto,
-		"SERVER_SOFTWARE=repohub",
+		"SERVER_SOFTWARE=gitrepo",
 		"REQUEST_METHOD=" + r.Method,
 		"QUERY_STRING=" + r.URL.RawQuery,
 		"PATH_INFO=" + pathInfo,
@@ -291,7 +291,7 @@ func RunBackend(w http.ResponseWriter, r *http.Request, gitBin, pathInfo string,
 	if err != nil {
 		cmd.Wait()
 		log.Error("http-backend produced no headers", "err", err, "stderr", stderr.String())
-		http.Error(w, "repohub: git backend failed", http.StatusInternalServerError)
+		http.Error(w, "gitrepo: git backend failed", http.StatusInternalServerError)
 		return
 	}
 	status := http.StatusOK

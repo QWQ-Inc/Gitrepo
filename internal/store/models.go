@@ -95,7 +95,7 @@ type Remote struct {
 	Provisioned       bool
 	AtomicUnsupported bool
 	// Adopt allows writing into a mirror repository that already holds refs
-	// repohub did not create.
+	// Gitrepo did not create.
 	Adopt               bool
 	State               string
 	LastError           string

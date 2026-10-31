@@ -3,8 +3,8 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 
 .PHONY: build test lint docker
 build:
-	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o bin/repohub ./cmd/repohub
-	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o bin/rh ./cmd/rh
+	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o bin/gitrepo ./cmd/gitrepo
+	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o bin/gr ./cmd/gr
 
 test:
 	go test -race -count=1 ./...
@@ -14,4 +14,4 @@ lint:
 	go vet ./...
 
 docker:
-	docker build --build-arg VERSION=$(VERSION) -t repohub:$(VERSION) .
+	docker build --build-arg VERSION=$(VERSION) -t gitrepo:$(VERSION) .

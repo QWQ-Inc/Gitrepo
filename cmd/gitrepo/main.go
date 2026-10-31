@@ -1,9 +1,9 @@
-// Command repohub is the repohub server. It also serves as the Git hook and
+// Command gitrepo is the Gitrepo server. It also serves as the Git hook and
 // GIT_ASKPASS helper, invoked by git through small shim scripts.
 //
-//	repohub serve [--config repohub.yaml]
-//	repohub keygen
-//	repohub version
+//	gitrepo serve [--config gitrepo.yaml]
+//	gitrepo keygen
+//	gitrepo version
 package main
 
 import (
@@ -38,7 +38,7 @@ func main() {
 		os.Exit(serve(os.Args[2:]))
 	case "hook":
 		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "usage: repohub hook <pre-receive|post-receive>")
+			fmt.Fprintln(os.Stderr, "usage: gitrepo hook <pre-receive|post-receive>")
 			os.Exit(2)
 		}
 		switch os.Args[2] {
@@ -58,7 +58,7 @@ func main() {
 	case "healthcheck":
 		os.Exit(healthcheck())
 	case "version", "--version", "-v":
-		fmt.Println("repohub", version)
+		fmt.Println("gitrepo", version)
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -69,24 +69,24 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `repohub — one Git URL that keeps GitHub, GitLab and self-hosted mirrors in sync
+	fmt.Fprint(os.Stderr, `Gitrepo — one Git URL that keeps GitHub, GitLab and self-hosted mirrors in sync
 
 Usage:
-  repohub serve [--config FILE] [--log-level info|debug]
-  repohub keygen            print a new secret key for REPOHUB_SECRET_KEY
-  repohub healthcheck       exit 0 if the local server answers /healthz (for container health checks)
-  repohub version
+  gitrepo serve [--config FILE] [--log-level info|debug]
+  gitrepo keygen            print a new secret key for GITREPO_SECRET_KEY
+  gitrepo healthcheck       exit 0 if the local server answers /healthz (for container health checks)
+  gitrepo version
 
 Environment:
-  REPOHUB_SECRET_KEY        32-byte key (base64/hex) encrypting platform credentials (required)
-  REPOHUB_ADMIN_TOKEN       bootstrap admin token for the API and the rh CLI
-  REPOHUB_LISTEN, REPOHUB_PUBLIC_URL, REPOHUB_DATA_DIR override the config file
+  GITREPO_SECRET_KEY        32-byte key (base64/hex) encrypting platform credentials (required)
+  GITREPO_ADMIN_TOKEN       bootstrap admin token for the API and the gr CLI
+  GITREPO_LISTEN, GITREPO_PUBLIC_URL, GITREPO_DATA_DIR override the config file
 `)
 }
 
-// healthcheck probes the local server on REPOHUB_LISTEN (default :8080).
+// healthcheck probes the local server on GITREPO_LISTEN (default :8080).
 func healthcheck() int {
-	addr := os.Getenv("REPOHUB_LISTEN")
+	addr := os.Getenv("GITREPO_LISTEN")
 	if addr == "" {
 		addr = ":8080"
 	}
@@ -114,7 +114,7 @@ func healthcheck() int {
 
 func serve(args []string) int {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
-	cfgPath := fs.String("config", os.Getenv("REPOHUB_CONFIG"), "path to repohub.yaml (optional)")
+	cfgPath := fs.String("config", os.Getenv("GITREPO_CONFIG"), "path to gitrepo.yaml (optional)")
 	logLevel := fs.String("log-level", "info", "log level: debug, info, warn, error")
 	fs.Parse(args)
 
@@ -144,7 +144,7 @@ func serve(args []string) int {
 		log.Error("start", "err", err)
 		return 1
 	}
-	log.Info("repohub started", "version", version, "listen", cfg.Listen, "public_url", cfg.PublicURL, "data_dir", cfg.DataDir)
+	log.Info("Gitrepo started", "version", version, "listen", cfg.Listen, "public_url", cfg.PublicURL, "data_dir", cfg.DataDir)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

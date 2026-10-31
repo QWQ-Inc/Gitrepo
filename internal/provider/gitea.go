@@ -100,7 +100,7 @@ func (g *Gitea) EnsureRepo(ctx context.Context, t *store.Target, secret string, 
 		"name":        spec.Name,
 		"private":     spec.Visibility != "public",
 		"auto_init":   false,
-		"description": "Mirror managed by repohub",
+		"description": "Mirror managed by Gitrepo",
 	}
 	if _, err := doJSON(ctx, http.MethodPost, createURL, h, body, nil); err != nil {
 		if statusOf(err) == http.StatusConflict {

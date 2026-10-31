@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | 主源可以在外部（GitHub），Hub 拉取后再分发 | Hub 是唯一权威源，客户端直接 push 到 Hub | 对应"填凭据 → 拿到一个 git 地址"的用法；Hub 永远最新，M1 不需要 fetch 主源，也不需要入站 webhook |
 | 凭据挂在每个远端上（`remotes.credential_id`） | 凭据挂在 **target**（平台账号）上，**binding** 把组织映射到 target | 凭据只填一次，新仓库自动获得镜像 |
-| 用 `rh repo add` 登记 | 也可以第一次 push 时自动建仓（需要 token 有 `create` scope） | 拿到地址直接 push |
+| 用 `gr repo add` 登记 | 也可以第一次 push 时自动建仓（需要 token 有 `create` scope） | 拿到地址直接 push |
 | provider 都假设平台有 API | 新增 `generic` provider，通过能力位（`CreateRepo`、`BranchProtection`、`DefaultBranch`）声明支持什么 | 自建 Git 往往只有 URL 和凭据 |
 | `consumers` 只用于读 | token 分 `read`、`write`、`create`、`admin` 四级，可限定仓库 | Hub 要接收写入 |
 | API 用 `{id}` | API 用 `{org}/{name}` | 更符合人的使用习惯 |
@@ -18,10 +18,10 @@
 
 原设计只把 lease 期望值设为 `pushed_state`。实现中补充了两条不会丢数据的规则：
 
-- **镜像值是 Hub 值的祖先时允许快进**，即使 repohub 从没推过这个 ref。这样可以直接接管已有内容的镜像，`pushed_state` 丢失后也能恢复，而且"把镜像的提交合并回来再 push"会自动消除分叉。
+- **镜像值是 Hub 值的祖先时允许快进**，即使 Gitrepo 从没推过这个 ref。这样可以直接接管已有内容的镜像，`pushed_state` 丢失后也能恢复，而且"把镜像的提交合并回来再 push"会自动消除分叉。
 - **镜像上被删除的 ref 直接重建**，因为重建不会丢失任何东西。
 
-镜像上 repohub 没写过的 ref（比如有人直接在 GitHub 上建的分支）会报告为分叉，不会被删除。每个推送操作都把刚观测到的远端值作为 lease，所以观测和推送之间发生的变化总会被远端拒绝。
+镜像上 Gitrepo 没写过的 ref（比如有人直接在 GitHub 上建的分支）会报告为分叉，不会被删除。每个推送操作都把刚观测到的远端值作为 lease，所以观测和推送之间发生的变化总会被远端拒绝。
 
 `--atomic` 失败时，引擎把有独立失败原因的 ref（lease 过期、平台拒绝）剔除，其余 ref 重推。远端不支持 atomic 时自动降级为非原子推送，并在该远端上记住这一点。
 
@@ -30,7 +30,7 @@
 ## push 的反馈
 
 - **pre-receive**（在 receive-pack 的隔离区里运行）：只允许 `refs/heads/*` 和 `refs/tags/*`；新 blob 不能超过最严镜像的大小上限。能在 Hub 拒绝的，就不放进来。
-- **post-receive**：通过 unix socket 通知服务端。服务端先备份被强推覆盖或删除的 ref，再修正 HEAD，然后排队同步，并把每个镜像的结果以 `remote:` 行流式回显，最多等待 `post_receive_wait`。`git push -o repohub.wait=…` 可以调整等待时间。
+- **post-receive**：通过 unix socket 通知服务端。服务端先备份被强推覆盖或删除的 ref，再修正 HEAD，然后排队同步，并把每个镜像的结果以 `remote:` 行流式回显，最多等待 `post_receive_wait`。`git push -o gitrepo.wait=…` 可以调整等待时间。
 - 不在 pre-receive 里"先推镜像再决定收不收"：多个远端之间做不到原子，而且会让 Hub 能否写入取决于 GitHub 是否可用。
 
 ## 实现中发现的问题
@@ -62,7 +62,7 @@ GitHub 和 GitLab 的 API 调用直接用 `net/http` 实现（每个平台只用
 M1 完成后做了一次独立的代码评审，修正了以下问题，每一项都有回归测试：
 
 - **合并请求时的覆盖范围**：只针对某个远端的 `--overwrite`，与 push 或巡检合并后会扩散到所有远端。现在"是否覆盖"按远端单独记录。
-- **镜像位置冲突**：两个 Hub 仓库可以通过规则被映射到同一个镜像仓库。现在镜像位置（目标平台 + 命名空间 + 仓库名，或显式 URL）全局唯一；规则支持 `{org}`、`{name}` 名称模板；镜像仓库里已有 repohub 没写过的 ref 时，必须经管理员接管（`adopt`）才会写入。
+- **镜像位置冲突**：两个 Hub 仓库可以通过规则被映射到同一个镜像仓库。现在镜像位置（目标平台 + 命名空间 + 仓库名，或显式 URL）全局唯一；规则支持 `{org}`、`{name}` 名称模板；镜像仓库里已有 Gitrepo 没写过的 ref 时，必须经管理员接管（`adopt`）才会写入。
 - **标签**：别人打的标签，即使能快进，也不再被移动。
 - **原子推送被服务端拒绝**：receive-pack 的 `atomic push failure` 现在会被识别为连带失败。服务端 hook 整体拒绝推送时（GitLab、Gitea 的保护分支），逐个 ref 重推，一个受保护的分支不再挡住其他分支。
 - **Hub 侧备份不再依赖 post-receive**：引擎在强推或删除前，会确认被替换的旧值仍被 Hub 的某个 ref 引用，否则先写入 `refs/backup/`。post-receive 里的备份改为第一步执行，并且不受客户端断开影响。

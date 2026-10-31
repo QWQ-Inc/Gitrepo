@@ -1,5 +1,5 @@
 // Package githooks implements the hub repository hooks and the GIT_ASKPASS
-// helper. They run as short-lived `repohub hook …` / `repohub askpass`
+// helper. They run as short-lived `gitrepo hook …` / `gitrepo askpass`
 // subprocesses spawned by git and talk back to the server over its internal
 // unix socket.
 package githooks
@@ -24,13 +24,13 @@ import (
 
 // Environment passed from the server to hooks (through git http-backend).
 const (
-	EnvSocket      = "REPOHUB_SOCKET"
-	EnvHookToken   = "REPOHUB_HOOK_TOKEN"
-	EnvRepo        = "REPOHUB_REPO"
-	EnvMaxFileSize = "REPOHUB_MAX_FILE_SIZE"
-	EnvWait        = "REPOHUB_WAIT_MS"
-	EnvGit         = "REPOHUB_GIT"
-	EnvTicket      = "REPOHUB_ASKPASS_TICKET"
+	EnvSocket      = "GITREPO_SOCKET"
+	EnvHookToken   = "GITREPO_HOOK_TOKEN"
+	EnvRepo        = "GITREPO_REPO"
+	EnvMaxFileSize = "GITREPO_MAX_FILE_SIZE"
+	EnvWait        = "GITREPO_WAIT_MS"
+	EnvGit         = "GITREPO_GIT"
+	EnvTicket      = "GITREPO_ASKPASS_TICKET"
 )
 
 // PostReceiveRequest is sent by the post-receive hook to the server.
@@ -69,7 +69,7 @@ func readUpdates(r io.Reader) ([]RefUpdate, error) {
 }
 
 func say(w io.Writer, format string, args ...any) {
-	fmt.Fprintf(w, "repohub: "+format+"\n", args...)
+	fmt.Fprintf(w, "gitrepo: "+format+"\n", args...)
 }
 
 func gitBin() string {
@@ -83,7 +83,7 @@ func gitBin() string {
 
 // PreReceive enforces hub policy before any ref is updated:
 //   - only refs/heads/* and refs/tags/* may be pushed;
-//   - no new blob may exceed REPOHUB_MAX_FILE_SIZE (the strictest limit of
+//   - no new blob may exceed GITREPO_MAX_FILE_SIZE (the strictest limit of
 //     all remotes), so a push the hub accepts will not be rejected later by
 //     e.g. GitHub's 100 MiB limit.
 //
@@ -225,8 +225,8 @@ func humanSize(n int64) string {
 // the mirror sync and streams per-remote results back for up to the wait
 // time. Push options:
 //
-//	git push -o repohub.wait=0      return immediately
-//	git push -o repohub.wait=2m     wait longer
+//	git push -o gitrepo.wait=0      return immediately
+//	git push -o gitrepo.wait=2m     wait longer
 func PostReceive(stdin io.Reader, stderr io.Writer) int {
 	updates, err := readUpdates(stdin)
 	if err != nil || len(updates) == 0 {
@@ -236,7 +236,7 @@ func PostReceive(stdin io.Reader, stderr io.Writer) int {
 	if n, _ := strconv.Atoi(os.Getenv("GIT_PUSH_OPTION_COUNT")); n > 0 {
 		for i := 0; i < n; i++ {
 			opt := os.Getenv(fmt.Sprintf("GIT_PUSH_OPTION_%d", i))
-			if v, ok := strings.CutPrefix(opt, "repohub.wait="); ok {
+			if v, ok := strings.CutPrefix(opt, "gitrepo.wait="); ok {
 				if d, err := parseWait(v); err == nil {
 					wait = d.Milliseconds()
 				} else {
@@ -296,13 +296,13 @@ func Askpass(prompt string, stdout, stderr io.Writer) int {
 	defer cancel()
 	resp, err := post(ctx, "/internal/askpass", AskpassRequest{Ticket: os.Getenv(EnvTicket), Prompt: prompt})
 	if err != nil {
-		fmt.Fprintf(stderr, "repohub askpass: %v\n", err)
+		fmt.Fprintf(stderr, "gitrepo askpass: %v\n", err)
 		return 1
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	if resp.StatusCode != http.StatusOK {
-		fmt.Fprintf(stderr, "repohub askpass: %s\n", resp.Status)
+		fmt.Fprintf(stderr, "gitrepo askpass: %s\n", resp.Status)
 		return 1
 	}
 	fmt.Fprintln(stdout, string(body))
@@ -326,7 +326,7 @@ func post(ctx context.Context, path string, body any) (*http.Response, error) {
 			return d.DialContext(ctx, "unix", sock)
 		},
 	}}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://repohub"+path, bytes.NewReader(b))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://gitrepo"+path, bytes.NewReader(b))
 	if err != nil {
 		return nil, err
 	}

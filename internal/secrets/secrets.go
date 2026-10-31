@@ -51,7 +51,7 @@ func ParseKey(s string) ([]byte, error) {
 			return b, nil
 		}
 	}
-	return nil, errors.New("secret key must be 32 bytes encoded as hex or base64 (generate one with `repohub keygen`)")
+	return nil, errors.New("secret key must be 32 bytes encoded as hex or base64 (generate one with `gitrepo keygen`)")
 }
 
 // GenerateKey returns a new random key, base64 encoded.

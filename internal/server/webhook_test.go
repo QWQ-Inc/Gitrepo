@@ -63,14 +63,14 @@ func TestWebhooks(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		rc.mu.Lock()
 		defer rc.mu.Unlock()
-		if r.Header.Get("X-Repohub-Signature-256") != notify.Sign([]byte(secret), body) {
+		if r.Header.Get("X-Gitrepo-Signature-256") != notify.Sign([]byte(secret), body) {
 			rc.badSig++
 			http.Error(w, "bad signature", http.StatusUnauthorized)
 			return
 		}
 		var ev notify.Event
 		json.Unmarshal(body, &ev)
-		if ev.Event != r.Header.Get("X-Repohub-Event") {
+		if ev.Event != r.Header.Get("X-Gitrepo-Event") {
 			rc.badSig++
 		}
 		rc.events = append(rc.events, ev)

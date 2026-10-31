@@ -1,4 +1,4 @@
-// Package client is a small Go client for the repohub admin API.
+// Package client is a small Go client for the Gitrepo admin API.
 package client
 
 import (

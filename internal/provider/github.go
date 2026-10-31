@@ -105,7 +105,7 @@ func (g *GitHub) EnsureRepo(ctx context.Context, t *store.Target, secret string,
 		"name":        spec.Name,
 		"private":     spec.Visibility != "public",
 		"auto_init":   false,
-		"description": "Mirror managed by repohub",
+		"description": "Mirror managed by Gitrepo",
 	}
 	if spec.Visibility == "internal" {
 		body["visibility"] = "internal"

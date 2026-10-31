@@ -9,7 +9,7 @@ import (
 
 func TestHandler(t *testing.T) {
 	h := Handler("/ui/")
-	for path, want := range map[string]string{"/ui/": "<title>repohub</title>", "/ui/app.js": "function viewRepos", "/ui/app.css": "--accent"} {
+	for path, want := range map[string]string{"/ui/": "<title>Gitrepo</title>", "/ui/app.js": "function viewRepos", "/ui/app.css": "--accent"} {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
 		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), want) {

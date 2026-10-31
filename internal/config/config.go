@@ -1,4 +1,4 @@
-// Package config loads the repohub server configuration from a versioned YAML
+// Package config loads the gitrepo server configuration from a versioned YAML
 // file plus environment-variable overrides. Nothing deployment-specific is
 // hard-coded: every path, host and limit can be set here.
 package config
@@ -54,7 +54,7 @@ type AlertsConfig struct {
 type GitConfig struct {
 	// Binary is the git executable (default "git").
 	Binary string `yaml:"binary"`
-	// SelfPath is the repohub executable invoked by Git hooks and GIT_ASKPASS.
+	// SelfPath is the gitrepo executable invoked by Git hooks and GIT_ASKPASS.
 	// Defaults to the running executable.
 	SelfPath string `yaml:"self_path"`
 }
@@ -91,8 +91,8 @@ func Default() *Config {
 		Listen:        ":8080",
 		PublicURL:     "http://localhost:8080",
 		DataDir:       "./data",
-		SecretKeyEnv:  "REPOHUB_SECRET_KEY",
-		AdminTokenEnv: "REPOHUB_ADMIN_TOKEN",
+		SecretKeyEnv:  "GITREPO_SECRET_KEY",
+		AdminTokenEnv: "GITREPO_ADMIN_TOKEN",
 		Git:           GitConfig{Binary: "git"},
 		Sync: SyncConfig{
 			Workers:         4,
@@ -111,7 +111,7 @@ func Default() *Config {
 }
 
 // Load reads the YAML file at path (optional; empty means defaults only) and
-// then applies REPOHUB_* environment overrides.
+// then applies GITREPO_* environment overrides.
 func Load(path string) (*Config, error) {
 	cfg := Default()
 	if path != "" {
@@ -143,16 +143,16 @@ func Load(path string) (*Config, error) {
 }
 
 func (c *Config) applyEnv() {
-	if v := os.Getenv("REPOHUB_LISTEN"); v != "" {
+	if v := os.Getenv("GITREPO_LISTEN"); v != "" {
 		c.Listen = v
 	}
-	if v := os.Getenv("REPOHUB_PUBLIC_URL"); v != "" {
+	if v := os.Getenv("GITREPO_PUBLIC_URL"); v != "" {
 		c.PublicURL = v
 	}
-	if v := os.Getenv("REPOHUB_DATA_DIR"); v != "" {
+	if v := os.Getenv("GITREPO_DATA_DIR"); v != "" {
 		c.DataDir = v
 	}
-	if v := os.Getenv("REPOHUB_GIT_BINARY"); v != "" {
+	if v := os.Getenv("GITREPO_GIT_BINARY"); v != "" {
 		c.Git.Binary = v
 	}
 }
@@ -271,4 +271,4 @@ func (c *Config) TmpDir() string   { return filepath.Join(c.DataDir, "tmp") }
 func (c *Config) HomeDir() string  { return filepath.Join(c.DataDir, "home") }
 func (c *Config) SSHDir() string   { return filepath.Join(c.DataDir, "ssh") }
 func (c *Config) TrashDir() string { return filepath.Join(c.DataDir, "trash") }
-func (c *Config) DBPath() string   { return filepath.Join(c.DataDir, "repohub.db") }
+func (c *Config) DBPath() string   { return filepath.Join(c.DataDir, "gitrepo.db") }

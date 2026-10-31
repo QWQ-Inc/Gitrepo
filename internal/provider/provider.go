@@ -134,7 +134,7 @@ func doJSON(ctx context.Context, method, u string, headers map[string]string, in
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	req.Header.Set("User-Agent", "repohub")
+	req.Header.Set("User-Agent", "gitrepo")
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}

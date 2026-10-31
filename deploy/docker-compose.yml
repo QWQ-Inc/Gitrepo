@@ -1,22 +1,22 @@
 # docker compose -f deploy/docker-compose.yml up -d
-# Put repohub behind a TLS-terminating reverse proxy and set REPOHUB_PUBLIC_URL
+# Put Gitrepo behind a TLS-terminating reverse proxy and set GITREPO_PUBLIC_URL
 # to the address clients use.
 services:
-  repohub:
+  gitrepo:
     build: ..
-    image: repohub:local
+    image: gitrepo:local
     restart: unless-stopped
     ports:
       - "8080:8080"
     environment:
-      REPOHUB_SECRET_KEY: ${REPOHUB_SECRET_KEY:?generate one with `docker run --rm repohub:local keygen`}
-      REPOHUB_ADMIN_TOKEN: ${REPOHUB_ADMIN_TOKEN:?set a long random admin token}
-      REPOHUB_PUBLIC_URL: ${REPOHUB_PUBLIC_URL:-http://localhost:8080}
-      # Optional: mount deploy/repohub.example.yaml and point at it.
-      # REPOHUB_CONFIG: /etc/repohub/repohub.yaml
+      GITREPO_SECRET_KEY: ${GITREPO_SECRET_KEY:?generate one with `docker run --rm gitrepo:local keygen`}
+      GITREPO_ADMIN_TOKEN: ${GITREPO_ADMIN_TOKEN:?set a long random admin token}
+      GITREPO_PUBLIC_URL: ${GITREPO_PUBLIC_URL:-http://localhost:8080}
+      # Optional: mount deploy/gitrepo.example.yaml and point at it.
+      # GITREPO_CONFIG: /etc/gitrepo/gitrepo.yaml
     volumes:
-      - repohub-data:/data
-      # - ./repohub.example.yaml:/etc/repohub/repohub.yaml:ro
+      - gitrepo-data:/data
+      # - ./gitrepo.example.yaml:/etc/gitrepo/gitrepo.yaml:ro
 
 volumes:
-  repohub-data:
+  gitrepo-data:

@@ -14,7 +14,7 @@ import (
 	"github.com/qwq-inc/gitrepo/internal/gitserve"
 )
 
-// fakePlatforms emulates the subset of the GitHub and GitLab APIs repohub
+// fakePlatforms emulates the subset of the GitHub and GitLab APIs Gitrepo
 // uses, plus their Git smart HTTP endpoints, under /gh and /gl.
 type fakePlatforms struct {
 	t   *testing.T

@@ -61,7 +61,7 @@ func (s *Server) handlePostReceive(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	flusher, _ := w.(http.Flusher)
 	say := func(format string, args ...any) {
-		fmt.Fprintf(w, "repohub: "+format+"\n", args...)
+		fmt.Fprintf(w, "gitrepo: "+format+"\n", args...)
 		if flusher != nil {
 			flusher.Flush()
 		}
@@ -111,7 +111,7 @@ func (s *Server) handlePostReceive(w http.ResponseWriter, r *http.Request) {
 	s.reportSkippedBindings(ctx, repo, remotes, say)
 	if len(remotes) == 0 {
 		say("no mirrors configured for %s; the push is stored on the hub only", repo.Slug)
-		say("add one with `rh remote add %s <target>` or `rh bind %s <target>`", repo.Slug, strings.SplitN(repo.Slug, "/", 2)[0])
+		say("add one with `gr remote add %s <target>` or `gr bind %s <target>`", repo.Slug, strings.SplitN(repo.Slug, "/", 2)[0])
 		return
 	}
 
@@ -147,15 +147,15 @@ func (s *Server) handlePostReceive(w http.ResponseWriter, r *http.Request) {
 				}
 				if counts[store.StateDiverged] > 0 {
 					say("diverged mirrors were left untouched. Pull the mirror's commits into your branch and push again,")
-					say("or overwrite them (the old state is kept under refs/backup/): rh sync %s --overwrite", repo.Slug)
+					say("or overwrite them (the old state is kept under refs/backup/): gr sync %s --overwrite", repo.Slug)
 				}
 				if counts[store.StateFailed] > 0 {
-					say("failed mirrors are retried automatically; see `rh status %s`", repo.Slug)
+					say("failed mirrors are retried automatically; see `gr status %s`", repo.Slug)
 				}
 				return
 			}
 		case <-timer.C:
-			say("still syncing in the background; follow up with `rh status %s`", repo.Slug)
+			say("still syncing in the background; follow up with `gr status %s`", repo.Slug)
 			return
 		case <-ctx.Done():
 			return
@@ -182,7 +182,7 @@ func (s *Server) reportSkippedBindings(ctx context.Context, repo *store.Repo, re
 		}
 		if err := s.reg.LocationConflict(ctx, repo.ID, b.TargetID, b.Namespace, b.MirrorName(org, name), ""); err != nil {
 			say("binding %s → %s was not applied: %v", b.Org, b.TargetName, err)
-			say("give the mirror another name with `rh remote add %s %s --name …`, or use --name-template '{org}-{name}' on the binding", repo.Slug, b.TargetName)
+			say("give the mirror another name with `gr remote add %s %s --name …`, or use --name-template '{org}-{name}' on the binding", repo.Slug, b.TargetName)
 		}
 	}
 }
