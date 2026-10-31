@@ -35,12 +35,14 @@ export REPOHUB_PUBLIC_URL=https://git.example.com
 repohub serve                                     # 默认监听 :8080，数据在 ./data
 ```
 
-Docker：
+Docker（发布后可直接使用 `ghcr.io/qwq-inc/gitrepo:<版本>`，也可以本地构建）：
 
 ```bash
 docker build -t repohub:local .
 REPOHUB_SECRET_KEY=... REPOHUB_ADMIN_TOKEN=... docker compose -f deploy/docker-compose.yml up -d
 ```
+
+镜像内置健康检查（`repohub healthcheck`）。
 
 运行时依赖系统 `git`（≥ 2.31）。生产环境请放在 TLS 反向代理后面。
 
@@ -253,6 +255,13 @@ Git 地址：`/{org}/{name}.git`（smart HTTP，协议 v2）。
 - **M2**：~~出站 webhook 与告警~~、~~Web 控制台~~（已完成）。
 - **M3**：只读边缘节点、bundle-uri / 源码包 CDN、按区域读取路由。
 - **M4**：~~Gitea / Forgejo 适配器~~（已完成）、Gitee 适配器、Git LFS、按需同步 Release。
+
+## 发布
+
+推送 `v*` 标签（例如 `git tag v0.1.0 && git push origin v0.1.0`）会触发 `.github/workflows/release.yml`：
+
+- 构建 Linux、macOS 的 amd64、arm64 二进制，连同 `SHA256SUMS` 发布到 GitHub Release；
+- 构建多架构 Docker 镜像，推送到 `ghcr.io/qwq-inc/gitrepo:<标签>` 和 `:latest`。
 
 ## 开发
 

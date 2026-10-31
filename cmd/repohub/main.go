@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -54,6 +55,8 @@ func main() {
 		os.Exit(githooks.Askpass(prompt, os.Stdout, os.Stderr))
 	case "keygen":
 		fmt.Println(secrets.GenerateKey())
+	case "healthcheck":
+		os.Exit(healthcheck())
 	case "version", "--version", "-v":
 		fmt.Println("repohub", version)
 	case "help", "-h", "--help":
@@ -71,6 +74,7 @@ func usage() {
 Usage:
   repohub serve [--config FILE] [--log-level info|debug]
   repohub keygen            print a new secret key for REPOHUB_SECRET_KEY
+  repohub healthcheck       exit 0 if the local server answers /healthz (for container health checks)
   repohub version
 
 Environment:
@@ -78,6 +82,34 @@ Environment:
   REPOHUB_ADMIN_TOKEN       bootstrap admin token for the API and the rh CLI
   REPOHUB_LISTEN, REPOHUB_PUBLIC_URL, REPOHUB_DATA_DIR override the config file
 `)
+}
+
+// healthcheck probes the local server on REPOHUB_LISTEN (default :8080).
+func healthcheck() int {
+	addr := os.Getenv("REPOHUB_LISTEN")
+	if addr == "" {
+		addr = ":8080"
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "healthcheck:", err)
+		return 1
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get("http://" + net.JoinHostPort(host, port) + "/healthz")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "healthcheck:", err)
+		return 1
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintln(os.Stderr, "healthcheck:", resp.Status)
+		return 1
+	}
+	return 0
 }
 
 func serve(args []string) int {
