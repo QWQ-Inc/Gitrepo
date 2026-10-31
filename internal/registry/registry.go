@@ -29,7 +29,7 @@ type Registry struct {
 var segment = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$`)
 
 // Org names that would collide with server routes.
-var reserved = map[string]bool{"api": true, "healthz": true, "metrics": true, "hooks": true, "archive": true, "internal": true, "static": true}
+var reserved = map[string]bool{"api": true, "healthz": true, "metrics": true, "hooks": true, "archive": true, "internal": true, "static": true, "ui": true}
 
 // ParseSlug validates "org/name" (an optional ".git" suffix is stripped).
 func ParseSlug(slug string) (org, name string, err error) {

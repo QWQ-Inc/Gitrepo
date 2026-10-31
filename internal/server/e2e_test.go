@@ -575,3 +575,29 @@ func TestEndToEnd(t *testing.T) {
 		mustContain(t, out, "no mirrors configured for solo/app")
 	})
 }
+
+func TestConsoleRoutes(t *testing.T) {
+	e := newEnv(t)
+	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := noRedirect.Get("http://" + e.hubAddr + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusFound || resp.Header.Get("Location") != "/ui/" {
+		t.Fatalf("GET / = %d %s", resp.StatusCode, resp.Header.Get("Location"))
+	}
+	resp, err = http.Get("http://" + e.hubAddr + "/ui/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /ui/app.js = %d", resp.StatusCode)
+	}
+	// "ui" cannot be taken by a repository.
+	var out map[string]any
+	if err := e.api.Do(t.Context(), http.MethodPost, "/api/repos", map[string]any{"slug": "ui/app"}, &out); err == nil {
+		t.Fatal("created a repository under the reserved org ui")
+	}
+}

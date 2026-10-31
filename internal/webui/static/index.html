@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>repohub</title>
+<link rel="stylesheet" href="app.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="#/">repohub</a>
+  <nav id="nav">
+    <a href="#/">仓库</a>
+    <a href="#/targets">平台凭据</a>
+    <a href="#/bindings">备份规则</a>
+    <a href="#/tokens">访问令牌</a>
+    <a href="#/webhooks">通知</a>
+  </nav>
+  <button id="logout" class="link" hidden>退出</button>
+</header>
+<main id="app"></main>
+<div id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

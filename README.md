@@ -22,7 +22,7 @@
 - **在入口挡住注定失败的 push**：单文件大小上限取所有镜像中最严的（GitHub 是 100 MiB），超限的 push 在 Hub 就被拒绝，不会在某个镜像上一直失败。
 - **出事会通知**：分叉、连续失败、恢复、凭据即将过期、同步完成（带 ref 和 SHA，可用来触发下游构建）都可以推送到带签名的 webhook，或直接推到 Slack、企业微信、飞书、钉钉。
 
-> 当前处于 M1 阶段，并已包含 M2 的通知功能和 M4 的 Gitea/Forgejo 适配器。读取路由、镜像加速和 LFS 见 [路线图](#路线图)。
+> 当前处于 M1 阶段，并已包含 M2（通知、Web 控制台）和 M4 的 Gitea/Forgejo 适配器。读取路由、镜像加速和 LFS 见 [路线图](#路线图)。
 
 ## 快速开始
 
@@ -43,6 +43,8 @@ REPOHUB_SECRET_KEY=... REPOHUB_ADMIN_TOKEN=... docker compose -f deploy/docker-c
 ```
 
 运行时依赖系统 `git`（≥ 2.31）。生产环境请放在 TLS 反向代理后面。
+
+打开 `https://git.example.com/` 进入 Web 控制台，用管理令牌登录，之后的第 2～5 步都可以在控制台里完成。下面以 CLI 为例。
 
 ### 2. 填入平台凭据（target）
 
@@ -216,6 +218,7 @@ rh webhook add|list|test|enable|disable|rm
 | GET | `/api/status` | 全部仓库概览 |
 | GET | `/metrics` | Prometheus 指标 |
 | GET | `/healthz` | 健康检查 |
+| GET | `/ui/` | Web 控制台（`/` 会重定向到这里） |
 
 Git 地址：`/{org}/{name}.git`（smart HTTP，协议 v2）。
 
@@ -232,7 +235,7 @@ Git 地址：`/{org}/{name}.git`（smart HTTP，协议 v2）。
 ## 路线图
 
 - **M1（已完成）**：target / binding / token，push 自动建仓，pre/post-receive，force-with-lease 同步，分叉检测与备份，巡检与重试，`rh status`。
-- **M2**：~~出站 webhook 与告警~~（已完成）、Web 控制台。
+- **M2**：~~出站 webhook 与告警~~、~~Web 控制台~~（已完成）。
 - **M3**：只读边缘节点、bundle-uri / 源码包 CDN、按区域读取路由。
 - **M4**：~~Gitea / Forgejo 适配器~~（已完成）、Gitee 适配器、Git LFS、按需同步 Release。
 

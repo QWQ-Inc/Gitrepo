@@ -28,6 +28,7 @@ import (
 	"github.com/qwq-inc/gitrepo/internal/secrets"
 	"github.com/qwq-inc/gitrepo/internal/store"
 	"github.com/qwq-inc/gitrepo/internal/syncer"
+	"github.com/qwq-inc/gitrepo/internal/webui"
 )
 
 // Options tune behaviour that is not part of the config file.
@@ -227,6 +228,9 @@ func (s *Server) writeShims() error {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.registerAPI(mux)
+	mux.Handle("GET /ui/", webui.Handler("/ui/"))
+	mux.Handle("GET /ui", http.RedirectHandler("/ui/", http.StatusFound))
+	mux.Handle("GET /{$}", http.RedirectHandler("/ui/", http.StatusFound))
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /metrics", s.requireAdmin(s.handleMetrics))
 	mux.Handle("/", s.gitsrv)
