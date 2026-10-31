@@ -168,6 +168,23 @@ gr webhook test 2
 
 JSON 投递带以下请求头：`X-Gitrepo-Event`、`X-Gitrepo-Delivery`；配置了 secret 时还带 `X-Gitrepo-Signature-256: sha256=<HMAC-SHA256(secret, body)>`，校验方式与 GitHub webhook 相同。失败的投递会在 5s、30s、2m 后重试。`--repos 'acme/*'` 可以只接收部分仓库的事件。飞书和钉钉机器人的"签名校验"安全设置暂不支持，请改用关键词（例如 `Gitrepo`）或 IP 白名单。
 
+## SSH
+
+设置 `ssh.listen`（或环境变量 `GITREPO_SSH_LISTEN=:2222`）即可启用 SSH，之后用公钥代替令牌：
+
+```bash
+gr key add laptop --scopes create --file ~/.ssh/id_ed25519.pub
+gr ssh                                  # 查看地址和主机指纹，用于核对 known_hosts
+git remote add hub ssh://git@git.example.com:2222/acme/demo.git
+git push hub main
+```
+
+- 公钥和令牌一样带权限（read/write/create）和仓库范围。push 自动建仓、pre/post-receive、镜像同步与 HTTPS 完全一致。
+- 支持 Git 协议 v2，也支持通过 SSH 使用 git-lfs（走 `git-lfs-authenticate`，实际传输经由 HTTPS，所以 `public_url` 要配置成客户端能访问的地址）。
+- 主机密钥在首次启动时生成，保存在 `<data_dir>/ssh/host_ed25519_key`，随数据目录一起备份。
+- 不提供 shell：`ssh git@…` 只会回一句问候并断开。
+- 只接受 ed25519、ECDSA，以及至少 2048 位的 RSA 公钥。
+
 ## 接管已有仓库
 
 如果镜像仓库里已经有 Gitrepo 没写过的内容（比如以前直接在 GitHub 上维护的项目），Gitrepo 不会自动往里写，首次同步会失败并提示：
@@ -221,6 +238,8 @@ gr sync    ORG/NAME [--overwrite] [--remote ID]
 gr status  [ORG/NAME]
 gr runs    ORG/NAME
 gr token   create|list|rm
+gr key     add|list|rm                   SSH 公钥
+gr ssh                                   SSH 地址与主机指纹
 gr webhook add|list|test|enable|disable|rm
 ```
 
@@ -244,13 +263,15 @@ gr webhook add|list|test|enable|disable|rm
 | GET | `/api/repos/{org}/{name}/runs` | 同步历史 |
 | GET/POST | `/api/tokens`，DELETE `/api/tokens/{id}` | 客户端 token |
 | GET/POST | `/api/webhooks`，PATCH/DELETE `/api/webhooks/{id}` | 出站通知 |
+| GET/POST | `/api/ssh-keys`，DELETE `/api/ssh-keys/{id}` | SSH 公钥 |
+| GET | `/api/ssh` | SSH 是否启用、地址、主机密钥与指纹 |
 | POST | `/api/webhooks/{id}/test` | 发送测试投递 |
 | GET | `/api/status` | 全部仓库概览 |
 | GET | `/metrics` | Prometheus 指标 |
 | GET | `/healthz` | 健康检查 |
 | GET | `/ui/` | Web 控制台（`/` 会重定向到这里） |
 
-Git 地址：`/{org}/{name}.git`（smart HTTP，协议 v2）。
+Git 地址：`/{org}/{name}.git`（smart HTTP，协议 v2）；启用 SSH 后还有 `ssh://git@<host>:<port>/{org}/{name}.git`。
 
 ## 运维
 

@@ -8,10 +8,12 @@ services:
     restart: unless-stopped
     ports:
       - "8080:8080"
+      - "2222:2222"   # git over SSH
     environment:
       GITREPO_SECRET_KEY: ${GITREPO_SECRET_KEY:?generate one with `docker run --rm gitrepo:local keygen`}
       GITREPO_ADMIN_TOKEN: ${GITREPO_ADMIN_TOKEN:?set a long random admin token}
       GITREPO_PUBLIC_URL: ${GITREPO_PUBLIC_URL:-http://localhost:8080}
+      GITREPO_SSH_LISTEN: ":2222"
       # Optional: mount deploy/gitrepo.example.yaml and point at it.
       # GITREPO_CONFIG: /etc/gitrepo/gitrepo.yaml
     volumes:

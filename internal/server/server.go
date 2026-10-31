@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,6 +28,7 @@ import (
 	"github.com/qwq-inc/gitrepo/internal/notify"
 	"github.com/qwq-inc/gitrepo/internal/registry"
 	"github.com/qwq-inc/gitrepo/internal/secrets"
+	"github.com/qwq-inc/gitrepo/internal/sshserve"
 	"github.com/qwq-inc/gitrepo/internal/store"
 	"github.com/qwq-inc/gitrepo/internal/syncer"
 	"github.com/qwq-inc/gitrepo/internal/webui"
@@ -50,6 +52,8 @@ type Server struct {
 	reg    *registry.Registry
 	mgr    *syncer.Manager
 	notify *notify.Notifier
+	ssh    *sshserve.Server // nil when SSH is disabled
+	sshLn  net.Listener
 	auth   *auth.Authenticator
 	gitsrv *gitserve.Server
 
@@ -157,7 +161,56 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*Server, error) {
 		PostReceiveWait: cfg.Sync.PostReceiveWait.D(),
 		LFS:             &lfs.Server{Signer: lfsSigner, MaxObjectSize: int64(cfg.Policy.MaxLFSObjectSize), Log: log},
 	}
+	if cfg.SSH.Listen != "" {
+		s.ssh = &sshserve.Server{
+			Git: s.gitsrv, Store: st, Registry: s.reg, Signer: lfsSigner,
+			PublicURL: cfg.PublicURL, GitBin: cfg.Git.Binary, Log: log,
+			HostKeyPath: filepath.Join(cfg.SSHDir(), "host_ed25519_key"),
+		}
+		if err := s.ssh.Init(); err != nil {
+			st.Close()
+			return nil, err
+		}
+	}
 	return s, nil
+}
+
+// SSHAddr is the address the SSH server listens on ("" when disabled).
+func (s *Server) SSHAddr() string {
+	if s.sshLn == nil {
+		return ""
+	}
+	return s.sshLn.Addr().String()
+}
+
+// sshHost is the host[:port] used in ssh:// clone URLs.
+func (s *Server) sshHost() string {
+	if s.ssh == nil {
+		return ""
+	}
+	if s.cfg.SSH.PublicHost != "" {
+		return s.cfg.SSH.PublicHost
+	}
+	host := "localhost"
+	if u, err := url.Parse(s.cfg.PublicURL); err == nil && u.Hostname() != "" {
+		host = u.Hostname()
+	}
+	_, port, _ := net.SplitHostPort(s.cfg.SSH.Listen)
+	if s.sshLn != nil {
+		_, port, _ = net.SplitHostPort(s.sshLn.Addr().String())
+	}
+	if port == "" || port == "22" {
+		return host
+	}
+	return net.JoinHostPort(host, port)
+}
+
+// SSHCloneURL returns the ssh:// URL of a repository ("" when disabled).
+func (s *Server) SSHCloneURL(slug string) string {
+	if h := s.sshHost(); h != "" {
+		return "ssh://git@" + h + "/" + slug + ".git"
+	}
+	return ""
 }
 
 func loadSecretKey(cfg *config.Config) ([]byte, error) {
@@ -267,6 +320,19 @@ func (s *Server) Start(ln net.Listener) error {
 			s.log.Error("http server", "err", err)
 		}
 	}()
+	if s.ssh != nil {
+		sshLn, err := net.Listen("tcp", s.cfg.SSH.Listen)
+		if err != nil {
+			return fmt.Errorf("listen for ssh: %w", err)
+		}
+		s.sshLn = sshLn
+		go func() {
+			if err := s.ssh.Serve(sshLn); err != nil {
+				s.log.Error("ssh server", "err", err)
+			}
+		}()
+		s.log.Info("ssh enabled", "listen", sshLn.Addr().String(), "host_key", s.ssh.Fingerprint())
+	}
 	s.notify.Start(2)
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
@@ -286,6 +352,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	var errs []error
 	if s.httpSrv != nil {
 		errs = append(errs, s.httpSrv.Shutdown(ctx))
+	}
+	if s.ssh != nil {
+		s.ssh.Close()
 	}
 	s.mgr.Shutdown()
 	s.notify.Stop()

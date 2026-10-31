@@ -70,6 +70,7 @@ type env struct {
 	remoteDir string
 	api       *client.Client
 	git       *gitexec.Git
+	srv       *server.Server
 }
 
 const (
@@ -145,7 +146,7 @@ func newEnv(t *testing.T, tweaks ...func(*config.Config)) *env {
 	return &env{
 		t: t, hubAddr: ln.Addr().String(), reposDir: cfg.ReposDir(),
 		remoteURL: remote.URL, remoteDir: remoteDir,
-		api: client.New(cfg.PublicURL, adminToken), git: g,
+		api: client.New(cfg.PublicURL, adminToken), git: g, srv: srv,
 	}
 }
 

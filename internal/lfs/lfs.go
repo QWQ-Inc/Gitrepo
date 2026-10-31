@@ -112,6 +112,11 @@ type claims struct {
 
 const tokenPrefix = "lfs1."
 
+// AnyObject in a token's object field authorizes batch requests for the
+// whole repository (issued by git-lfs-authenticate over SSH). Such a token
+// is never valid for an individual object transfer.
+const AnyObject = "*"
+
 // Sign returns a token for op ("upload" or "download") on repo/oid.
 func (s *Signer) Sign(repo, oid, op string, ttl time.Duration) string {
 	c, _ := json.Marshal(claims{Repo: repo, OID: oid, Op: op, Exp: s.now().Add(ttl).Unix()})

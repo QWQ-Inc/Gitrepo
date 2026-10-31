@@ -48,6 +48,7 @@ func (s *Server) registerAPI(mux *http.ServeMux) {
 
 	h("GET /api/status", s.apiListRepos)
 	s.registerWebhookAPI(h)
+	s.registerSSHAPI(h)
 }
 
 func (s *Server) requireAdmin(fn http.HandlerFunc) http.HandlerFunc {
@@ -560,6 +561,7 @@ type repoOut struct {
 	ID            int64       `json:"id"`
 	Slug          string      `json:"slug"`
 	CloneURL      string      `json:"clone_url"`
+	SSHURL        string      `json:"ssh_url,omitempty"`
 	DefaultBranch string      `json:"default_branch,omitempty"`
 	Visibility    string      `json:"visibility"`
 	State         string      `json:"state"`
@@ -576,7 +578,7 @@ var stateRank = map[string]int{
 
 func (s *Server) repoOut(ctx context.Context, repo *store.Repo, withDivergences bool) (repoOut, error) {
 	out := repoOut{
-		ID: repo.ID, Slug: repo.Slug, CloneURL: s.cfg.PublicURL + "/" + repo.Slug + ".git",
+		ID: repo.ID, Slug: repo.Slug, CloneURL: s.cfg.PublicURL + "/" + repo.Slug + ".git", SSHURL: s.SSHCloneURL(repo.Slug),
 		DefaultBranch: repo.DefaultBranch, Visibility: repo.Visibility, CreatedAt: ts(repo.CreatedAt),
 		Busy: s.mgr.Busy(repo.ID), Remotes: []remoteOut{},
 	}

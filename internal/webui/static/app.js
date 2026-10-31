@@ -323,6 +323,7 @@ async function viewRepo(org, name) {
         h('button', { class: 'secondary', onclick: rerender }, '刷新'))),
     h('div', { class: 'panel' }, h('dl', { class: 'kv' },
       h('dt', {}, 'Push / Clone'), h('dd', {}, copyable(repo.clone_url)),
+      repo.ssh_url ? [h('dt', {}, 'SSH'), h('dd', {}, copyable(repo.ssh_url))] : null,
       h('dt', {}, '可见性'), h('dd', {}, repo.visibility === 'public' ? '公开' : '私有'),
       h('dt', {}, '默认分支'), h('dd', {}, repo.default_branch || '（空仓库）'),
       h('dt', {}, '添加远端'), h('dd', {}, h('code', {}, `git remote add hub ${repo.clone_url}`)))),
@@ -520,7 +521,7 @@ async function viewBindings() {
 // ------------------------------------------------------------------- tokens
 
 async function viewTokens() {
-  const tokens = await api('GET', '/api/tokens');
+  const [tokens, keys, sshInfo] = await Promise.all([api('GET', '/api/tokens'), api('GET', '/api/ssh-keys'), api('GET', '/api/ssh')]);
   const created = h('div');
   const rows = tokens.map((t) => h('tr', {},
     h('td', {}, t.name), h('td', {}, t.scopes.join(', ')), h('td', {}, (t.repos || []).join(', ') || '全部'),
@@ -546,13 +547,42 @@ async function viewTokens() {
   field('仓库范围（可选）', h('input', { name: 'repos', placeholder: 'acme/*, tools/cli（默认全部）' })),
   h('div', {}, h('button', { type: 'submit' }, '创建令牌')));
   created.id = 'created';
+
+  const keyRows = keys.map((k) => h('tr', {},
+    h('td', {}, k.name), h('td', {}, k.type), h('td', { class: 'mono' }, k.fingerprint),
+    h('td', {}, k.scopes.join(', ')), h('td', {}, (k.repos || []).join(', ') || '全部'), h('td', {}, ago(k.last_used_at)),
+    h('td', { class: 'actions' }, h('button', { class: 'danger small', onclick: action(async () => {
+      if (!confirm(`删除 SSH 公钥 ${k.name}？`)) return false;
+      await api('DELETE', '/api/ssh-keys/' + k.id);
+      rerender();
+    }, '已删除') }, '删除'))));
+  const keyForm = h('form', { class: 'grid', onsubmit: action(async (ev) => {
+    const d = formData(ev.target);
+    await api('POST', '/api/ssh-keys', { name: d.name, public_key: d.public_key, scopes: [d.scope], repos: list(d.repos) });
+    rerender();
+    return '已添加';
+  }) },
+  field('名称', h('input', { name: 'name', required: true, placeholder: 'laptop', pattern: '[A-Za-z0-9._\\-]+' })),
+  field('权限', select('scope', [['read', 'read'], ['write', 'write'], ['create', 'create']], 'create')),
+  field('仓库范围（可选）', h('input', { name: 'repos', placeholder: 'acme/*（默认全部）' })),
+  field('公钥（~/.ssh/id_ed25519.pub 的内容）', h('textarea', { name: 'public_key', required: true, placeholder: 'ssh-ed25519 AAAA… you@laptop' }), 'wide'),
+  h('div', {}, h('button', { type: 'submit' }, '添加公钥')));
+  const sshSection = sshInfo.enabled
+    ? [h('p', { class: 'hint' }, '地址示例：', h('code', {}, sshInfo.example_url), '。主机指纹 ', h('code', {}, sshInfo.fingerprint), '，首次连接时请核对。'),
+      table(['名称', '类型', '指纹', '权限', '仓库范围', '上次使用', ''], keyRows, '还没有公钥。'),
+      h('h2', {}, '添加 SSH 公钥'),
+      h('div', { class: 'panel' }, keyForm)]
+    : [h('p', { class: 'hint' }, 'SSH 未启用。在服务端设置 ssh.listen（或环境变量 GITREPO_SSH_LISTEN，例如 :2222）后即可通过 SSH push 和 clone。')];
+
   app.replaceChildren(
     h('h1', {}, '访问令牌'),
     h('p', { class: 'hint' }, '给开发者、CI 和部署平台使用。只保存哈希，丢失后只能重新创建。'),
     created,
     table(['名称', '权限', '仓库范围', '上次使用', ''], rows, '还没有令牌。'),
     h('h2', {}, '创建令牌'),
-    h('div', { class: 'panel' }, form));
+    h('div', { class: 'panel' }, form),
+    h('h2', {}, 'SSH 公钥'),
+    ...sshSection);
 }
 
 // ----------------------------------------------------------------- webhooks

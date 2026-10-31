@@ -206,6 +206,19 @@ CREATE TABLE webhooks (
 ALTER TABLE remotes ADD COLUMN adopt INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE bindings ADD COLUMN name_template TEXT NOT NULL DEFAULT '{name}';
 `,
+	// 4: SSH public keys, authorized like tokens.
+	`
+CREATE TABLE ssh_keys (
+  id           INTEGER PRIMARY KEY,
+  name         TEXT    NOT NULL UNIQUE,
+  fingerprint  TEXT    NOT NULL UNIQUE,
+  public_key   TEXT    NOT NULL,
+  scopes       TEXT    NOT NULL,
+  repos        TEXT    NOT NULL DEFAULT '',
+  created_at   INTEGER NOT NULL,
+  last_used_at INTEGER NOT NULL DEFAULT 0
+);
+`,
 }
 
 func (s *Store) migrate(ctx context.Context) error {

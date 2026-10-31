@@ -174,7 +174,13 @@ func (s *Server) batch(w http.ResponseWriter, r *http.Request, repo Repo) {
 		writeErr(w, http.StatusUnprocessableEntity, "only the basic transfer adapter is supported")
 		return
 	}
-	if err := s.Auth(r, repo.Slug, req.Operation == "upload"); err != nil {
+	if tok := bearer(r); tok != "" {
+		// Repository-wide token from `git-lfs-authenticate` over SSH.
+		if err := s.Signer.Verify(tok, repo.Slug, AnyObject, req.Operation); err != nil {
+			writeErr(w, http.StatusUnauthorized, err.Error())
+			return
+		}
+	} else if err := s.Auth(r, repo.Slug, req.Operation == "upload"); err != nil {
 		s.authErr(w, err)
 		return
 	}

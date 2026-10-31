@@ -90,3 +90,12 @@ Hub 自己实现了 LFS 服务端（`internal/lfs`）：
 - 存储：对象放在 bare 仓库的 `lfs/objects/<aa>/<bb>/<oid>`，与 git-lfs 自己的布局一致。上传时边写临时文件边计算 SHA-256，校验通过才 rename 到最终位置。
 - 入口检查：pre-receive 读取新增的、可能是指针的小 blob（100～1024 字节），对象不在 Hub 上就拒绝推送。
 - 同步：推送 ref 之前，先用 `rev-list --objects --ignore-missing --stdin` 算出"新值可达、而镜像现有值不可达"的指针，再用 `git lfs push --object-id --stdin` 上传。镜像的地址通过 `-c remote.gitrepo-mirror.url=` 临时注入，凭据沿用 askpass 或 SSH 的同一套机制，并关闭 `lfs.locksverify`。LFS 上传失败时，这一轮不推送 ref。
+
+## SSH
+
+内置 SSH 服务端（`golang.org/x/crypto/ssh`），默认关闭。
+
+- **鉴权**：SSH 公钥和令牌一样带权限与仓库范围，按 SHA256 指纹查找，并逐字节比对完整公钥。
+- **与 HTTPS 共用一套逻辑**：`gitserve.Server.Access`（鉴权、push 自动建仓）和 `gitserve.Server.GitEnv`（hooks、隐藏 ref、推送策略、单文件上限）由 HTTP 和 SSH 两条路径共用，两边的行为不会出现差异。服务端 git 配置必须在一次 `GIT_CONFIG_COUNT` 中给出，因为重复的环境变量只有最后一个生效。
+- **会话**：只接受 `env`（仅 `GIT_PROTOCOL`，用于协议 v2）和 `exec`。执行期间继续应答其他请求；stdin 手动拷贝，避免客户端在等退出码时 `Wait()` 一直阻塞。
+- **git-lfs-authenticate**：返回 HTTPS 的 LFS 地址，以及一个仓库级、1 小时有效的签名令牌。这个令牌只能用于 batch 请求，不能用于单个对象的传输。

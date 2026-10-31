@@ -101,79 +101,27 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	repo, err := s.Store.GetRepoBySlug(ctx, slug)
+	repo, err := s.Access(ctx, slug, p, write, write && rest == "info/refs")
 	switch {
-	case errors.Is(err, store.ErrNotFound):
-		if p == nil {
-			unauthorized(w, "authentication required")
-			return
-		}
-		if !(write && rest == "info/refs" && p.Can(auth.ScopeCreate, slug)) {
-			http.Error(w, "gitrepo: repository not found", http.StatusNotFound)
-			return
-		}
-		repo, _, err = s.Registry.CreateRepo(ctx, slug, "private", true)
-		if err != nil {
-			s.Log.Error("create repository on push", "repo", slug, "err", err)
-			http.Error(w, "gitrepo: cannot create repository: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		s.Log.Info("repository created by push", "repo", slug, "by", p.Name)
-		if s.OnCreate != nil {
-			s.OnCreate(repo)
-		}
+	case errors.Is(err, ErrUnauthenticated):
+		unauthorized(w, "authentication required")
+		return
+	case errors.Is(err, ErrNotFound):
+		http.Error(w, "gitrepo: repository not found", http.StatusNotFound)
+		return
+	case errors.Is(err, ErrForbidden):
+		http.Error(w, "gitrepo: "+err.Error(), http.StatusForbidden)
+		return
 	case err != nil:
-		s.Log.Error("load repository", "repo", slug, "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		s.Log.Error("repository access", "repo", slug, "err", err)
+		http.Error(w, "gitrepo: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	if write {
-		if p == nil {
-			unauthorized(w, "authentication required")
-			return
-		}
-		if !p.Can(auth.ScopeWrite, slug) {
-			http.Error(w, "gitrepo: token has no write access to "+slug, http.StatusForbidden)
-			return
-		}
-	} else if repo.Visibility != "public" {
-		if p == nil {
-			unauthorized(w, "authentication required")
-			return
-		}
-		if !p.Can(auth.ScopeRead, slug) {
-			http.Error(w, "gitrepo: token has no read access to "+slug, http.StatusForbidden)
-			return
-		}
-	}
-
-	env := []string{
+	env := append([]string{
 		"GIT_PROJECT_ROOT=" + s.ReposDir,
 		"GIT_HTTP_EXPORT_ALL=1",
-		"HOME=" + s.HomeDir,
-		"XDG_CONFIG_HOME=" + s.HomeDir,
-		githooks.EnvSocket + "=" + s.SocketPath,
-		githooks.EnvHookToken + "=" + s.HookToken,
-		githooks.EnvRepo + "=" + slug,
-		githooks.EnvGit + "=" + s.GitBin,
-		githooks.EnvWait + "=" + strconv.FormatInt(s.PostReceiveWait.Milliseconds(), 10),
-	}
-	env = append(env, gitConfigEnv(
-		"core.hooksPath", s.HooksDir,
-		"transfer.hideRefs", "refs/backup",
-		"receive.advertisePushOptions", "true",
-		"receive.fsckObjects", "true",
-		"uploadpack.allowFilter", "true",
-		"http.receivepack", "true",
-		"http.uploadpack", "true",
-	)...)
-	if p != nil {
-		env = append(env, "REMOTE_USER="+p.Name)
-	}
-	if write {
-		env = append(env, githooks.EnvMaxFileSize+"="+strconv.FormatInt(s.maxFileSize(ctx, repo), 10))
-	}
+	}, s.GitEnv(ctx, repo, p, write, "http.receivepack", "true", "http.uploadpack", "true")...)
 	// Hand http-backend exactly the service that was authorized: it reads
 	// the last "service" parameter while authorization used the first.
 	if rest == "info/refs" {
@@ -217,6 +165,87 @@ func (s *Server) serveLFS(w http.ResponseWriter, r *http.Request, slug, rest str
 	srv := *s.LFS
 	srv.Auth = authz
 	srv.Serve(w, r, lfs.Repo{Slug: slug, Dir: s.Registry.Path(slug)}, rest)
+}
+
+// Access errors.
+var (
+	ErrUnauthenticated = errors.New("authentication required")
+	ErrForbidden       = errors.New("access denied")
+	ErrNotFound        = errors.New("repository not found")
+)
+
+// Access resolves slug for a Git operation by p (nil = anonymous). write
+// needs the write scope; reads of public repositories are open. With
+// allowCreate, a missing repository is created when p has the create
+// scope (push-to-create). Errors wrap ErrUnauthenticated, ErrForbidden or
+// ErrNotFound.
+func (s *Server) Access(ctx context.Context, slug string, p *auth.Principal, write, allowCreate bool) (*store.Repo, error) {
+	repo, err := s.Store.GetRepoBySlug(ctx, slug)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		if p == nil {
+			return nil, ErrUnauthenticated
+		}
+		if !(write && allowCreate && p.Can(auth.ScopeCreate, slug)) {
+			return nil, ErrNotFound
+		}
+		repo, _, err = s.Registry.CreateRepo(ctx, slug, "private", true)
+		if err != nil {
+			return nil, fmt.Errorf("cannot create repository: %w", err)
+		}
+		s.Log.Info("repository created by push", "repo", slug, "by", p.Name)
+		if s.OnCreate != nil {
+			s.OnCreate(repo)
+		}
+	case err != nil:
+		return nil, err
+	}
+	if write {
+		if p == nil {
+			return nil, ErrUnauthenticated
+		}
+		if !p.Can(auth.ScopeWrite, slug) {
+			return nil, fmt.Errorf("%w: %s has no write access to %s", ErrForbidden, p.Name, slug)
+		}
+	} else if repo.Visibility != "public" {
+		if p == nil {
+			return nil, ErrUnauthenticated
+		}
+		if !p.Can(auth.ScopeRead, slug) {
+			return nil, fmt.Errorf("%w: %s has no read access to %s", ErrForbidden, p.Name, slug)
+		}
+	}
+	return repo, nil
+}
+
+// GitEnv is the environment for upload-pack / receive-pack on repo: shared
+// server-side git configuration (plus extraConfig key/value pairs), hook
+// wiring and push policy. Configuration must be passed in one call: git
+// reads a single GIT_CONFIG_COUNT.
+func (s *Server) GitEnv(ctx context.Context, repo *store.Repo, p *auth.Principal, write bool, extraConfig ...string) []string {
+	env := []string{
+		"HOME=" + s.HomeDir,
+		"XDG_CONFIG_HOME=" + s.HomeDir,
+		githooks.EnvSocket + "=" + s.SocketPath,
+		githooks.EnvHookToken + "=" + s.HookToken,
+		githooks.EnvRepo + "=" + repo.Slug,
+		githooks.EnvGit + "=" + s.GitBin,
+		githooks.EnvWait + "=" + strconv.FormatInt(s.PostReceiveWait.Milliseconds(), 10),
+	}
+	env = append(env, gitConfigEnv(append([]string{
+		"core.hooksPath", s.HooksDir,
+		"transfer.hideRefs", "refs/backup",
+		"receive.advertisePushOptions", "true",
+		"receive.fsckObjects", "true",
+		"uploadpack.allowFilter", "true",
+	}, extraConfig...)...)...)
+	if p != nil {
+		env = append(env, "REMOTE_USER="+p.Name)
+	}
+	if write {
+		env = append(env, githooks.EnvMaxFileSize+"="+strconv.FormatInt(s.maxFileSize(ctx, repo), 10))
+	}
+	return env
 }
 
 func unauthorized(w http.ResponseWriter, msg string) {

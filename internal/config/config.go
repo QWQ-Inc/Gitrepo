@@ -39,6 +39,16 @@ type Config struct {
 	Sync   SyncConfig   `yaml:"sync"`
 	Policy PolicyConfig `yaml:"policy"`
 	Alerts AlertsConfig `yaml:"alerts"`
+	SSH    SSHConfig    `yaml:"ssh"`
+}
+
+// SSHConfig enables Git over SSH. It is off unless Listen is set.
+type SSHConfig struct {
+	// Listen is the SSH listener address, e.g. ":2222".
+	Listen string `yaml:"listen"`
+	// PublicHost is the host[:port] clients use in ssh:// URLs. Defaults to
+	// the public_url host with the listen port.
+	PublicHost string `yaml:"public_host"`
 }
 
 // AlertsConfig controls when webhook alerts fire.
@@ -153,6 +163,9 @@ func (c *Config) applyEnv() {
 	}
 	if v := os.Getenv("GITREPO_DATA_DIR"); v != "" {
 		c.DataDir = v
+	}
+	if v := os.Getenv("GITREPO_SSH_LISTEN"); v != "" {
+		c.SSH.Listen = v
 	}
 	if v := os.Getenv("GITREPO_GIT_BINARY"); v != "" {
 		c.Git.Binary = v

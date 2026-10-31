@@ -37,12 +37,14 @@ jobs:
           docker run --rm gitrepo:ci version
           docker run --rm --entrypoint git gitrepo:ci --version
           docker run --rm --entrypoint git gitrepo:ci lfs version
-          docker run -d --name gitrepo -p 8080:8080 \
+          docker run -d --name gitrepo -p 8080:8080 -p 2222:2222 -e GITREPO_SSH_LISTEN=:2222 \
             -e GITREPO_SECRET_KEY="$(docker run --rm gitrepo:ci keygen)" \
             -e GITREPO_ADMIN_TOKEN=ci-admin gitrepo:ci
           for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8080/healthz && break; sleep 1; done
           curl -fsS -H 'Authorization: Bearer ci-admin' http://127.0.0.1:8080/api/status
           curl -fsS -o /dev/null http://127.0.0.1:8080/ui/
+          curl -fsS -H 'Authorization: Bearer ci-admin' http://127.0.0.1:8080/api/ssh | grep -q '"enabled": true'
+          ssh-keyscan -p 2222 127.0.0.1 | grep -q ssh-ed25519
           for i in $(seq 1 30); do [ "$(docker inspect -f '{{.State.Health.Status}}' gitrepo)" = healthy ] && break; sleep 2; done
           docker inspect -f '{{.State.Health.Status}}' gitrepo | grep -qx healthy
           docker logs gitrepo

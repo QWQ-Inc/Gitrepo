@@ -46,7 +46,7 @@ func main() {
 	root.PersistentFlags().StringVar(&flagToken, "token", os.Getenv("GITREPO_TOKEN"), "admin token (env GITREPO_TOKEN)")
 	root.PersistentFlags().BoolVar(&flagJSON, "json", false, "print raw JSON")
 
-	root.AddCommand(targetCmd(), bindCmd(), bindingCmd(), repoCmd(), remoteCmd(), syncCmd(), statusCmd(), runsCmd(), tokenCmd(), webhookCmd())
+	root.AddCommand(targetCmd(), bindCmd(), bindingCmd(), repoCmd(), remoteCmd(), syncCmd(), statusCmd(), runsCmd(), tokenCmd(), keyCmd(), sshInfoCmd(), webhookCmd())
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
@@ -765,6 +765,9 @@ func statusOne(slug string) error {
 	}
 	fmt.Printf("%s  %s, default branch %s\n", r.Slug, r.Visibility, branch)
 	fmt.Printf("push/clone: %s\n", r.CloneURL)
+	if r.SSHURL != "" {
+		fmt.Printf("ssh:        %s\n", r.SSHURL)
+	}
 	fmt.Printf("state:      %s%s\n\n", r.State, busy)
 	if len(r.Remotes) == 0 {
 		fmt.Println("no mirrors — gr remote add", r.Slug, "<target>")
@@ -1028,4 +1031,102 @@ out of shell history. They are stored encrypted.`,
 		simple("enable", "Resume deliveries", http.MethodPatch, "", map[string]any{"enabled": true}, "enabled"),
 		simple("rm", "Remove a webhook", http.MethodDelete, "", nil, "removed"))
 	return cmd
+}
+
+// --------------------------------------------------------------------- ssh
+
+func keyCmd() *cobra.Command {
+	cmd := &cobra.Command{Use: "key", Short: "SSH public keys for git over SSH (scoped like tokens)"}
+	var scopes, repos, file string
+	add := &cobra.Command{
+		Use:     "add NAME",
+		Short:   "Register an SSH public key",
+		Example: "  gr key add laptop --scopes create --file ~/.ssh/id_ed25519.pub\n  gr key add deploy --scopes read --repos 'acme/*' < deploy_key.pub",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			var raw []byte
+			var err error
+			if file != "" {
+				raw, err = os.ReadFile(file)
+			} else {
+				raw, err = io.ReadAll(os.Stdin)
+			}
+			if err != nil {
+				return err
+			}
+			var k client.SSHKey
+			if err := call(http.MethodPost, "/api/ssh-keys", map[string]any{
+				"name": args[0], "public_key": string(raw), "scopes": strings.Split(scopes, ","), "repos": splitNonEmpty(repos),
+			}, &k); err != nil {
+				return err
+			}
+			if flagJSON {
+				return printJSON(k)
+			}
+			fmt.Printf("key %s added (%s %s, scopes %s)\n", k.Name, k.Type, k.Fingerprint, strings.Join(k.Scopes, ","))
+			return nil
+		},
+	}
+	add.Flags().StringVar(&scopes, "scopes", "write", "read | write | create | admin")
+	add.Flags().StringVar(&repos, "repos", "", "comma-separated repository patterns (default: all)")
+	add.Flags().StringVar(&file, "file", "", "public key file (default: read stdin)")
+	list := &cobra.Command{
+		Use: "list", Aliases: []string{"ls"}, Short: "List SSH keys", Args: cobra.NoArgs,
+		RunE: func(c *cobra.Command, args []string) error {
+			var ks []client.SSHKey
+			if err := call(http.MethodGet, "/api/ssh-keys", nil, &ks); err != nil {
+				return err
+			}
+			if flagJSON {
+				return printJSON(ks)
+			}
+			w := table()
+			fmt.Fprintln(w, "ID\tNAME\tTYPE\tFINGERPRINT\tSCOPES\tREPOS\tLAST USED")
+			for _, k := range ks {
+				r := strings.Join(k.Repos, ",")
+				if r == "" {
+					r = "*"
+				}
+				fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\n", k.ID, k.Name, k.Type, k.Fingerprint, strings.Join(k.Scopes, ","), r, ago(k.LastUsedAt))
+			}
+			return w.Flush()
+		},
+	}
+	rm := &cobra.Command{
+		Use: "rm ID", Short: "Remove an SSH key", Args: cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			if err := call(http.MethodDelete, "/api/ssh-keys/"+args[0], nil, nil); err != nil {
+				return err
+			}
+			fmt.Println("removed key", args[0])
+			return nil
+		},
+	}
+	cmd.AddCommand(add, list, rm)
+	return cmd
+}
+
+func sshInfoCmd() *cobra.Command {
+	return &cobra.Command{
+		Use: "ssh", Short: "Show the SSH endpoint and host key (for known_hosts)", Args: cobra.NoArgs,
+		RunE: func(c *cobra.Command, args []string) error {
+			var info client.SSHInfo
+			if err := call(http.MethodGet, "/api/ssh", nil, &info); err != nil {
+				return err
+			}
+			if flagJSON {
+				return printJSON(info)
+			}
+			if !info.Enabled {
+				fmt.Println("SSH is disabled; set ssh.listen (or GITREPO_SSH_LISTEN) on the server")
+				return nil
+			}
+			host := info.Host
+			if h, p, ok := strings.Cut(host, ":"); ok {
+				host = "[" + h + "]:" + p
+			}
+			fmt.Printf("url:         %s\nfingerprint: %s\nknown_hosts: %s %s\n", info.ExampleURL, info.Fingerprint, host, info.HostKey)
+			return nil
+		},
+	}
 }

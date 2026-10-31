@@ -37,6 +37,10 @@ policy:
   # Largest Git LFS object accepted by the hub. 0 = unlimited.
   max_lfs_object_size: 0
 
+ssh:
+  listen: ""                 # e.g. ":2222" enables git over SSH (off by default)
+  public_host: ""            # host[:port] for ssh:// URLs; default: public_url host + listen port
+
 alerts:
   failure_threshold: 3            # remote.failed after this many consecutive failures
   credential_expiry_warning: 14d  # credential.expiring when a target expires within this window

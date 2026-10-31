@@ -140,6 +140,7 @@ type Repo struct {
 	ID            int64      `json:"id"`
 	Slug          string     `json:"slug"`
 	CloneURL      string     `json:"clone_url"`
+	SSHURL        string     `json:"ssh_url,omitempty"`
 	DefaultBranch string     `json:"default_branch,omitempty"`
 	Visibility    string     `json:"visibility"`
 	State         string     `json:"state"`
@@ -198,4 +199,23 @@ type Webhook struct {
 	Enabled        bool       `json:"enabled"`
 	LastStatus     string     `json:"last_status,omitempty"`
 	LastDeliveryAt *time.Time `json:"last_delivery_at,omitempty"`
+}
+
+type SSHKey struct {
+	ID          int64      `json:"id"`
+	Name        string     `json:"name"`
+	Fingerprint string     `json:"fingerprint"`
+	Type        string     `json:"type"`
+	Scopes      []string   `json:"scopes"`
+	Repos       []string   `json:"repos,omitempty"`
+	CreatedAt   *time.Time `json:"created_at"`
+	LastUsedAt  *time.Time `json:"last_used_at,omitempty"`
+}
+
+type SSHInfo struct {
+	Enabled     bool   `json:"enabled"`
+	Host        string `json:"host"`
+	HostKey     string `json:"host_key"`
+	Fingerprint string `json:"fingerprint"`
+	ExampleURL  string `json:"example_url"`
 }

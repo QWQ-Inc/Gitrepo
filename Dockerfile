@@ -21,7 +21,7 @@ USER gitrepo
 ENV GITREPO_DATA_DIR=/data \
     GITREPO_LISTEN=:8080
 VOLUME /data
-EXPOSE 8080
+EXPOSE 8080 2222
 HEALTHCHECK --interval=30s --timeout=5s CMD ["gitrepo", "healthcheck"]
 ENTRYPOINT ["gitrepo"]
 CMD ["serve"]
