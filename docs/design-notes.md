@@ -1,0 +1,53 @@
+# 实现说明：与原设计文档的差异
+
+原设计文档（2026-10-31，"远端仓库管理器设计文档"）把"主源放在哪里"列为待定。M1 定为 **Hub 自己接收 push，再单向同步到所有镜像**。下面记录这个决定带来的改动，以及实现中发现的问题。
+
+## 架构决定
+
+| 原设计 | 实现 | 原因 |
+| --- | --- | --- |
+| 主源可以在外部（GitHub），Hub 拉取后再分发 | Hub 是唯一权威源，客户端直接 push 到 Hub | 对应"填凭据 → 拿到一个 git 地址"的用法；Hub 永远最新，M1 不需要 fetch 主源，也不需要入站 webhook |
+| 凭据挂在每个远端上（`remotes.credential_id`） | 凭据挂在 **target**（平台账号）上，**binding** 把组织映射到 target | 凭据只填一次，新仓库自动获得镜像 |
+| 用 `rh repo add` 登记 | 也可以第一次 push 时自动建仓（需要 token 有 `create` scope） | 拿到地址直接 push |
+| provider 都假设平台有 API | 新增 `generic` provider，通过能力位（`CreateRepo`、`BranchProtection`、`DefaultBranch`）声明支持什么 | 自建 Git 往往只有 URL 和凭据 |
+| `consumers` 只用于读 | token 分 `read`、`write`、`create`、`admin` 四级，可限定仓库 | Hub 要接收写入 |
+| API 用 `{id}` | API 用 `{org}/{name}` | 更符合人的使用习惯 |
+| M1 不含 smart HTTP | smart HTTP 进入 M1 | 接收 push 依赖它 |
+
+## 同步规则的补充
+
+原设计只把 lease 期望值设为 `pushed_state`。实现中补充了两条不会丢数据的规则：
+
+- **镜像值是 Hub 值的祖先时允许快进**，即使 repohub 从没推过这个 ref。这样可以直接接管已有内容的镜像，`pushed_state` 丢失后也能恢复，而且"把镜像的提交合并回来再 push"会自动消除分叉。
+- **镜像上被删除的 ref 直接重建**，因为重建不会丢失任何东西。
+
+镜像上 repohub 没写过的 ref（比如有人直接在 GitHub 上建的分支）会报告为分叉，不会被删除。每个推送操作都把刚观测到的远端值作为 lease，所以观测和推送之间发生的变化总会被远端拒绝。
+
+`--atomic` 失败时，引擎把有独立失败原因的 ref（lease 过期、平台拒绝）剔除，其余 ref 重推。远端不支持 atomic 时自动降级为非原子推送，并在该远端上记住这一点。
+
+标签更新始终按强推处理：git 要求更新已有标签必须强推，即使是快进。
+
+## push 的反馈
+
+- **pre-receive**（在 receive-pack 的隔离区里运行）：只允许 `refs/heads/*` 和 `refs/tags/*`；新 blob 不能超过最严镜像的大小上限。能在 Hub 拒绝的，就不放进来。
+- **post-receive**：通过 unix socket 通知服务端。服务端先备份被强推覆盖或删除的 ref，再修正 HEAD，然后排队同步，并把每个镜像的结果以 `remote:` 行流式回显，最多等待 `post_receive_wait`。`git push -o repohub.wait=…` 可以调整等待时间。
+- 不在 pre-receive 里"先推镜像再决定收不收"：多个远端之间做不到原子，而且会让 Hub 能否写入取决于 GitHub 是否可用。
+
+## 实现中发现的问题
+
+- **`net/http/cgi` 不能用来跑 `git http-backend`**。它直接拒绝 chunked 请求体，而 git push 超过 `http.postBuffer`（1 MiB）时就会用 chunked。另外，http-backend 在读完请求体之前就会输出响应头；Go 的 HTTP/1 服务器一旦开始写响应，就可能丢弃未读的请求体。因此实现了一个小型 CGI 运行器（`gitserve.RunBackend`），开启 `EnableFullDuplex`，并流式转发请求和响应。端到端测试用 3 MiB 的 push 覆盖了这条路径。
+- **服务端 git 配置通过 `GIT_CONFIG_COUNT` 注入**（因此要求 git ≥ 2.31），所有仓库共享同一套设置：`core.hooksPath`、`transfer.hideRefs=refs/backup`（备份 ref 不对客户端广告，也禁止客户端推送）、`receive.advertisePushOptions`、`receive.fsckObjects`。
+- **对 git 的每次调用都固定 `-c` 覆盖项**：`credential.helper=`、`push.negotiate=false`、`push.followTags=false` 等，避免宿主机的 git 配置改变推送语义或泄露凭据。HOME 指向数据目录内的空目录。
+- **凭据注入**：HTTPS 走 `GIT_ASKPASS`。askpass 是一个 shim 脚本，用一次性 ticket 通过 unix socket 向服务端换取凭据，凭据只在内存中存在于这次推送期间。SSH 用 0600 权限的临时密钥文件，用完即删；配置了 known_hosts 时严格校验主机密钥，否则使用 `accept-new`。
+- **新的 bare 仓库，HEAD 可能指向一个永远不会被推送的分支**。post-receive 会把 HEAD 修正到实际存在的分支（优先 main / master），并同步到 `repos.default_branch`。GitHub 和 GitLab 上新建的镜像在第一次推送后也会设置默认分支。
+
+## 依赖
+
+GitHub 和 GitLab 的 API 调用直接用 `net/http` 实现（每个平台只用到四五个接口），没有引入 go-github 和 GitLab 客户端。指标用 Prometheus 文本格式手写输出，没有引入 client_golang。最终依赖只有 `modernc.org/sqlite`、`gopkg.in/yaml.v3` 和 `spf13/cobra`。
+
+## M1 有意不做的事
+
+- 多实例：Hub 按单实例运行。SQLite 中的 lease 只防止两个进程误用同一个数据目录。
+- Git LFS：Hub 需要自己实现 LFS batch API 和对象存储才能接收 LFS 推送，计划在 M4。
+- 读取路由、熔断、镜像加速：Git 入口和 Hub 在同一个进程里，在有独立部署的边缘节点之前，路由带不来可用性收益。
+- 出站 webhook 和告警推送：M2。

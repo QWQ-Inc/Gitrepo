@@ -1,0 +1,36 @@
+# repohub configuration. Every key is optional; the values shown are the
+# defaults unless noted. REPOHUB_LISTEN / REPOHUB_PUBLIC_URL / REPOHUB_DATA_DIR
+# environment variables override the corresponding keys.
+version: 1
+
+listen: ":8080"
+# The address clients push to; used for clone URLs printed by the API and rh.
+public_url: "https://git.example.com"     # default: http://localhost:8080
+data_dir: "/data"                          # default: ./data
+
+# Environment variable holding the 32-byte master key that encrypts platform
+# credentials (base64 or hex). Generate with `repohub keygen`. Losing it
+# means re-entering all target credentials.
+secret_key_env: REPOHUB_SECRET_KEY
+# secret_key_file: /run/secrets/repohub_key
+
+# Environment variable holding the bootstrap admin token.
+admin_token_env: REPOHUB_ADMIN_TOKEN
+
+git:
+  binary: git          # git >= 2.31 is required
+  # self_path: /usr/local/bin/repohub   # executable used by hooks/askpass; default: this binary
+
+sync:
+  workers: 4                 # concurrent remote operations, all repositories
+  patrol_interval: 10m       # full re-check of every repository
+  push_timeout: 10m          # per mirror: ls-remote + push + verify
+  post_receive_wait: 30s     # how long `git push` waits for mirror results
+  backup_retention: 30d      # refs/backup/* older than this are pruned
+  retry_base: 30s            # backoff for failed mirrors: 30s, 1m, 2m, … up to retry_max
+  retry_max: 1h
+
+policy:
+  # Hard cap per file. The effective limit for a repository is the smallest of
+  # this and each mirror's limit (GitHub: 100 MiB). 0 = mirrors only.
+  max_file_size: 0

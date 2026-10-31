@@ -1,0 +1,213 @@
+# repohub
+
+一个 Git 地址，同时备份到 GitHub、GitLab 和自建 Git。
+
+部署 repohub，在里面填好各平台的凭据，然后把代码 `git push` 到 repohub 给你的地址。repohub 把代码存进自己的仓库（Hub），再用你配置的凭据把每个分支和标签推到所有镜像远端。哪个远端出问题只影响它自己；有人绕过 repohub 直接改了镜像，repohub 会告警，不会悄悄覆盖。
+
+```
+           git push                       force-with-lease
+ 开发者 ───────────────▶  repohub (Hub)  ─────────────────▶  GitHub   acme/demo
+ CI    ◀─────────────── git.example.com ─────────────────▶  GitLab   acme-group/demo
+           git clone        │   ▲           ─────────────────▶  自建 Git backup/demo
+                            ▼   │
+                    pre-receive  post-receive
+                    (策略检查)   (排队同步，回显结果)
+```
+
+- **一个地址**：`https://git.example.com/<org>/<repo>.git`，第一次 push 自动建仓。
+- **凭据只填一次**：每个平台账号是一个 *target*；用 *binding* 声明"这个组织（或全部组织）的新仓库都备份到哪些 target"。GitHub 和 GitLab 上的镜像仓库由 repohub 通过 API 自动创建。
+- **push 时就看到结果**：每个镜像同步成功与否，直接以 `remote:` 行显示在 `git push` 的输出里。
+- **不静默覆盖**：每次推送都带 `--force-with-lease`。repohub 只覆盖自己推过的内容（或能快进的内容）；镜像上出现别人的提交时标记为"分叉"并告警，其他分支照常同步。
+- **留有后悔药**：Hub 上被强推覆盖或删除的 ref、被覆盖前的镜像分叉内容，都保存在隐藏的 `refs/backup/<时间>/…` 下（默认保留 30 天）。
+- **在入口挡住注定失败的 push**：单文件大小上限取所有镜像中最严的（GitHub 是 100 MiB），超限的 push 在 Hub 就被拒绝，不会在某个镜像上一直失败。
+
+> 当前处于 M1 阶段：Hub 接收 push、单向同步、状态可见。读取路由、镜像加速、出站 webhook 和 LFS 见 [路线图](#路线图)。
+
+## 快速开始
+
+### 1. 启动
+
+```bash
+export REPOHUB_SECRET_KEY=$(repohub keygen)      # 加密平台凭据的主密钥，务必备份
+export REPOHUB_ADMIN_TOKEN=$(openssl rand -hex 24)
+export REPOHUB_PUBLIC_URL=https://git.example.com
+repohub serve                                     # 默认监听 :8080，数据在 ./data
+```
+
+Docker：
+
+```bash
+docker build -t repohub:local .
+REPOHUB_SECRET_KEY=... REPOHUB_ADMIN_TOKEN=... docker compose -f deploy/docker-compose.yml up -d
+```
+
+运行时依赖系统 `git`（≥ 2.31）。生产环境请放在 TLS 反向代理后面。
+
+### 2. 填入平台凭据（target）
+
+```bash
+export REPOHUB_URL=https://git.example.com REPOHUB_TOKEN=$REPOHUB_ADMIN_TOKEN
+
+# GitHub：fine-grained token，需要 Contents 写权限，自动建仓还需要 Administration 写权限
+rh target add github --provider github --namespace acme --token-env GITHUB_TOKEN
+
+# GitLab（gitlab.com 或自建）：access token，scope 为 api + write_repository
+rh target add gitlab --provider gitlab --namespace acme-group --token-env GITLAB_TOKEN
+rh target add corp-gitlab --provider gitlab --base-url https://gitlab.example.com --namespace infra --token-stdin < token.txt
+
+# 自建 / 任意 Git 服务器（没有 API，仓库需事先存在）
+rh target add backup --provider generic \
+  --url-template 'ssh://git@git.example.com/{namespace}/{name}.git' --namespace mirrors \
+  --ssh-key-file ~/.ssh/repohub_mirror --known-hosts-file ./known_hosts
+
+rh target check github     # 用平台 API 验证凭据
+```
+
+凭据用 AES-256-GCM 加密后入库，不会出现在命令行参数、URL 或日志里。
+
+### 3. 声明备份规则（binding）
+
+```bash
+rh bind '*' github                    # 所有组织的新仓库都备份到 github
+rh bind '*' gitlab
+rh bind acme backup                   # 只有 acme 组织的仓库额外备份到 backup
+```
+
+### 4. 拿到地址，push
+
+```bash
+rh token create laptop --scopes create     # 打印一次 token，作为 git 的 HTTPS 密码使用
+
+git remote add hub https://git.example.com/acme/demo.git
+git push hub main
+```
+
+```
+remote: repohub: syncing to 3 mirror(s)…
+remote: repohub:   [ok]       github:acme/demo        1 ref(s) updated
+remote: repohub:   [ok]       gitlab:acme-group/demo  1 ref(s) updated
+remote: repohub:   [ok]       backup:mirrors/demo     1 ref(s) updated
+To https://git.example.com/acme/demo.git
+ * [new branch]      main -> main
+```
+
+不想等就用 `git push -o repohub.wait=0`，同步会在后台继续。
+
+### 5. 查看状态
+
+```bash
+rh status                 # 全部仓库
+rh status acme/demo       # 单个仓库：每个镜像的状态、错误和分叉详情
+rh runs acme/demo         # 同步历史
+```
+
+## 分叉怎么处理
+
+有人绕过 repohub 直接 push 到镜像（比如在 GitHub 上合并了 PR），repohub 就不会覆盖那个分支：
+
+```
+remote: repohub:   [ok]       github:acme/demo  1 ref(s) updated
+remote: repohub:   [diverged] gitlab:acme-group/demo  refs/heads/main
+```
+
+两种解决方式：
+
+1. **把镜像上的提交合并回来**（推荐）：`git pull <镜像地址> main`，然后 push 到 repohub。新提交是镜像内容的后代，同步时可以快进，分叉自动消除。
+2. **以 Hub 为准覆盖**：`rh sync acme/demo --overwrite`。被覆盖的镜像内容先保存到 Hub 的 `refs/backup/<时间>/remotes/<id>/refs/heads/main`。
+
+希望某个镜像永远以 Hub 为准，可以设置 `rh remote set acme/demo gitlab --on-divergence overwrite`（同样会先备份）。
+
+同步规则逐个 ref 判断：
+
+| 镜像上的值 | 动作 |
+| --- | --- |
+| 与 Hub 一致 | 无需操作 |
+| 不存在 | 创建（lease 要求"不存在"） |
+| 等于 repohub 上次推送的值 | 更新或删除（必要时强推） |
+| 是 Hub 值的祖先 | 快进（不丢任何东西，也用于接管已有仓库） |
+| 其他情况 | 分叉：告警，或先备份再覆盖 |
+
+每个推送操作都把刚观测到的远端值作为 lease。如果观测和推送之间远端又被改动，远端会拒绝这次推送，下一轮同步把它识别为分叉。
+
+## 策略
+
+在 Hub 的 pre-receive 阶段执行：
+
+- 只允许推送 `refs/heads/*` 和 `refs/tags/*`（像 `refs/pull/*` 这样的 ref 推到别的平台会被拒绝）；
+- 单个文件不能超过所有镜像中最严的上限：GitHub 为 100 MiB，可以用 `--max-file-size` 按 target 覆盖，也可以用 `policy.max_file_size` 设全局上限；
+- Git LFS 暂不支持，LFS 客户端会收到明确的错误提示。
+
+## 访问控制
+
+| scope | 能做什么 |
+| --- | --- |
+| `read` | clone / fetch |
+| `write` | 另外可以 push 已有仓库 |
+| `create` | 另外可以通过 push 新地址来建仓 |
+| `admin` | 另外可以使用管理 API 和 `rh` |
+
+`rh token create ci --scopes read --repos 'acme/*'` 可以把 token 限制在部分仓库。token 只存 SHA-256 哈希。`--public` 仓库允许匿名读。
+
+## CLI 速查
+
+```
+rh target  add|update|list|rm|check      平台账号
+rh bind    ORG|'*' TARGET                新仓库的默认镜像
+rh binding list|rm
+rh repo    add|list|rm                   （push 新地址也会自动建仓）
+rh remote  add|list|pause|resume|set|rm  单个仓库的镜像
+rh sync    ORG/NAME [--overwrite] [--remote ID]
+rh status  [ORG/NAME]
+rh runs    ORG/NAME
+rh token   create|list|rm
+```
+
+所有命令都支持 `--json`。`rh` 读取 `REPOHUB_URL` 和 `REPOHUB_TOKEN`。
+
+## HTTP API
+
+所有 `/api/*` 和 `/metrics` 都需要 admin token（`Authorization: Bearer …`）。
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| GET/POST | `/api/targets` | 列出 / 新增 target |
+| GET/PATCH/DELETE | `/api/targets/{name}` | 查看 / 修改（含轮换凭据）/ 删除 |
+| POST | `/api/targets/{name}/check` | 验证凭据 |
+| GET/POST | `/api/bindings`，DELETE `/api/bindings/{id}` | 组织 → target 的默认规则 |
+| GET/POST | `/api/repos` | 列出 / 登记仓库 |
+| GET/DELETE | `/api/repos/{org}/{name}` | 状态详情 / 注销（数据移入 trash） |
+| POST | `/api/repos/{org}/{name}/remotes` | 添加镜像 |
+| PATCH/DELETE | `/api/repos/{org}/{name}/remotes/{id}` | 暂停、恢复、改分叉策略或 URL / 移除 |
+| POST | `/api/repos/{org}/{name}/sync` | 立即同步，`{"wait":true,"overwrite":false}` |
+| GET | `/api/repos/{org}/{name}/runs` | 同步历史 |
+| GET/POST | `/api/tokens`，DELETE `/api/tokens/{id}` | 客户端 token |
+| GET | `/api/status` | 全部仓库概览 |
+| GET | `/metrics` | Prometheus 指标 |
+| GET | `/healthz` | 健康检查 |
+
+Git 地址：`/{org}/{name}.git`（smart HTTP，协议 v2）。
+
+## 运维
+
+- **数据目录**：`repos/`（bare 仓库）、`repohub.db`（SQLite）、`trash/`（注销的仓库）。备份这个目录和 `REPOHUB_SECRET_KEY` 就够了。
+- **重试**：失败的镜像按 30s、1m、2m… 指数退避自动重试，上限 1h；巡检每 10 分钟全量检查一次，兜底 webhook 丢失和服务重启。
+- **监控**：`repohub_remote_state`、`repohub_remote_last_success_timestamp_seconds`、`repohub_remote_consecutive_failures`、`repohub_target_credential_expiry_timestamp_seconds`。建议对"上次成功同步距今多久"和 `state="diverged"` 设告警。
+- **单实例**：Hub 是唯一权威源，按单实例运行。repohub 自己的部署源请直接指向 GitHub，不要经过 repohub。
+
+配置文件示例见 [`deploy/repohub.example.yaml`](deploy/repohub.example.yaml)，实现上与原设计的差异见 [`docs/design-notes.md`](docs/design-notes.md)。
+
+## 路线图
+
+- **M1（当前）**：target / binding / token，push 自动建仓，pre/post-receive，force-with-lease 同步，分叉检测与备份，巡检与重试，`rh status`。
+- **M2**：出站 webhook（同步完成、分叉、失败事件，带 HMAC 签名）、凭据过期告警、Web 控制台。
+- **M3**：只读边缘节点、bundle-uri / 源码包 CDN、按区域读取路由。
+- **M4**：Gitea / Forgejo / Gitee 适配器、Git LFS、按需同步 Release。
+
+## 开发
+
+```bash
+make test     # go test -race ./...（端到端测试会启动真实的 git http-backend）
+make build    # bin/repohub, bin/rh
+```
+
+许可证：Apache-2.0。

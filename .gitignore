@@ -1,0 +1,8 @@
+/bin/
+/dist/
+/data/
+*.db
+*.db-wal
+*.db-shm
+repohub.yaml
+!deploy/repohub.example.yaml
