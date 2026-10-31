@@ -21,8 +21,7 @@
 - **留有后悔药**：Hub 上被强推覆盖或删除的 ref、被覆盖前的镜像分叉内容，都保存在隐藏的 `refs/backup/<时间>/…` 下（默认保留 30 天）。
 - **在入口挡住注定失败的 push**：单文件大小上限取所有镜像中最严的（GitHub 是 100 MiB），超限的 push 在 Hub 就被拒绝，不会在某个镜像上一直失败。
 - **出事会通知**：分叉、连续失败、恢复、凭据即将过期、同步完成（带 ref 和 SHA，可用来触发下游构建）都可以推送到带签名的 webhook，或直接推到 Slack、企业微信、飞书、钉钉。
-
-> 当前处于 M1 阶段，并已包含 M2（通知、Web 控制台）以及 M4 的 Gitea/Forgejo、Gitee 适配器和 Git LFS。读取路由和镜像加速见 [路线图](#路线图)。
+- **常用的都支持**：HTTPS 和 SSH、Git LFS、Web 控制台、从已有镜像一键导入或恢复、源码包下载、bundle-uri 首次克隆加速。支持的平台有 GitHub、GitLab、Gitea/Forgejo、Gitee，以及任意 Git 服务器。
 
 ## 快速开始
 
@@ -143,30 +142,41 @@ remote: gitrepo:   [diverged] gitlab:acme-group/demo  refs/heads/main
 
 每个推送操作都把刚观测到的远端值作为 lease。如果观测和推送之间远端又被改动，远端会拒绝这次推送，下一轮同步把它识别为分叉。
 
-## 通知
+## 接管已有仓库
 
-```bash
-# 下游 CI：同步完成后按 SHA 触发构建，带 HMAC 签名
-gr webhook add ci --url https://ci.example.com/hooks/gitrepo --events sync.completed --secret-env HOOK_SECRET
+如果镜像仓库里已经有 Gitrepo 没写过的内容（比如以前直接在 GitHub 上维护的项目），Gitrepo 不会自动往里写，首次同步会失败并提示：
 
-# 值班群：只推告警（URL 里带有机器人的 key，用环境变量传入，入库加密）
-gr webhook add oncall --format wecom --url-env WECOM_BOT_URL --events 'remote.*,credential.expiring'
-
-gr webhook test 2
+```
+remote: gitrepo:   [failed]   github:acme/app  adoption required: the mirror repository already contains 3 ref(s) Gitrepo did not write …
 ```
 
-| 事件 | 何时触发 |
-| --- | --- |
-| `push` | Hub 收到 push（各 ref 的新 SHA、推送者） |
-| `sync.completed` | 一轮同步至少改动了一个镜像（变更的 ref、SHA 和每个镜像的结果）；没有变化的巡检不触发 |
-| `remote.diverged` | 镜像进入分叉状态（只在状态变化时触发一次） |
-| `remote.failed` | 镜像连续失败达到 `alerts.failure_threshold` 次（默认 3） |
-| `remote.recovered` | 告警过的镜像恢复同步 |
-| `credential.expiring` | target 凭据在 `alerts.credential_expiry_warning`（默认 14 天）内过期，每天最多一次；过期时间用 `gr target update NAME --expires 2027-01-31` 设置 |
+确认它就是这个 Hub 仓库对应的镜像后再接管：`gr remote adopt acme/app github`（或在 `gr remote add` 时加 `--adopt`）。接管后，已有的分支只会快进或被报告为分叉，不会被覆盖。这样可以防止某条备份规则把一个新的 Hub 仓库指向别人已有的项目。
 
-`--format` 支持 `json`（默认，完整载荷）、`slack`、`wecom`、`feishu`、`dingtalk`。
+## 导入已有项目 / 从镜像恢复
 
-JSON 投递带以下请求头：`X-Gitrepo-Event`、`X-Gitrepo-Delivery`；配置了 secret 时还带 `X-Gitrepo-Signature-256: sha256=<HMAC-SHA256(secret, body)>`，校验方式与 GitHub webhook 相同。失败的投递会在 5s、30s、2m 后重试。`--repos 'acme/*'` 可以只接收部分仓库的事件。飞书和钉钉机器人的"签名校验"安全设置暂不支持，请改用关键词（例如 `Gitrepo`）或 IP 白名单。
+已经在 GitHub、GitLab 等平台上的项目，一条命令就能让 Gitrepo 成为它的 Hub：
+
+```bash
+gr repo import acme/demo --from github        # 平台上的 acme/demo（命名空间、仓库名都可以另外指定）
+```
+
+Gitrepo 会拉取所有分支、标签以及 LFS 对象，作为 Hub 的内容（HEAD 跟随平台上的默认分支），并把这个来源记为已接管、已同步，然后同步到其他镜像。之后大家改为 push 到 Gitrepo 即可。
+
+Hub 的数据丢失时，也用同一条命令从任意一个镜像恢复。如果 Hub 上已经有内容，必须加 `--force`；被替换的 ref 会先备份到 `refs/backup/`。Web 控制台的仓库页也提供这个功能。
+
+## Git LFS
+
+客户端照常使用：`git lfs track`、`git push`。Hub 本身就是 LFS 服务器（`<仓库地址>/info/lfs`），使用相同的令牌和权限。读权限可以下载，写权限可以上传，公开仓库允许匿名下载。
+
+同步时，Gitrepo 先把本次新引用的 LFS 对象用 `git lfs push` 上传到各镜像，再推送 ref。只上传本次同步新增的对象，不会每次重传整个历史。如果某个指针对应的对象不在 Hub 上，这个镜像的同步会失败并提示原因，而不是把缺内容的指针推出去。
+
+仓库里提交的 `.lfsconfig` 不会影响 Gitrepo 向镜像同步时使用的 LFS 地址：git-lfs 在一个看不到仓库内容的临时仓库里运行。镜像凭据也只会发给该镜像自己的地址。
+
+- 镜像平台要开启 LFS：GitHub 默认开启，但有存储配额；GitLab 默认开启；Gitea/Forgejo 需要服务端启用 LFS。通过 SSH 访问的通用镜像，需要服务端支持 `git-lfs-authenticate`。
+- 上传到 Hub 时，按该仓库所有镜像中最严的 LFS 大小上限拒绝过大的对象。GitHub 默认 2 GB（Team 和 Enterprise 套餐更高，可用 `gr target update github --max-lfs-object-size <字节>` 覆盖）；全局上限用 `policy.max_lfs_object_size` 设置。
+- LFS 传输链接 15 分钟有效（git-lfs 会自动重新获取），所以撤销令牌后最多 15 分钟就会失效。
+- 对象存放在 Hub 仓库目录下的 `lfs/objects/`，备份数据目录时会一并备份。
+- 暂不支持 LFS 文件锁：`git lfs lock` 会返回明确的错误；推送时的锁检查会通过，不会产生警告。
 
 ## SSH
 
@@ -215,41 +225,30 @@ bundles:
 - bundle 只包含分支和标签，不含 `refs/backup/`。仓库被注销时，它的 bundle 也会一并删除。
 - 公开仓库的 bundle 链接不变、可以永久缓存，适合放在 CDN 后面。私有仓库的 bundle 链接里带有 15 分钟有效的签名令牌，git 下载时不需要额外的凭据。
 
-## 导入已有项目 / 从镜像恢复
-
-已经在 GitHub、GitLab 等平台上的项目，一条命令就能让 Gitrepo 成为它的 Hub：
+## 通知
 
 ```bash
-gr repo import acme/demo --from github        # 平台上的 acme/demo（命名空间、仓库名都可以另外指定）
+# 下游 CI：同步完成后按 SHA 触发构建，带 HMAC 签名
+gr webhook add ci --url https://ci.example.com/hooks/gitrepo --events sync.completed --secret-env HOOK_SECRET
+
+# 值班群：只推告警（URL 里带有机器人的 key，用环境变量传入，入库加密）
+gr webhook add oncall --format wecom --url-env WECOM_BOT_URL --events 'remote.*,credential.expiring'
+
+gr webhook test 2
 ```
 
-Gitrepo 会拉取所有分支、标签以及 LFS 对象，作为 Hub 的内容（HEAD 跟随平台上的默认分支），并把这个来源记为已接管、已同步，然后同步到其他镜像。之后大家改为 push 到 Gitrepo 即可。
+| 事件 | 何时触发 |
+| --- | --- |
+| `push` | Hub 收到 push（各 ref 的新 SHA、推送者） |
+| `sync.completed` | 一轮同步至少改动了一个镜像（变更的 ref、SHA 和每个镜像的结果）；没有变化的巡检不触发 |
+| `remote.diverged` | 镜像进入分叉状态（只在状态变化时触发一次） |
+| `remote.failed` | 镜像连续失败达到 `alerts.failure_threshold` 次（默认 3） |
+| `remote.recovered` | 告警过的镜像恢复同步 |
+| `credential.expiring` | target 凭据在 `alerts.credential_expiry_warning`（默认 14 天）内过期，每天最多一次；过期时间用 `gr target update NAME --expires 2027-01-31` 设置 |
 
-Hub 的数据丢失时，也用同一条命令从任意一个镜像恢复。如果 Hub 上已经有内容，必须加 `--force`；被替换的 ref 会先备份到 `refs/backup/`。Web 控制台的仓库页也提供这个功能。
+`--format` 支持 `json`（默认，完整载荷）、`slack`、`wecom`、`feishu`、`dingtalk`。
 
-## 接管已有仓库
-
-如果镜像仓库里已经有 Gitrepo 没写过的内容（比如以前直接在 GitHub 上维护的项目），Gitrepo 不会自动往里写，首次同步会失败并提示：
-
-```
-remote: gitrepo:   [failed]   github:acme/app  adoption required: the mirror repository already contains 3 ref(s) gitrepo did not write …
-```
-
-确认它就是这个 Hub 仓库对应的镜像后再接管：`gr remote adopt acme/app github`（或在 `gr remote add` 时加 `--adopt`）。接管后，已有的分支只会快进或被报告为分叉，不会被覆盖。这样可以防止某条备份规则把一个新的 Hub 仓库指向别人已有的项目。
-
-## Git LFS
-
-客户端照常使用：`git lfs track`、`git push`。Hub 本身就是 LFS 服务器（`<仓库地址>/info/lfs`），使用相同的令牌和权限。读权限可以下载，写权限可以上传，公开仓库允许匿名下载。
-
-同步时，Gitrepo 先把本次新引用的 LFS 对象用 `git lfs push` 上传到各镜像，再推送 ref。只上传本次同步新增的对象，不会每次重传整个历史。如果某个指针对应的对象不在 Hub 上，这个镜像的同步会失败并提示原因，而不是把缺内容的指针推出去。
-
-仓库里提交的 `.lfsconfig` 不会影响 Gitrepo 向镜像同步时使用的 LFS 地址：git-lfs 在一个看不到仓库内容的临时仓库里运行。镜像凭据也只会发给该镜像自己的地址。
-
-- 镜像平台要开启 LFS：GitHub 默认开启，但有存储配额；GitLab 默认开启；Gitea/Forgejo 需要服务端启用 LFS。通过 SSH 访问的通用镜像，需要服务端支持 `git-lfs-authenticate`。
-- 上传到 Hub 时，按该仓库所有镜像中最严的 LFS 大小上限拒绝过大的对象。GitHub 默认 2 GB（Team 和 Enterprise 套餐更高，可用 `gr target update github --max-lfs-object-size <字节>` 覆盖）；全局上限用 `policy.max_lfs_object_size` 设置。
-- LFS 传输链接 15 分钟有效（git-lfs 会自动重新获取），所以撤销令牌后最多 15 分钟就会失效。
-- 对象存放在 Hub 仓库目录下的 `lfs/objects/`，备份数据目录时会一并备份。
-- 暂不支持 LFS 文件锁：`git lfs lock` 会返回明确的错误；推送时的锁检查会通过，不会产生警告。
+JSON 投递带以下请求头：`X-Gitrepo-Event`、`X-Gitrepo-Delivery`；配置了 secret 时还带 `X-Gitrepo-Signature-256: sha256=<HMAC-SHA256(secret, body)>`，校验方式与 GitHub webhook 相同。失败的投递会在 5s、30s、2m 后重试。`--repos 'acme/*'` 可以只接收部分仓库的事件。飞书和钉钉机器人的"签名校验"安全设置暂不支持，请改用关键词（例如 `Gitrepo`）或 IP 白名单。
 
 ## 策略
 
@@ -323,13 +322,13 @@ Git 地址：`/{org}/{name}.git`（smart HTTP，协议 v2）；启用 SSH 后还
 
 ## 运维
 
-- **数据目录**：`repos/`（bare 仓库）、`gitrepo.db`（SQLite）、`trash/`（注销的仓库）。备份这个目录和 `GITREPO_SECRET_KEY` 就够了。
+- **数据目录**：`repos/`（bare 仓库，含 LFS 对象）、`gitrepo.db`（SQLite）、`ssh/`（SSH 主机密钥）、`bundles/`（可随时重建）、`trash/`（注销的仓库）。备份这个目录和 `GITREPO_SECRET_KEY` 就够了。即使整个目录丢失，代码也可以用 `gr repo import` 从任一镜像恢复。
 - **重试**：失败的镜像按 30s、1m、2m… 指数退避自动重试，上限 1h；巡检每 10 分钟全量检查一次，兜底 webhook 丢失和服务重启。
 - **告警**：见[通知](#通知)。
 - **监控**：`gitrepo_remote_state`、`gitrepo_remote_last_success_timestamp_seconds`、`gitrepo_remote_consecutive_failures`、`gitrepo_target_credential_expiry_timestamp_seconds`。建议对"上次成功同步距今多久"和 `state="diverged"` 设告警。
 - **单实例**：Hub 是唯一权威源，按单实例运行。Gitrepo 自己的部署源请直接指向 GitHub，不要经过 Gitrepo。
 
-配置文件示例见 [`deploy/gitrepo.example.yaml`](deploy/Gitrepo.example.yaml)，实现上与原设计的差异见 [`docs/design-notes.md`](docs/design-notes.md)。
+配置文件示例见 [`deploy/gitrepo.example.yaml`](deploy/gitrepo.example.yaml)，实现上与原设计的差异见 [`docs/design-notes.md`](docs/design-notes.md)。
 
 ## 路线图
 
