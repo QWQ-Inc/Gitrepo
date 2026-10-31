@@ -441,6 +441,42 @@ func (g *Git) LFSObjects(ctx context.Context, repo string, tips, exclude []strin
 	return out, nil
 }
 
+// RemoteHead returns the branch a remote's HEAD points to ("" if unknown).
+func (g *Git) RemoteHead(ctx context.Context, url string, cred *Cred) string {
+	out, _, err := g.runRemote(ctx, "", cred, "ls-remote", "--symref", url, "HEAD")
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if ref, ok := strings.CutPrefix(line, "ref: "); ok {
+			ref, _, _ = strings.Cut(ref, "\t")
+			return ref
+		}
+	}
+	return ""
+}
+
+// FetchAll copies every branch and tag of url into repo, overwriting
+// local values; with prune, local branches and tags missing on url go.
+func (g *Git) FetchAll(ctx context.Context, repo, url string, cred *Cred, prune bool) error {
+	args := []string{"fetch", "--quiet", "--no-tags", "--no-write-fetch-head"}
+	if prune {
+		args = append(args, "--prune")
+	}
+	args = append(args, url, "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*")
+	_, _, err := g.runRemote(ctx, repo, cred, args...)
+	return err
+}
+
+// LFSFetchAll downloads every LFS object referenced by any ref from the
+// LFS endpoint of url into repo.
+func (g *Git) LFSFetchAll(ctx context.Context, repo, url string, cred *Cred) error {
+	_, _, err := g.runRemote(ctx, repo, cred,
+		"-c", "remote.gitrepo-mirror.url="+url,
+		"lfs", "fetch", "--all", "gitrepo-mirror")
+	return err
+}
+
 // LFSPush uploads the given LFS objects from repo to the LFS endpoint of
 // url (derived by git-lfs the same way as for a normal remote).
 func (g *Git) LFSPush(ctx context.Context, repo, url string, cred *Cred, oids []string) error {

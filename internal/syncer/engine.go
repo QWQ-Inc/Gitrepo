@@ -29,6 +29,47 @@ type RemoteOutcome struct {
 	Warnings  []string
 }
 
+// remoteCtx is everything needed to talk to one remote.
+type remoteCtx struct {
+	target *store.Target
+	prov   provider.Provider
+	secret string
+	cred   *gitexec.Cred
+	url    string
+	spec   provider.RepoSpec
+}
+
+func (m *Manager) resolveRemote(ctx context.Context, repo *store.Repo, rem *store.Remote) (*remoteCtx, error) {
+	t, err := m.store.GetTarget(ctx, rem.TargetID)
+	if err != nil {
+		return nil, fmt.Errorf("load target: %w", err)
+	}
+	prov, err := provider.Get(t.Provider)
+	if err != nil {
+		return nil, err
+	}
+	rc := &remoteCtx{target: t, prov: prov}
+	if len(t.CredSecret) > 0 {
+		pt, err := m.box.Open(t.CredSecret, t.CredentialAAD())
+		if err != nil {
+			return nil, fmt.Errorf("target %s: %w", t.Name, err)
+		}
+		rc.secret = string(pt)
+	}
+	rc.cred = prov.GitCred(t, rc.secret)
+	rc.url = rem.URL
+	if rc.url == "" {
+		if rc.url, err = prov.RepoURL(t, rem.Namespace, rem.Name); err != nil {
+			return nil, err
+		}
+	}
+	rc.spec = provider.RepoSpec{Namespace: rem.Namespace, Name: rem.Name, Visibility: repo.Visibility}
+	if t.Visibility != "" {
+		rc.spec.Visibility = t.Visibility
+	}
+	return rc, nil
+}
+
 // syncRemote brings one remote in line with the hub refs:
 // provision → ls-remote → plan → back up → relax protection → push → verify.
 func (m *Manager) syncRemote(parent context.Context, repo *store.Repo, rem *store.Remote, hub map[string]string, req Request) (out RemoteOutcome) {
@@ -84,33 +125,11 @@ func (m *Manager) syncRemote(parent context.Context, repo *store.Repo, rem *stor
 	ctx, cancel := context.WithTimeout(parent, m.opts.PushTimeout)
 	defer cancel()
 
-	t, err := m.store.GetTarget(ctx, rem.TargetID)
-	if err != nil {
-		return fail("load target: %v", err)
-	}
-	prov, err := provider.Get(t.Provider)
+	rc, err := m.resolveRemote(ctx, repo, rem)
 	if err != nil {
 		return fail("%v", err)
 	}
-	secret := ""
-	if len(t.CredSecret) > 0 {
-		pt, err := m.box.Open(t.CredSecret, t.CredentialAAD())
-		if err != nil {
-			return fail("target %s: %v", t.Name, err)
-		}
-		secret = string(pt)
-	}
-	cred := prov.GitCred(t, secret)
-	url := rem.URL
-	if url == "" {
-		if url, err = prov.RepoURL(t, rem.Namespace, rem.Name); err != nil {
-			return fail("%v", err)
-		}
-	}
-	spec := provider.RepoSpec{Namespace: rem.Namespace, Name: rem.Name, Visibility: repo.Visibility}
-	if t.Visibility != "" {
-		spec.Visibility = t.Visibility
-	}
+	t, prov, secret, cred, url, spec := rc.target, rc.prov, rc.secret, rc.cred, rc.url, rc.spec
 	repoPath := m.reg.Path(repo.Slug)
 
 	// 1. Provision the remote repository on first use.

@@ -499,7 +499,71 @@ func repoCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.AddCommand(add, list, rm)
+	var from, impNS, impName, impURL string
+	var force, impPublic bool
+	imp := &cobra.Command{
+		Use:   "import ORG/NAME --from TARGET",
+		Short: "Make the hub a copy of an existing repository on a platform (onboarding or disaster recovery)",
+		Long: `Make the hub a copy of an existing repository on a platform.
+
+Fetches every branch and tag (and Git LFS objects) from the repository the
+target holds, makes it the hub's content, records that mirror as adopted
+and in sync, and then syncs the other mirrors. Use it to move an existing
+project onto Gitrepo, or to rebuild a lost hub from any mirror.
+
+The hub repository is created when missing. If it already has branches or
+tags the import is refused unless --force is given; replaced refs are kept
+under refs/backup/ on the hub.`,
+		Example: "  gr repo import acme/demo --from github\n  gr repo import acme/demo --from gitlab --namespace acme-group --name demo-app",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			p, err := repoPath(args[0])
+			if err != nil {
+				return err
+			}
+			vis := ""
+			if impPublic {
+				vis = "public"
+			}
+			var res struct {
+				Import struct {
+					Refs          int      `json:"refs"`
+					LFSObjects    int      `json:"lfs_objects"`
+					DefaultBranch string   `json:"default_branch"`
+					BackedUp      int      `json:"backed_up"`
+					Warnings      []string `json:"warnings"`
+				} `json:"import"`
+				Source string      `json:"source"`
+				Repo   client.Repo `json:"repo"`
+			}
+			if err := call(http.MethodPost, p+"/import", map[string]any{
+				"target": from, "namespace": impNS, "name": impName, "url": impURL, "force": force, "visibility": vis,
+			}, &res); err != nil {
+				return err
+			}
+			if flagJSON {
+				return printJSON(res)
+			}
+			fmt.Printf("imported %s from %s: %d ref(s), %d LFS object(s), default branch %s\n",
+				res.Repo.Slug, res.Source, res.Import.Refs, res.Import.LFSObjects, res.Import.DefaultBranch)
+			if res.Import.BackedUp > 0 {
+				fmt.Printf("previous hub refs kept under refs/backup/ (%d)\n", res.Import.BackedUp)
+			}
+			for _, w := range res.Import.Warnings {
+				fmt.Println("warning:", w)
+			}
+			fmt.Printf("push to: %s\nother mirrors are syncing now: gr status %s\n", res.Repo.CloneURL, res.Repo.Slug)
+			return nil
+		},
+	}
+	imp.Flags().StringVar(&from, "from", "", "target that holds the existing repository (required)")
+	imp.Flags().StringVar(&impNS, "namespace", "", "namespace on the target (default: the target's)")
+	imp.Flags().StringVar(&impName, "name", "", "repository name on the target (default: same as on the hub)")
+	imp.Flags().StringVar(&impURL, "url", "", "explicit Git URL of the existing repository")
+	imp.Flags().BoolVar(&force, "force", false, "replace existing hub refs (they are backed up)")
+	imp.Flags().BoolVar(&impPublic, "public", false, "create the hub repository as public")
+	imp.MarkFlagRequired("from")
+	cmd.AddCommand(add, list, rm, imp)
 	return cmd
 }
 

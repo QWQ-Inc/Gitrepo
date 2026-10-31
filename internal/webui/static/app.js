@@ -230,6 +230,24 @@ async function viewRepos() {
   h('label', { class: 'check' }, h('input', { type: 'checkbox', name: 'bindings', checked: true }), '应用备份规则'),
   h('div', {}, h('button', { type: 'submit' }, '创建')));
   nodes.push(h('h2', {}, '手动创建仓库'), h('div', { class: 'panel' }, h('p', { class: 'hint' }, '也可以不在这里创建：用有 create 权限的令牌直接 push 到新地址，仓库会自动创建。'), form));
+
+  const importForm = h('form', { class: 'grid', onsubmit: action(async (ev) => {
+    const d = formData(ev.target);
+    if (d.force && !confirm('Hub 上已有的分支和标签会被替换（先备份到 refs/backup/）。继续？')) return false;
+    const res = await api('POST', '/api/repos/' + d.slug.split('/').map(enc).join('/') + '/import', { target: d.target, namespace: d.namespace, name: d.name, force: d.force });
+    location.hash = '#/repo/' + res.repo.slug;
+    const warn = (res.import.warnings || []).length ? '（有警告，见同步记录）' : '';
+    return `已从 ${res.source} 导入 ${res.import.refs} 个 ref、${res.import.lfs_objects} 个 LFS 对象${warn}`;
+  }) },
+  field('Hub 仓库（组织/名称）', h('input', { name: 'slug', placeholder: 'acme/demo', required: true, pattern: '[A-Za-z0-9][A-Za-z0-9._\\-]*/[A-Za-z0-9][A-Za-z0-9._\\-]*' })),
+  field('从哪个平台导入', select('target', targets.map((t) => [t.name, `${t.name}（${t.provider}${t.namespace ? ' · ' + t.namespace : ''}）`]))),
+  field('命名空间（可选）', h('input', { name: 'namespace', placeholder: '默认使用凭据上的命名空间' })),
+  field('平台上的仓库名（可选）', h('input', { name: 'name', placeholder: '默认与 Hub 同名' })),
+  h('label', { class: 'check' }, h('input', { type: 'checkbox', name: 'force' }), '替换 Hub 上已有的内容'),
+  h('div', {}, h('button', { type: 'submit', disabled: !targets.length }, '导入')));
+  nodes.push(h('h2', {}, '从已有镜像导入'), h('div', { class: 'panel' },
+    h('p', { class: 'hint' }, '把 GitHub、GitLab 等平台上已有的仓库（包括 LFS 内容）作为 Hub 的初始内容，然后同步到其他镜像。Hub 数据丢失时，也用它从任一镜像恢复。'),
+    importForm));
   app.replaceChildren(...nodes);
 }
 

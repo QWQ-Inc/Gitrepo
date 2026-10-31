@@ -99,3 +99,12 @@ Hub 自己实现了 LFS 服务端（`internal/lfs`）：
 - **与 HTTPS 共用一套逻辑**：`gitserve.Server.Access`（鉴权、push 自动建仓）和 `gitserve.Server.GitEnv`（hooks、隐藏 ref、推送策略、单文件上限）由 HTTP 和 SSH 两条路径共用，两边的行为不会出现差异。服务端 git 配置必须在一次 `GIT_CONFIG_COUNT` 中给出，因为重复的环境变量只有最后一个生效。
 - **会话**：只接受 `env`（仅 `GIT_PROTOCOL`，用于协议 v2）和 `exec`。执行期间继续应答其他请求；stdin 手动拷贝，避免客户端在等退出码时 `Wait()` 一直阻塞。
 - **git-lfs-authenticate**：返回 HTTPS 的 LFS 地址，以及一个仓库级、1 小时有效的签名令牌。这个令牌只能用于 batch 请求，不能用于单个对象的传输。
+
+## 导入与恢复
+
+`POST /api/repos/{org}/{name}/import`（`gr repo import`）让 Hub 成为某个镜像的副本，用于把已有项目迁到 Gitrepo，也用于 Hub 数据丢失后从镜像恢复。
+
+- **加锁**：导入期间持有该仓库的同步 lease，不会和同步交错。
+- **已有内容**：Hub 已有 ref 时必须带 `force`；带 `force` 时先把这些 ref 备份到 `refs/backup/`，再执行带 `--prune` 的 fetch。
+- **拉取内容**：拉取所有分支和标签；如果历史里有 LFS 指针，还会执行 `git lfs fetch --all`。HEAD 跟随来源的 `ls-remote --symref HEAD`。
+- **记录来源**：来源镜像标记为已接管，`pushed_state` 设为导入时的 ref，所以下一次同步时它就是"已同步"状态，其他镜像则照常推送。

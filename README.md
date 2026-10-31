@@ -185,6 +185,18 @@ git push hub main
 - 不提供 shell：`ssh git@…` 只会回一句问候并断开。
 - 只接受 ed25519、ECDSA，以及至少 2048 位的 RSA 公钥。
 
+## 导入已有项目 / 从镜像恢复
+
+已经在 GitHub、GitLab 等平台上的项目，一条命令就能让 Gitrepo 成为它的 Hub：
+
+```bash
+gr repo import acme/demo --from github        # 平台上的 acme/demo（命名空间、仓库名都可以另外指定）
+```
+
+Gitrepo 会拉取所有分支、标签以及 LFS 对象，作为 Hub 的内容（HEAD 跟随平台上的默认分支），并把这个来源记为已接管、已同步，然后同步到其他镜像。之后大家改为 push 到 Gitrepo 即可。
+
+Hub 的数据丢失时，也用同一条命令从任意一个镜像恢复。如果 Hub 上已经有内容，必须加 `--force`；被替换的 ref 会先备份到 `refs/backup/`。Web 控制台的仓库页也提供这个功能。
+
 ## 接管已有仓库
 
 如果镜像仓库里已经有 Gitrepo 没写过的内容（比如以前直接在 GitHub 上维护的项目），Gitrepo 不会自动往里写，首次同步会失败并提示：
@@ -232,7 +244,7 @@ remote: gitrepo:   [failed]   github:acme/app  adoption required: the mirror rep
 gr target  add|update|list|rm|check      平台账号
 gr bind    ORG|'*' TARGET                新仓库的默认镜像
 gr binding list|rm
-gr repo    add|list|rm                   （push 新地址也会自动建仓）
+gr repo    add|list|rm|import            （push 新地址也会自动建仓；import 从已有镜像导入或恢复）
 gr remote  add|list|adopt|pause|resume|set|rm  单个仓库的镜像
 gr sync    ORG/NAME [--overwrite] [--remote ID]
 gr status  [ORG/NAME]
@@ -260,6 +272,7 @@ gr webhook add|list|test|enable|disable|rm
 | POST | `/api/repos/{org}/{name}/remotes` | 添加镜像 |
 | PATCH/DELETE | `/api/repos/{org}/{name}/remotes/{id}` | 暂停、恢复、改分叉策略或 URL / 移除 |
 | POST | `/api/repos/{org}/{name}/sync` | 立即同步，`{"wait":true,"overwrite":false}` |
+| POST | `/api/repos/{org}/{name}/import` | 从已有镜像导入或恢复，`{"target":"github","force":false}` |
 | GET | `/api/repos/{org}/{name}/runs` | 同步历史 |
 | GET/POST | `/api/tokens`，DELETE `/api/tokens/{id}` | 客户端 token |
 | GET/POST | `/api/webhooks`，PATCH/DELETE `/api/webhooks/{id}` | 出站通知 |
