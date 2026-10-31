@@ -82,6 +82,11 @@ func (s *Server) handlePostReceive(w http.ResponseWriter, r *http.Request) {
 		say("warning: could not back up overwritten refs: %v", berr)
 	} else if n > 0 {
 		say("kept %d overwritten/deleted ref(s) under refs/backup/ on the hub", n)
+		if s.bundles != nil {
+			// The published history was rewritten: no bundle may keep
+			// offering what was overwritten. The patrol builds a new one.
+			s.bundles.Remove(org + "/" + name)
+		}
 	}
 
 	ctx := r.Context()

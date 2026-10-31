@@ -65,6 +65,33 @@ func TestBundleURI(t *testing.T) {
 		}
 	})
 
+	t.Run("history rewritten away is dropped from bundles", func(t *testing.T) {
+		e.commit(work, "secret.txt", "TOPSECRET\n")
+		secret := strings.TrimSpace(e.run(work, "rev-parse", "HEAD"))
+		e.run(work, "push", "-q", hub, "main")
+		e.srv.RefreshBundles(t.Context(), true)
+		e.run(work, "reset", "-q", "--hard", "HEAD~1")
+		e.run(work, "push", "-q", "--force", hub, "main")
+		for _, b := range bundleFiles(t, e, "acme/big") {
+			if strings.Contains(e.run("", "bundle", "list-heads", b), secret) {
+				t.Fatalf("bundle %s still offers the force-pushed-away commit", b)
+			}
+		}
+		// A rewrite behind the hooks' back is caught by the next refresh.
+		e.run(work, "commit", "-q", "--allow-empty", "-m", "x")
+		e.run(work, "push", "-q", hub, "main")
+		e.srv.RefreshBundles(t.Context(), true)
+		tip := strings.TrimSpace(e.run(work, "rev-parse", "HEAD"))
+		e.git.UpdateRefs(t.Context(), hubDir, []string{"update refs/heads/main " + strings.TrimSpace(e.run(work, "rev-parse", "HEAD~1"))})
+		e.srv.RefreshBundles(t.Context(), false)
+		for _, b := range bundleFiles(t, e, "acme/big") {
+			if strings.Contains(e.run("", "bundle", "list-heads", b), tip) {
+				t.Fatalf("bundle %s still offers a commit no branch contains", b)
+			}
+		}
+		e.git.UpdateRefs(t.Context(), hubDir, []string{"update refs/heads/main " + tip})
+	})
+
 	t.Run("a re-created repository never gets the old bundle", func(t *testing.T) {
 		e.do(http.MethodDelete, "/api/repos/acme/big", nil, nil)
 		if _, err := os.Stat(filepath.Join(filepath.Dir(e.reposDir), "bundles", "acme", "big")); !os.IsNotExist(err) {
@@ -82,4 +109,10 @@ func TestBundleURI(t *testing.T) {
 			t.Fatal("a bundle was offered for the re-created repository")
 		}
 	})
+}
+
+func bundleFiles(t *testing.T, e *env, slug string) []string {
+	t.Helper()
+	m, _ := filepath.Glob(filepath.Join(filepath.Dir(e.reposDir), "bundles", filepath.FromSlash(slug), "*.bundle"))
+	return m
 }

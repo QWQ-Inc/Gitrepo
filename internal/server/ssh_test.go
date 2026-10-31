@@ -87,6 +87,56 @@ func TestSSH(t *testing.T) {
 		mustContain(t, out, "ssh:ci has no write access to acme/sshdemo")
 	})
 
+	t.Run("hidden backup content cannot be read through git archive --remote", func(t *testing.T) {
+		hubDir := e.hubRepo("acme/sshdemo")
+		secret, err := e.git.RunInput(t.Context(), hubDir, []byte("TOPSECRET\n"), "hash-object", "-w", "--stdin")
+		if err != nil {
+			t.Fatal(err)
+		}
+		tree, err := e.git.RunInput(t.Context(), hubDir, []byte("100644 blob "+strings.TrimSpace(string(secret))+"\tsecret.txt\n"), "mktree")
+		if err != nil {
+			t.Fatal(err)
+		}
+		commit, err := e.git.Run(t.Context(), hubDir, "commit-tree", strings.TrimSpace(string(tree)), "-m", "secret")
+		if err != nil {
+			t.Fatal(err)
+		}
+		ref := "refs/backup/20260101T000000.000Z/refs/heads/main"
+		e.git.UpdateRefs(t.Context(), hubDir, []string{"update " + ref + " " + strings.TrimSpace(string(commit))})
+		out, err := gitSSH(ciKey, "", "archive", "--remote="+url, ref, "secret.txt")
+		if err == nil || strings.Contains(out, "TOPSECRET") {
+			t.Fatalf("backup content readable via upload-archive: %v\n%s", err, out)
+		}
+	})
+
+	t.Run("a deleted key stops working on an open connection", func(t *testing.T) {
+		tmpKey, tmpPub := keygen("temp")
+		var k struct {
+			ID int64 `json:"id"`
+		}
+		e.do(http.MethodPost, "/api/ssh-keys", map[string]any{"name": "temp", "public_key": tmpPub, "scopes": []string{"read"}}, &k)
+		host, port, _ := strings.Cut(addr, ":")
+		ctl := filepath.Join(keys, "ctl")
+		master := exec.Command("ssh", append(strings.Fields(sshCommand(tmpKey))[1:], "-M", "-S", ctl, "-o", "ControlPersist=60", "-fN", "-p", port, "git@"+host)...)
+		if out, err := master.CombinedOutput(); err != nil {
+			t.Fatalf("control master: %v %s", err, out)
+		}
+		defer exec.Command("ssh", "-S", ctl, "-O", "exit", "git@"+host).Run()
+		viaMaster := func() (string, error) {
+			cmd := exec.Command("git", "ls-remote", url)
+			cmd.Env = append(append(os.Environ(), clientEnv()...), "GIT_SSH_COMMAND=ssh -S "+ctl+" -o ControlMaster=no -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR")
+			out, err := cmd.CombinedOutput()
+			return string(out), err
+		}
+		if out, err := viaMaster(); err != nil {
+			t.Fatalf("multiplexed ls-remote: %v %s", err, out)
+		}
+		e.do(http.MethodDelete, "/api/ssh-keys/"+itoa(k.ID), nil, nil)
+		if out, err := viaMaster(); err == nil {
+			t.Fatalf("a deleted key still works on the open connection:\n%s", out)
+		}
+	})
+
 	t.Run("unknown keys are rejected", func(t *testing.T) {
 		out, err := gitSSH(strangerKey, "", "ls-remote", url)
 		if err == nil || !strings.Contains(out, "Permission denied") {

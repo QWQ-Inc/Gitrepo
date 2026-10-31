@@ -139,5 +139,8 @@ func (s *Server) apiDeleteSSHKey(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	if s.ssh != nil {
+		s.ssh.Revoke(id)
+	}
 	w.WriteHeader(http.StatusNoContent)
 }

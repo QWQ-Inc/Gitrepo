@@ -127,3 +127,43 @@ func TestImportFromMirror(t *testing.T) {
 		}
 	})
 }
+
+// A push that lands while an import is fetching must survive: the import
+// aborts instead of overwriting it.
+func TestImportDoesNotClobberConcurrentPush(t *testing.T) {
+	e := newEnv(t)
+	platformURL, platformDir := newLFSPlatform(t, 1500*time.Millisecond)
+	existing := filepath.Join(platformDir, "lfs", "race.git")
+	e.git.InitBare(t.Context(), existing, "main")
+	old := filepath.Join(t.TempDir(), "old")
+	e.run("", "init", "-q", "-b", "main", old)
+	e.commit(old, "old.txt", "existing project\n")
+	e.run(old, "push", "-q", strings.Replace(platformURL, "http://", "http://"+userA+":"+passA+"@", 1)+"/lfs/race.git", "main")
+	e.do(http.MethodPost, "/api/targets", map[string]any{
+		"name": "origin", "provider": "generic", "url_template": platformURL + "/lfs/{name}.git",
+		"credential": map[string]any{"kind": "basic", "username": userA, "secret": passA},
+	}, nil)
+	var dev client.Token
+	e.do(http.MethodPost, "/api/tokens", map[string]any{"name": "dev", "scopes": []string{"create"}}, &dev)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- e.api.Do(t.Context(), http.MethodPost, "/api/repos/acme/race/import", map[string]any{"target": "origin"}, nil)
+	}()
+	time.Sleep(700 * time.Millisecond) // the import is now waiting on the slow fetch
+	fresh := filepath.Join(t.TempDir(), "fresh")
+	e.run("", "init", "-q", "-b", "main", fresh)
+	pushed := e.commit(fresh, "new.txt", "pushed during the import\n")
+	e.run(fresh, "push", "-q", "-o", "gitrepo.wait=0", e.hubURL(dev.Token, "acme/race"), "main")
+
+	err := <-done
+	if ce, ok := err.(*client.Error); !ok || ce.Status != http.StatusConflict || !strings.Contains(ce.Message, "changed while importing") {
+		t.Fatalf("import result: %v", err)
+	}
+	if got := e.refs(e.hubRepo("acme/race"))["refs/heads/main"]; got != pushed {
+		t.Fatalf("the concurrent push was overwritten: main = %s, pushed %s", got, pushed)
+	}
+	if refs := e.allRefs(e.hubRepo("acme/race")); len(refs) != 1 {
+		t.Fatalf("import leftovers in the hub: %v", refs)
+	}
+}

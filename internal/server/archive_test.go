@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -87,6 +88,35 @@ func TestSourceArchives(t *testing.T) {
 		}
 		if r := get("/archive/priv/app/main.tar.gz", dev.Token); r.StatusCode != 200 || !strings.HasPrefix(r.Header.Get("Cache-Control"), "private") {
 			t.Fatalf("with token: %d %v", r.StatusCode, r.Header)
+		}
+	})
+
+	t.Run("export-subst never reveals backup ref names", func(t *testing.T) {
+		os.WriteFile(filepath.Join(work, ".gitattributes"), []byte("VERSION export-subst\n"), 0o644)
+		os.WriteFile(filepath.Join(work, "VERSION"), []byte("$Format:%D$\n"), 0o644)
+		e.run(work, "add", ".gitattributes", "VERSION")
+		e.run(work, "commit", "-q", "-m", "version file")
+		e.run(work, "push", "-q", e.hubURL(dev.Token, "pub/app"), "main")
+		tip := strings.TrimSpace(e.run(work, "rev-parse", "HEAD"))
+		e.git.UpdateRefs(t.Context(), e.hubRepo("pub/app"), []string{"update refs/backup/20260101T000000.000Z/refs/heads/hidden " + tip})
+		resp := get("/archive/pub/app/"+tip+".tar.gz", "")
+		gz, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tr := tar.NewReader(gz)
+		for {
+			h, err := tr.Next()
+			if err != nil {
+				t.Fatal("VERSION not found in archive")
+			}
+			if strings.HasSuffix(h.Name, "/VERSION") {
+				b, _ := io.ReadAll(tr)
+				if strings.Contains(string(b), "refs/backup") || !strings.Contains(string(b), "main") {
+					t.Fatalf("export-subst expanded to %q", b)
+				}
+				return
+			}
 		}
 	})
 

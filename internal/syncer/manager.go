@@ -261,7 +261,7 @@ func (m *Manager) runRepo(repoID int64, p *pendingRun) {
 	leaseName := "repo:" + strconv.FormatInt(repoID, 10)
 	ok, err := m.store.AcquireLease(ctx, leaseName, m.holder, leaseTTL.Milliseconds())
 	if err != nil || !ok {
-		msg := "another Gitrepo instance holds the sync lease; retrying in 30s"
+		msg := "a sync or import of this repository is already running; retrying in 30s"
 		if err != nil {
 			msg = err.Error() + "; retrying in 30s"
 		}

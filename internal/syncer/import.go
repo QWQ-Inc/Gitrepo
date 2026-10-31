@@ -16,6 +16,16 @@ import (
 // ErrHubNotEmpty means an import would overwrite existing hub refs.
 var ErrHubNotEmpty = errors.New("the hub repository already has branches or tags")
 
+// ErrConcurrentChange means a push changed the hub during an import.
+var ErrConcurrentChange = errors.New("concurrent change")
+
+func orZero(sha string) string {
+	if sha == "" {
+		return "0000000000000000000000000000000000000000"
+	}
+	return sha
+}
+
 // ImportResult summarises an import.
 type ImportResult struct {
 	Refs          int      `json:"refs"`
@@ -84,26 +94,27 @@ func (m *Manager) Import(ctx context.Context, repo *store.Repo, rem *store.Remot
 		res.BackedUp = len(lines)
 	}
 
-	if err := m.git.FetchAll(ctx, repoPath, rc.url, rc.cred, force); err != nil {
+	// Fetch into a private namespace first; nothing becomes visible until
+	// the final transaction below.
+	fetched, err := m.git.FetchForImport(ctx, repoPath, rc.url, rc.cred)
+	defer m.git.ClearImport(context.Background(), repoPath)
+	if err != nil {
 		return nil, fmt.Errorf("fetch from %s: %w", rem.Label(), err)
 	}
-	after, err := m.git.HubRefs(ctx, repoPath)
-	if err != nil {
-		return nil, err
-	}
-	res.Refs = len(after)
+	res.Refs = len(fetched)
 
-	// LFS content, if the history has pointers.
-	if len(after) > 0 {
-		tips := make([]string, 0, len(after))
-		for _, sha := range after {
+	// LFS content before the refs are published, so readers and syncs
+	// never see pointers whose objects are still missing.
+	if len(fetched) > 0 {
+		tips := make([]string, 0, len(fetched))
+		for _, sha := range fetched {
 			tips = append(tips, sha)
 		}
 		objs, err := m.git.LFSObjects(ctx, repoPath, tips, nil)
 		if err != nil {
 			res.Warnings = append(res.Warnings, "scan LFS pointers: "+err.Error())
 		} else if len(objs) > 0 {
-			if err := m.git.LFSFetchAll(ctx, repoPath, rc.url, rc.cred); err != nil {
+			if err := m.git.LFSFetchAll(ctx, repoPath, rc.url, rc.cred, fetched); err != nil {
 				res.Warnings = append(res.Warnings, "fetch LFS objects: "+firstLine(err.Error()))
 			}
 			for oid, size := range objs {
@@ -116,6 +127,24 @@ func (m *Manager) Import(ctx context.Context, repo *store.Repo, rem *store.Remot
 			}
 		}
 	}
+
+	// Publish atomically, but only if no push changed the hub meanwhile:
+	// every update names the value observed before the fetch.
+	var tx []string
+	for ref, sha := range fetched {
+		tx = append(tx, "update "+ref+" "+sha+" "+orZero(before[ref]))
+	}
+	if force {
+		for ref, sha := range before {
+			if _, ok := fetched[ref]; !ok {
+				tx = append(tx, "delete "+ref+" "+sha)
+			}
+		}
+	}
+	if err := m.git.UpdateRefs(ctx, repoPath, tx); err != nil {
+		return nil, fmt.Errorf("%w: the hub repository changed while importing (a push arrived); nothing was replaced — try again", ErrConcurrentChange)
+	}
+	after := fetched
 
 	// HEAD follows the mirror's default branch.
 	head := m.git.RemoteHead(ctx, rc.url, rc.cred)

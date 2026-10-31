@@ -123,13 +123,36 @@ func (m *Manager) Belongs(slug, id string, repoID int64) bool {
 	return ok && md.repoID == repoID
 }
 
-// Remove deletes every bundle of slug (e.g. when the repository is
-// unregistered).
+// Remove deletes every bundle of slug: when the repository is unregistered
+// or its published history was rewritten (a bundle must never keep offering
+// commits that were force-pushed away).
 func (m *Manager) Remove(slug string) error {
 	l := m.lock(slug)
 	l.Lock()
 	defer l.Unlock()
 	return os.RemoveAll(m.dir(slug))
+}
+
+// stale reports whether any bundle of slug has a head that no current
+// branch or tag contains, i.e. the history was rewritten since.
+func (m *Manager) stale(ctx context.Context, slug, repoPath string) bool {
+	for _, id := range m.ids(slug) {
+		out, err := m.Git.Run(ctx, "", "bundle", "list-heads", m.Path(slug, id))
+		if err != nil {
+			return true
+		}
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			sha, _, _ := strings.Cut(line, " ")
+			if sha == "" {
+				continue
+			}
+			c, err := m.Git.Run(ctx, repoPath, "for-each-ref", "--count=1", "--format=%(refname)", "--contains", sha, "refs/heads/", "refs/tags/")
+			if err != nil || len(bytes.TrimSpace(c)) == 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (m *Manager) fingerprint(ctx context.Context, repoPath string) (string, int, error) {
@@ -166,6 +189,13 @@ func (m *Manager) Refresh(ctx context.Context, slug string, repoID int64, repoPa
 	l.Lock()
 	defer l.Unlock()
 
+	if m.stale(ctx, slug, repoPath) {
+		os.RemoveAll(m.dir(slug))
+		force = true
+		if m.Log != nil {
+			m.Log.Info("bundles dropped after a history rewrite", "repo", slug)
+		}
+	}
 	fp, nrefs, err := m.fingerprint(ctx, repoPath)
 	if err != nil || nrefs == 0 {
 		return false, err

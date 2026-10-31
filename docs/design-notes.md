@@ -98,7 +98,7 @@ Hub 自己实现了 LFS 服务端（`internal/lfs`）：
 - **鉴权**：SSH 公钥和令牌一样带权限与仓库范围，按 SHA256 指纹查找，并逐字节比对完整公钥。
 - **与 HTTPS 共用一套逻辑**：`gitserve.Server.Access`（鉴权、push 自动建仓）和 `gitserve.Server.GitEnv`（hooks、隐藏 ref、推送策略、单文件上限）由 HTTP 和 SSH 两条路径共用，两边的行为不会出现差异。服务端 git 配置必须在一次 `GIT_CONFIG_COUNT` 中给出，因为重复的环境变量只有最后一个生效。
 - **会话**：只接受 `env`（仅 `GIT_PROTOCOL`，用于协议 v2）和 `exec`。执行期间继续应答其他请求；stdin 手动拷贝，避免客户端在等退出码时 `Wait()` 一直阻塞。
-- **git-lfs-authenticate**：返回 HTTPS 的 LFS 地址，以及一个仓库级、1 小时有效的签名令牌。这个令牌只能用于 batch 请求，不能用于单个对象的传输。
+- **git-lfs-authenticate**：返回 HTTPS 的 LFS 地址，以及一个仓库级、15 分钟有效的签名令牌。这个令牌只能用于 batch 请求，不能用于单个对象的传输。
 
 ## 导入与恢复
 
@@ -140,3 +140,25 @@ Hub 自己实现了 LFS 服务端（`internal/lfs`）：
   - 通过 upload-pack 的 `uploadpack.advertiseBundleURIs` 和 `bundle.*` 配置广播，HTTP 和 SSH 都生效。使用 `creationToken` 启发式，客户端可以据此做增量。
   - 每个 bundle 记录所属仓库的数据库 ID，只广播和提供属于当前仓库的 bundle。
   - 私有仓库的链接带 15 分钟签名令牌（与 LFS 共用签名密钥）。
+
+## 第三次独立评审（SSH、导入、源码包、bundle）后的修正
+
+- **隐藏内容泄露：**
+  - SSH 不再提供 `git-upload-archive`，因为它能解析任何 ref，包括 `refs/backup/*`。
+  - HTTP 源码包改在只含分支和标签的临时视图里生成（`gitexec.PublishedView`），备份 ref 既解析不到，也不会通过 `export-subst` 的 `%D` 泄露出名字。
+- **bundle：**
+  - 推送中出现覆盖或删除（即产生 Hub 备份的情况）、带 `force` 的导入，都会立即删除该仓库的 bundle。
+  - 每次刷新时检查 bundle 的每个 head 是否仍被当前分支或标签包含，不满足就删除并立即重建，这样可以兜住绕过 hook 的改写。
+  - bundle 的重建改到后台进行，不再拖慢巡检。
+- **SSH 公钥吊销：** 每个会话都会重新查询公钥及其权限。删除公钥时，还会关闭它所有已打开的连接（包括 ControlMaster 复用的连接）。
+- **导入与并发 push：**
+  - 导入先把内容 fetch 到隐藏的 `refs/gitrepo/import/*`（开启 `fetch.fsckObjects`），然后下载 LFS 对象，最后用一次带期望旧值的 `update-ref` 事务发布。
+  - 如果期间有 push 改动了 Hub，整个导入放弃并返回 409，push 的内容保持不变。
+- **SSH 资源限制：**
+  - 连接数：全局 512，单个地址 32。每个连接最多 8 个并发会话。
+  - 超时：握手必须在 30 秒内完成；之后空闲 10 分钟断开；upload-pack 加 `--timeout=600`。
+  - accept 出错（例如文件描述符耗尽）时退避重试，不会让 SSH 服务停掉；进程被信号杀死时，退出码报为 1。
+- **源码包：**
+  - `git archive` 中途失败时中断响应，不会把截断的文件当作完整、可永久缓存的内容发出去。
+  - 并发构建最多 8 个，超出时返回 503 和 `Retry-After`。
+- **仍然存在的限制：** 协议 v2 允许按 SHA 取得仓库里的任何对象，包括只被备份 ref 引用的对象。要彻底解决，需要把备份对象放到不对外提供服务的独立仓库中。目前这一点已写入 README 的风险说明。

@@ -551,16 +551,46 @@ func (g *Git) RemoteHead(ctx context.Context, url string, cred *Cred) string {
 	return ""
 }
 
-// FetchAll copies every branch and tag of url into repo, overwriting
-// local values; with prune, local branches and tags missing on url go.
-func (g *Git) FetchAll(ctx context.Context, repo, url string, cred *Cred, prune bool) error {
-	args := []string{"fetch", "--quiet", "--no-tags", "--no-write-fetch-head"}
-	if prune {
-		args = append(args, "--prune")
+// ImportNamespace receives fetched refs during an import before they are
+// published; it is hidden from clients like refs/backup.
+const ImportNamespace = "refs/gitrepo/import/"
+
+// FetchForImport copies every branch and tag of url into
+// refs/gitrepo/import/{heads,tags}/ of repo (cleared first), verifying the
+// received objects, and returns the fetched values keyed by their real
+// names (refs/heads/…, refs/tags/…). Nothing visible to clients changes.
+func (g *Git) FetchForImport(ctx context.Context, repo, url string, cred *Cred) (map[string]string, error) {
+	if err := g.ClearImport(ctx, repo); err != nil {
+		return nil, err
 	}
-	args = append(args, url, "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*")
-	_, _, err := g.runRemote(ctx, repo, cred, url, args...)
-	return err
+	_, _, err := g.runRemote(ctx, repo, cred, url, "-c", "fetch.fsckObjects=true",
+		"fetch", "--quiet", "--no-tags", "--no-write-fetch-head", url,
+		"+refs/heads/*:"+ImportNamespace+"heads/*", "+refs/tags/*:"+ImportNamespace+"tags/*")
+	if err != nil {
+		return nil, err
+	}
+	raw, err := g.ForEachRef(ctx, repo, ImportNamespace)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(raw))
+	for ref, sha := range raw {
+		out["refs/"+strings.TrimPrefix(ref, ImportNamespace)] = sha
+	}
+	return out, nil
+}
+
+// ClearImport removes leftovers of an import.
+func (g *Git) ClearImport(ctx context.Context, repo string) error {
+	refs, err := g.ForEachRef(ctx, repo, ImportNamespace)
+	if err != nil {
+		return err
+	}
+	var lines []string
+	for ref := range refs {
+		lines = append(lines, "delete "+ref)
+	}
+	return g.UpdateRefs(ctx, repo, lines)
 }
 
 // lfsScratch creates a throwaway bare repository for running git-lfs on
@@ -568,9 +598,9 @@ func (g *Git) FetchAll(ctx context.Context, repo, url string, cred *Cred, prune 
 // unborn HEAD, so git-lfs cannot read a .lfsconfig (git-lfs honours lfs.url
 // and lfs.pushurl from the HEAD commit of a bare repository): content
 // pushed to the hub must never decide where LFS traffic, and the mirror
-// credentials that come with it, are sent. withRefs copies repo's branches
-// and tags for commands that scan history.
-func (g *Git) lfsScratch(ctx context.Context, repo string, withRefs bool) (string, func(), error) {
+// credentials that come with it, are sent. refs (name → value) are created
+// in it for commands that scan history.
+func (g *Git) lfsScratch(ctx context.Context, repo string, refs map[string]string) (string, func(), error) {
 	abs, err := filepath.Abs(repo)
 	if err != nil {
 		return "", nil, err
@@ -592,12 +622,7 @@ func (g *Git) lfsScratch(ctx context.Context, repo string, withRefs bool) (strin
 		cleanup()
 		return "", nil, err
 	}
-	if withRefs {
-		refs, err := g.HubRefs(ctx, repo)
-		if err != nil {
-			cleanup()
-			return "", nil, err
-		}
+	if len(refs) > 0 {
 		lines := make([]string, 0, len(refs))
 		for ref, sha := range refs {
 			lines = append(lines, "update "+ref+" "+sha)
@@ -608,6 +633,18 @@ func (g *Git) lfsScratch(ctx context.Context, repo string, withRefs bool) (strin
 		}
 	}
 	return dir, cleanup, nil
+}
+
+// PublishedView returns a throwaway bare repository that shares repo's
+// objects but contains only its branches and tags. Commands run there can
+// neither resolve nor print hidden refs (refs/backup/*), e.g. git archive
+// expanding %D through export-subst.
+func (g *Git) PublishedView(ctx context.Context, repo string) (string, func(), error) {
+	refs, err := g.HubRefs(ctx, repo)
+	if err != nil {
+		return "", nil, err
+	}
+	return g.lfsScratch(ctx, repo, refs)
 }
 
 // lfsArgs are the git-lfs settings for working on repo's LFS store with url
@@ -642,10 +679,11 @@ func lfsEndpoint(remote string) string {
 	return remote + ".git/info/lfs"
 }
 
-// LFSFetchAll downloads every LFS object referenced by any branch or tag
-// of repo from the LFS endpoint of url into repo's LFS store.
-func (g *Git) LFSFetchAll(ctx context.Context, repo, url string, cred *Cred) error {
-	scratch, cleanup, err := g.lfsScratch(ctx, repo, true)
+// LFSFetchAll downloads every LFS object referenced from refs (name →
+// value; objects must be in repo) from the LFS endpoint of url into repo's
+// LFS store.
+func (g *Git) LFSFetchAll(ctx context.Context, repo, url string, cred *Cred, refs map[string]string) error {
+	scratch, cleanup, err := g.lfsScratch(ctx, repo, refs)
 	if err != nil {
 		return err
 	}
@@ -664,7 +702,7 @@ func (g *Git) LFSPush(ctx context.Context, repo, url string, cred *Cred, oids []
 	if len(oids) == 0 {
 		return nil
 	}
-	scratch, cleanup, err := g.lfsScratch(ctx, repo, false)
+	scratch, cleanup, err := g.lfsScratch(ctx, repo, nil)
 	if err != nil {
 		return err
 	}

@@ -45,6 +45,10 @@ func (s *Store) GetSSHKeyByFingerprint(ctx context.Context, fp string) (*SSHKey,
 	return scanSSHKey(s.db.QueryRowContext(ctx, `SELECT `+sshKeyCols+` FROM ssh_keys WHERE fingerprint=?`, fp))
 }
 
+func (s *Store) GetSSHKey(ctx context.Context, id int64) (*SSHKey, error) {
+	return scanSSHKey(s.db.QueryRowContext(ctx, `SELECT `+sshKeyCols+` FROM ssh_keys WHERE id=?`, id))
+}
+
 func (s *Store) ListSSHKeys(ctx context.Context) ([]*SSHKey, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+sshKeyCols+` FROM ssh_keys ORDER BY name`)
 	if err != nil {

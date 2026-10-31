@@ -45,14 +45,35 @@ type Server struct {
 	HostKeyPath string
 	Log         *slog.Logger
 
+	// Limits (zero values use the defaults below).
+	MaxConns           int           // concurrent connections overall
+	MaxConnsPerIP      int           // concurrent connections per client address
+	MaxSessionsPerConn int           // concurrent sessions on one connection
+	IdleTimeout        time.Duration // close connections without traffic
+
 	config  *ssh.ServerConfig
 	hostKey ssh.Signer
 
 	mu     sync.Mutex
 	ln     net.Listener
 	conns  map[net.Conn]struct{}
+	perIP  map[string]int
+	byKey  map[int64]map[*ssh.ServerConn]struct{}
 	closed bool
 	wg     sync.WaitGroup
+}
+
+// Revoke closes every connection authenticated with the given key, so a
+// deleted key cannot keep working through an open (e.g. multiplexed)
+// connection.
+func (s *Server) Revoke(keyID int64) {
+	s.mu.Lock()
+	conns := s.byKey[keyID]
+	delete(s.byKey, keyID)
+	s.mu.Unlock()
+	for c := range conns {
+		c.Close()
+	}
 }
 
 // Init loads (or creates) the host key and prepares the SSH configuration.
@@ -116,35 +137,56 @@ func (s *Server) checkKey(_ ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissio
 	return &ssh.Permissions{Extensions: map[string]string{keyIDExt: strconv.FormatInt(k.ID, 10)}}, nil
 }
 
-// Serve accepts connections until Close.
+func orDefault[T int | time.Duration](v, def T) T {
+	if v > 0 {
+		return v
+	}
+	return def
+}
+
+// Serve accepts connections until Close. Accept errors (e.g. running out
+// of file descriptors) are retried with backoff rather than ending SSH
+// service.
 func (s *Server) Serve(ln net.Listener) error {
 	s.mu.Lock()
 	s.ln = ln
 	s.conns = map[net.Conn]struct{}{}
+	s.perIP = map[string]int{}
 	s.mu.Unlock()
+	maxConns := orDefault(s.MaxConns, 512)
+	maxPerIP := orDefault(s.MaxConnsPerIP, 32)
+	var backoff time.Duration
 	for {
 		nc, err := ln.Accept()
 		if err != nil {
 			s.mu.Lock()
 			closed := s.closed
 			s.mu.Unlock()
-			if closed {
+			if closed || errors.Is(err, net.ErrClosed) {
 				return nil
 			}
-			var ne net.Error
-			if errors.As(err, &ne) && ne.Timeout() {
-				time.Sleep(50 * time.Millisecond)
-				continue
+			backoff = min(max(2*backoff, 5*time.Millisecond), time.Second)
+			if s.Log != nil {
+				s.Log.Warn("ssh accept", "err", err, "retry_in", backoff)
 			}
-			return err
+			time.Sleep(backoff)
+			continue
 		}
+		backoff = 0
+		ip, _, _ := net.SplitHostPort(nc.RemoteAddr().String())
 		s.mu.Lock()
 		if s.closed {
 			s.mu.Unlock()
 			nc.Close()
 			return nil
 		}
+		if len(s.conns) >= maxConns || s.perIP[ip] >= maxPerIP {
+			s.mu.Unlock()
+			nc.Close()
+			continue
+		}
 		s.conns[nc] = struct{}{}
+		s.perIP[ip]++
 		s.wg.Add(1)
 		s.mu.Unlock()
 		go func() {
@@ -152,12 +194,37 @@ func (s *Server) Serve(ln net.Listener) error {
 			defer func() {
 				s.mu.Lock()
 				delete(s.conns, nc)
+				if s.perIP[ip]--; s.perIP[ip] <= 0 {
+					delete(s.perIP, ip)
+				}
 				s.mu.Unlock()
 				nc.Close()
 			}()
 			s.handleConn(nc)
 		}()
 	}
+}
+
+// idleConn closes the connection when no data moves for timeout. It is
+// armed after the handshake, which has its own deadline.
+type idleConn struct {
+	net.Conn
+	timeout time.Duration
+	armed   bool
+}
+
+func (c *idleConn) Read(b []byte) (int, error) {
+	if c.armed {
+		c.Conn.SetDeadline(time.Now().Add(c.timeout))
+	}
+	return c.Conn.Read(b)
+}
+
+func (c *idleConn) Write(b []byte) (int, error) {
+	if c.armed {
+		c.Conn.SetDeadline(time.Now().Add(c.timeout))
+	}
+	return c.Conn.Write(b)
 }
 
 // Close stops the listener, drops connections and waits for sessions.
@@ -175,56 +242,78 @@ func (s *Server) Close() error {
 	return nil
 }
 
-func (s *Server) handleConn(nc net.Conn) {
-	nc.SetDeadline(time.Now().Add(30 * time.Second))
+func (s *Server) handleConn(raw net.Conn) {
+	nc := &idleConn{Conn: raw, timeout: orDefault(s.IdleTimeout, 10*time.Minute)}
+	raw.SetDeadline(time.Now().Add(30 * time.Second)) // unauthenticated clients
 	conn, chans, reqs, err := ssh.NewServerConn(nc, s.config)
 	if err != nil {
 		return
 	}
 	defer conn.Close()
-	nc.SetDeadline(time.Time{})
+	nc.armed = true
+	raw.SetDeadline(time.Now().Add(nc.timeout))
 	go ssh.DiscardRequests(reqs)
 
 	id, _ := strconv.ParseInt(conn.Permissions.Extensions[keyIDExt], 10, 64)
-	p, err := s.principal(id)
-	if err != nil {
+	if _, err := s.principal(id); err != nil {
 		return
 	}
+	s.mu.Lock()
+	if s.byKey == nil {
+		s.byKey = map[int64]map[*ssh.ServerConn]struct{}{}
+	}
+	if s.byKey[id] == nil {
+		s.byKey[id] = map[*ssh.ServerConn]struct{}{}
+	}
+	s.byKey[id][conn] = struct{}{}
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.byKey[id], conn)
+		s.mu.Unlock()
+	}()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() { conn.Wait(); cancel() }()
 
 	var wg sync.WaitGroup
+	sessions := make(chan struct{}, orDefault(s.MaxSessionsPerConn, 8))
 	for nch := range chans {
 		if nch.ChannelType() != "session" {
 			nch.Reject(ssh.UnknownChannelType, "only session channels are supported")
 			continue
 		}
+		select {
+		case sessions <- struct{}{}:
+		default:
+			nch.Reject(ssh.ResourceShortage, "too many concurrent sessions on this connection")
+			continue
+		}
 		ch, chReqs, err := nch.Accept()
 		if err != nil {
+			<-sessions
 			continue
 		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			s.session(ctx, p, ch, chReqs)
+			defer func() { <-sessions }()
+			s.session(ctx, id, ch, chReqs)
 		}()
 	}
 	wg.Wait()
 }
 
+// principal loads the key's current scopes. It is called for every
+// command, so deleting or narrowing a key takes effect immediately, even on
+// connections that are already open.
 func (s *Server) principal(keyID int64) (*auth.Principal, error) {
-	keys, err := s.Store.ListSSHKeys(context.Background())
+	k, err := s.Store.GetSSHKey(context.Background(), keyID)
 	if err != nil {
 		return nil, err
 	}
-	for _, k := range keys {
-		if k.ID == keyID {
-			_ = s.Store.TouchSSHKey(context.Background(), k.ID)
-			return &auth.Principal{Name: "ssh:" + k.Name, Scopes: k.Scopes, Repos: k.Repos}, nil
-		}
-	}
-	return nil, store.ErrNotFound
+	_ = s.Store.TouchSSHKey(context.Background(), k.ID)
+	return &auth.Principal{Name: "ssh:" + k.Name, Scopes: k.Scopes, Repos: k.Repos}, nil
 }
 
 func sendExit(ch ssh.Channel, code int) {
@@ -235,7 +324,7 @@ func sendExit(ch ssh.Channel, code int) {
 // session serves one channel: env (GIT_PROTOCOL only), exec, or a shell
 // request answered with a friendly message. Requests keep being answered
 // while a command runs.
-func (s *Server) session(ctx context.Context, p *auth.Principal, ch ssh.Channel, reqs <-chan *ssh.Request) {
+func (s *Server) session(ctx context.Context, keyID int64, ch ssh.Channel, reqs <-chan *ssh.Request) {
 	defer ch.Close()
 	var gitProtocol string
 	done := make(chan struct{})
@@ -269,12 +358,20 @@ func (s *Server) session(ctx context.Context, p *auth.Principal, ch ssh.Channel,
 				started = true
 				go func() {
 					defer close(done)
+					p, err := s.principal(keyID)
+					if err != nil {
+						fmt.Fprintf(ch.Stderr(), "gitrepo: this key is no longer authorized\n")
+						sendExit(ch, 1)
+						return
+					}
 					code := s.exec(ctx, p, ch, c.Command, gitProtocol)
 					sendExit(ch, code)
 				}()
 			case req.Type == "shell" && !started:
 				req.Reply(true, nil)
-				fmt.Fprintf(ch.Stderr(), "Hi %s! You've successfully authenticated, but Gitrepo does not provide shell access.\r\n", strings.TrimPrefix(p.Name, "ssh:"))
+				if p, err := s.principal(keyID); err == nil {
+					fmt.Fprintf(ch.Stderr(), "Hi %s! You've successfully authenticated, but Gitrepo does not provide shell access.\r\n", strings.TrimPrefix(p.Name, "ssh:"))
+				}
 				sendExit(ch, 1)
 				return
 			default:
@@ -342,7 +439,9 @@ func (s *Server) exec(ctx context.Context, p *auth.Principal, ch ssh.Channel, cm
 
 	var write, create bool
 	switch verb {
-	case "git-upload-pack", "git-upload-archive":
+	case "git-upload-pack":
+	// git-upload-archive is deliberately not offered: it resolves any ref,
+	// hidden ones included. Use the HTTP /archive endpoint instead.
 	case "git-receive-pack":
 		write, create = true, true
 	case "git-lfs-authenticate":
@@ -351,7 +450,7 @@ func (s *Server) exec(ctx context.Context, p *auth.Principal, ch ssh.Channel, cm
 		}
 		write = args[2] == "upload"
 	default:
-		return fail("unsupported command %q (only git and git-lfs-authenticate are available)", verb)
+		return fail("unsupported command %q (git-upload-pack, git-receive-pack and git-lfs-authenticate are available; for archives use https://…/archive/<org>/<name>/<rev>.tar.gz)", verb)
 	}
 	repo, err := s.Git.Access(ctx, slug, p, write, create)
 	if err != nil {
@@ -376,7 +475,11 @@ func (s *Server) exec(ctx context.Context, p *auth.Principal, ch ssh.Channel, cm
 	if gitProtocol != "" {
 		env = append(env, "GIT_PROTOCOL="+gitProtocol)
 	}
-	cmd := exec.CommandContext(ctx, s.GitBin, strings.TrimPrefix(verb, "git-"), s.Registry.Path(repo.Slug))
+	gitArgs := []string{strings.TrimPrefix(verb, "git-")}
+	if verb == "git-upload-pack" {
+		gitArgs = append(gitArgs, "--timeout=600") // give up on clients that stop reading
+	}
+	cmd := exec.CommandContext(ctx, s.GitBin, append(gitArgs, s.Registry.Path(repo.Slug))...)
 	cmd.Env = env
 	cmd.WaitDelay = 10 * time.Second
 	cmd.Stdout = ch
@@ -400,7 +503,7 @@ func (s *Server) exec(ctx context.Context, p *auth.Principal, ch ssh.Channel, cm
 	switch {
 	case err == nil:
 		return 0
-	case errors.As(err, &ee):
+	case errors.As(err, &ee) && ee.ExitCode() >= 0:
 		return ee.ExitCode()
 	default:
 		s.Log.Warn("git over ssh", "cmd", verb, "repo", slug, "err", err)

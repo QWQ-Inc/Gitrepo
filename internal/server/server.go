@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/qwq-inc/gitrepo/internal/auth"
@@ -71,6 +72,9 @@ type Server struct {
 
 	expiryMu       sync.Mutex
 	expiryNotified map[int64]time.Time
+
+	bundleBusy atomic.Bool
+	bundleWG   sync.WaitGroup
 }
 
 // New prepares the data directory, database and components.
@@ -167,6 +171,7 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*Server, error) {
 		LFS:             &lfs.Server{Signer: lfsSigner, MaxObjectSize: int64(cfg.Policy.MaxLFSObjectSize), PublicURL: cfg.PublicURL, Log: log},
 		Signer:          lfsSigner,
 		PublicURL:       cfg.PublicURL,
+		Git:             s.git,
 	}
 	if cfg.Bundles.Enabled {
 		s.bundles = &bundles.Manager{Dir: cfg.BundlesDir(), Git: s.git, Interval: cfg.Bundles.Interval.D(), MinSize: int64(cfg.Bundles.MinSize), Log: log}
@@ -370,6 +375,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.ssh != nil {
 		s.ssh.Close()
 	}
+	s.bundleWG.Wait()
 	s.mgr.Shutdown()
 	s.notify.Stop()
 	if s.sockSrv != nil {
@@ -429,7 +435,16 @@ func (s *Server) patrol(ctx context.Context) {
 		s.log.Warn("prune sync runs", "err", err)
 	}
 	s.checkCredentialExpiry(ctx)
-	s.RefreshBundles(ctx, false)
+	// Bundle builds can take long for big repositories; they must not hold
+	// up patrols and retries, and only one refresh runs at a time.
+	if s.bundles != nil && s.bundleBusy.CompareAndSwap(false, true) {
+		s.bundleWG.Add(1)
+		go func() {
+			defer s.bundleWG.Done()
+			defer s.bundleBusy.Store(false)
+			s.RefreshBundles(ctx, false)
+		}()
+	}
 }
 
 // RefreshBundles rebuilds bundles that are due (all of them with force).

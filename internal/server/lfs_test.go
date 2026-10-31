@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/qwq-inc/gitrepo/internal/client"
 	"github.com/qwq-inc/gitrepo/internal/gitserve"
@@ -19,7 +20,7 @@ import (
 
 // newLFSPlatform is a fake hosting platform with Git LFS: smart HTTP plus
 // the LFS API, both behind basic auth (mirror/s3cret).
-func newLFSPlatform(t *testing.T) (url, dir string) {
+func newLFSPlatform(t *testing.T, uploadPackDelay ...time.Duration) (url, dir string) {
 	dir = t.TempDir()
 	signer := lfs.NewSigner([]byte("fake platform key"))
 	basic := func(r *http.Request) bool {
@@ -42,6 +43,9 @@ func newLFSPlatform(t *testing.T) (url, dir string) {
 			w.Header().Set("WWW-Authenticate", `Basic realm="fake"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
+		}
+		if len(uploadPackDelay) > 0 && r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/git-upload-pack") {
+			time.Sleep(uploadPackDelay[0])
 		}
 		gitserve.RunBackend(w, r, "git", r.URL.Path, []string{"GIT_PROJECT_ROOT=" + dir, "GIT_HTTP_EXPORT_ALL=1", "REMOTE_USER=" + userA, "HOME=" + dir}, slog.Default())
 	}))

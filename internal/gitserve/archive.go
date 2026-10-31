@@ -51,6 +51,14 @@ func (s *Server) ServeArchive(w http.ResponseWriter, r *http.Request, org, name,
 		unauthorized(w, "invalid token")
 		return
 	}
+	select {
+	case archiveSlots <- struct{}{}:
+		defer func() { <-archiveSlots }()
+	default:
+		w.Header().Set("Retry-After", "10")
+		http.Error(w, "gitrepo: too many archives are being built; retry shortly", http.StatusServiceUnavailable)
+		return
+	}
 	repo, err := s.Access(r.Context(), slug, p, false, false)
 	switch {
 	case errors.Is(err, ErrUnauthenticated):
@@ -69,7 +77,15 @@ func (s *Server) ServeArchive(w http.ResponseWriter, r *http.Request, org, name,
 
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
 	defer cancel()
-	dir := s.Registry.Path(slug)
+	// Work in a view that holds only branches and tags, so hidden refs can
+	// neither be resolved nor leak through export-subst ($Format:%D$).
+	dir, cleanup, err := s.Git.PublishedView(ctx, s.Registry.Path(slug))
+	if err != nil {
+		s.Log.Error("archive view", "repo", slug, "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	defer cleanup()
 	git := func(args ...string) *exec.Cmd {
 		cmd := exec.CommandContext(ctx, s.GitBin, append([]string{"--git-dir=" + dir}, args...)...)
 		cmd.Env = append(os.Environ(), "HOME="+s.HomeDir, "XDG_CONFIG_HOME="+s.HomeDir, "GIT_CONFIG_NOSYSTEM=1")
@@ -134,13 +150,23 @@ func (s *Server) ServeArchive(w http.ResponseWriter, r *http.Request, org, name,
 		dst = gz
 	}
 	_, copyErr := io.Copy(dst, stdout)
-	if gz != nil && copyErr == nil {
-		copyErr = gz.Close()
-	}
 	if copyErr != nil {
 		cancel()
 	}
-	if err := cmd.Wait(); err != nil && copyErr == nil {
-		s.Log.Warn("git archive", "repo", slug, "rev", sha, "err", err)
+	// Finish the stream only if git succeeded: a truncated archive must not
+	// end as a valid (and possibly CDN-cached) file. Aborting the handler
+	// cuts the response so the client sees an error.
+	if err := cmd.Wait(); err != nil || copyErr != nil {
+		s.Log.Warn("git archive failed", "repo", slug, "rev", sha, "err", err, "copy_err", copyErr)
+		panic(http.ErrAbortHandler)
+	}
+	if gz != nil {
+		if err := gz.Close(); err != nil {
+			panic(http.ErrAbortHandler)
+		}
 	}
 }
+
+// archiveSlots bounds concurrent archive builds (each runs git archive and
+// compresses in-process).
+var archiveSlots = make(chan struct{}, 8)

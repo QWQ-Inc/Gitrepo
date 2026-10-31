@@ -21,6 +21,7 @@ import (
 
 	"github.com/qwq-inc/gitrepo/internal/auth"
 	"github.com/qwq-inc/gitrepo/internal/bundles"
+	"github.com/qwq-inc/gitrepo/internal/gitexec"
 	"github.com/qwq-inc/gitrepo/internal/githooks"
 	"github.com/qwq-inc/gitrepo/internal/lfs"
 	"github.com/qwq-inc/gitrepo/internal/provider"
@@ -53,6 +54,8 @@ type Server struct {
 	Bundles   *bundles.Manager
 	Signer    *lfs.Signer
 	PublicURL string
+	// Git provides published-only views of repositories for archives.
+	Git *gitexec.Git
 }
 
 const (
@@ -269,6 +272,7 @@ func (s *Server) GitEnv(ctx context.Context, repo *store.Repo, p *auth.Principal
 	env = append(env, gitConfigEnv(append([]string{
 		"core.hooksPath", s.HooksDir,
 		"transfer.hideRefs", "refs/backup",
+		"transfer.hideRefs", "refs/gitrepo",
 		"receive.advertisePushOptions", "true",
 		"receive.fsckObjects", "true",
 		"uploadpack.allowFilter", "true",

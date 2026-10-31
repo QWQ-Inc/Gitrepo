@@ -80,13 +80,16 @@ func (s *Server) apiImport(w http.ResponseWriter, r *http.Request) {
 	res, err := s.mgr.Import(r.Context(), repo, rem, in.Force)
 	if err != nil {
 		status := http.StatusBadGateway
-		if errors.Is(err, syncer.ErrHubNotEmpty) {
+		if errors.Is(err, syncer.ErrHubNotEmpty) || errors.Is(err, syncer.ErrConcurrentChange) {
 			status = http.StatusConflict
 		}
 		s.fail(w, &apiError{status: status, err: err})
 		return
 	}
 	s.log.Info("repository imported", "repo", repo.Slug, "from", rem.Label(), "refs", res.Refs, "lfs_objects", res.LFSObjects)
+	if s.bundles != nil && res.BackedUp > 0 {
+		s.bundles.Remove(repo.Slug)
+	}
 	s.mgr.Enqueue(repo.ID, syncer.Request{Trigger: syncer.TriggerManual})
 	ro, err := s.repoOut(r.Context(), repo, false)
 	if err != nil {
