@@ -47,8 +47,9 @@ type Server struct {
 	// MaxFileSize is the configured hard cap (0 = derive from remotes).
 	MaxFileSize     int64
 	PostReceiveWait time.Duration
-	// OnCreate is called after a repository is created by a push.
-	OnCreate func(repo *store.Repo)
+	// OnCreate is called after a repository is created by a push, by p;
+	// OriginFrom(ctx) tells where the push came from.
+	OnCreate func(ctx context.Context, repo *store.Repo, p *auth.Principal)
 	// LFS serves <repo>.git/info/lfs/*; its Auth is filled in per request.
 	LFS *lfs.Server
 	// Bundles, when set, are advertised to readers via bundle-uri and served
@@ -155,7 +156,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx := r.Context()
+	ctx := WithOrigin(r.Context(), Origin{Via: "http", Client: ClientAddr(r, s.TrustedProxies)})
 	repo, err := s.Access(ctx, slug, p, write, write && rest == "info/refs")
 	switch {
 	case errors.Is(err, ErrUnauthenticated):
@@ -317,7 +318,7 @@ func (s *Server) Access(ctx context.Context, slug string, p *auth.Principal, wri
 		}
 		s.Log.Info("repository created by push", "repo", slug, "by", p.Name)
 		if s.OnCreate != nil {
-			s.OnCreate(repo)
+			s.OnCreate(ctx, repo, p)
 		}
 	case err != nil:
 		return nil, err

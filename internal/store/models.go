@@ -84,7 +84,8 @@ type Repo struct {
 	Visibility    string
 	CreatedAt     int64
 	UpdatedAt     int64
-	// PurgedAt is when backups were last purged (hub).
+	// PurgedAt is when backups were last purged, or the instance restored
+	// from a snapshot (hub). Edge nodes rebuild their copy when it changes.
 	PurgedAt int64
 	// UpstreamKey and UpstreamVersion describe an edge node's copy: which
 	// hub repository (identity and purge) it is, and the version fetched.
@@ -490,6 +491,38 @@ AND lower(COALESCE(NULLIF(r.namespace, ''), t.namespace)) = lower(COALESCE(NULLI
 func (s *Store) DeleteRemote(ctx context.Context, id int64) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM remotes WHERE id=?`, id)
 	return wrapErr(err)
+}
+
+// ListRemotesByTarget returns every remote that uses the target.
+func (s *Store) ListRemotesByTarget(ctx context.Context, targetID int64) ([]*Remote, error) {
+	return s.queryRemotes(ctx, `SELECT `+remoteCols+remoteFrom+` WHERE r.target_id=? ORDER BY r.repo_id`, targetID)
+}
+
+// ForgetRemoteState drops everything learnt about a remote's repository -
+// refs seen and pushed, divergences, release copies, provisioning and
+// adoption - after the remote was pointed at another location, so the new
+// repository is treated like a newly added mirror (adoption check included)
+// rather than with the old one's history.
+func (s *Store) ForgetRemoteState(ctx context.Context, id int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, q := range []string{
+		`DELETE FROM ref_state WHERE remote_id=?`,
+		`DELETE FROM pushed_state WHERE remote_id=?`,
+		`DELETE FROM divergences WHERE remote_id=?`,
+		`DELETE FROM release_mirrors WHERE remote_id=?`,
+		// The failure count stays: an alert already sent still gets its
+		// recovery notice.
+		`UPDATE remotes SET provisioned=0, adopt=0 WHERE id=?`,
+	} {
+		if _, err := tx.ExecContext(ctx, q, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) SetRemoteProvisioned(ctx context.Context, id int64, v bool) error {

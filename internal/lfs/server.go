@@ -22,6 +22,13 @@ var (
 	ErrForbidden    = errors.New("access denied")
 )
 
+// ErrNotOnHub: an edge node's hub does not have the object.
+var ErrNotOnHub = errors.New("object does not exist on the hub")
+
+// ErrUnavailable: the repository cannot be served right now (an edge node
+// is still building or replacing its copy).
+var ErrUnavailable = errors.New("this repository's copy is being synchronized; try again shortly")
+
 const mediaType = "application/vnd.git-lfs+json"
 
 // actionTTL is how long transfer hrefs stay valid; git-lfs asks again for
@@ -54,11 +61,16 @@ type Server struct {
 	PublicURL string
 	Log       *slog.Logger
 
-	// Edge nodes: Fill starts fetching objects a download batch needs but
-	// the local store lacks (without waiting); Await waits until one is
-	// stored. With them, batches answer with local links right away.
-	Fill  func(repo Repo, missing []Object)
-	Await func(ctx context.Context, repo Repo, oid string) error
+	// Edge nodes. Fill is given the objects a download batch needs but the
+	// local store lacks; it reports which of them the hub has (oid to
+	// size) and starts fetching those without waiting, so batches answer
+	// with local links right away - but only for objects that exist.
+	// Await waits until an object is stored. Available reports whether the
+	// repository may be served at all; it is checked after authorization,
+	// so nothing about private repositories can be learnt from it.
+	Fill      func(ctx context.Context, repo Repo, missing []Object) (map[string]int64, error)
+	Await     func(ctx context.Context, repo Repo, oid string) error
+	Available func(repo Repo) bool
 }
 
 // Object names an LFS object in a batch request.
@@ -107,6 +119,30 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 		w.Header().Set("WWW-Authenticate", `Basic realm="gitrepo"`)
 	}
 	writeJSON(w, status, map[string]string{"message": "gitrepo: " + msg})
+}
+
+// available answers 503 when the repository cannot be served right now.
+func (s *Server) available(w http.ResponseWriter, repo Repo) bool {
+	if s.Available == nil || s.Available(repo) {
+		return true
+	}
+	w.Header().Set("Retry-After", "5")
+	writeErr(w, http.StatusServiceUnavailable, ErrUnavailable.Error())
+	return false
+}
+
+// storedSize reports whether oid is stored. In a download request a size
+// of 0 means "unknown" (an edge node fetching an object it was asked for
+// by ID alone): any stored copy matches, and its size is returned.
+func storedSize(dir, oid string, size int64) (int64, bool) {
+	if size != 0 {
+		return size, Has(dir, oid, size)
+	}
+	fi, err := os.Stat(ObjectPath(dir, oid))
+	if err != nil || !fi.Mode().IsRegular() || !ValidOID(oid) {
+		return 0, false
+	}
+	return fi.Size(), true
 }
 
 func (s *Server) authErr(w http.ResponseWriter, err error) {
@@ -213,17 +249,30 @@ func (s *Server) batch(w http.ResponseWriter, r *http.Request, repo Repo) {
 		s.authErr(w, err)
 		return
 	}
-	filling := map[string]bool{}
-	if req.Operation == "download" && s.Fill != nil {
+	if !s.available(w, repo) {
+		return
+	}
+	// Download: what is stored here, and (edge nodes) what the hub has.
+	sizes := map[string]int64{}
+	var fillErr error
+	if req.Operation == "download" {
 		var missing []Object
 		for _, o := range req.Objects {
-			if ValidOID(o.OID) && o.Size >= 0 && !Has(repo.Dir, o.OID, o.Size) {
+			if !ValidOID(o.OID) || o.Size < 0 {
+				continue
+			}
+			if n, ok := storedSize(repo.Dir, o.OID, o.Size); ok {
+				sizes[o.OID] = n
+			} else if s.Fill != nil {
 				missing = append(missing, o)
-				filling[o.OID] = true
 			}
 		}
 		if len(missing) > 0 {
-			s.Fill(repo, missing)
+			var have map[string]int64
+			have, fillErr = s.Fill(r.Context(), repo, missing)
+			for oid, n := range have {
+				sizes[oid] = n
+			}
 		}
 	}
 	base := s.baseURL(r, repo.Slug)
@@ -234,10 +283,16 @@ func (s *Server) batch(w http.ResponseWriter, r *http.Request, repo Repo) {
 		case !ValidOID(o.OID) || o.Size < 0:
 			ro.Error = &objError{Code: http.StatusUnprocessableEntity, Message: "invalid object"}
 		case req.Operation == "download":
-			if !Has(repo.Dir, o.OID, o.Size) && !filling[o.OID] {
+			n, ok := sizes[o.OID]
+			if !ok && fillErr != nil {
+				ro.Error = &objError{Code: http.StatusBadGateway, Message: "the hub cannot be reached to check this object; try again"}
+				break
+			}
+			if !ok {
 				ro.Error = &objError{Code: http.StatusNotFound, Message: "object does not exist on the hub"}
 				break
 			}
+			ro.Size = n
 			ro.Authenticated = true
 			ro.Actions = map[string]*action{"download": s.action(base+"/objects/"+o.OID, repo.Key(), o.OID, "download")}
 		default: // upload
@@ -275,13 +330,13 @@ func (s *Server) authorizeRepo(w http.ResponseWriter, r *http.Request, repo Repo
 			writeErr(w, http.StatusUnauthorized, err.Error())
 			return false
 		}
-		return true
+		return s.available(w, repo)
 	}
 	if err := s.Auth(r, repo.Slug, op == "upload"); err != nil {
 		s.authErr(w, err)
 		return false
 	}
-	return true
+	return s.available(w, repo)
 }
 
 // authorizeObject accepts an action token for this object or user
@@ -292,13 +347,13 @@ func (s *Server) authorizeObject(w http.ResponseWriter, r *http.Request, repo Re
 			writeErr(w, http.StatusUnauthorized, err.Error())
 			return false
 		}
-		return true
+		return s.available(w, repo)
 	}
 	if err := s.Auth(r, repo.Slug, op == "upload"); err != nil {
 		s.authErr(w, err)
 		return false
 	}
-	return true
+	return s.available(w, repo)
 }
 
 func (s *Server) download(w http.ResponseWriter, r *http.Request, repo Repo, oid string) {
@@ -308,7 +363,11 @@ func (s *Server) download(w http.ResponseWriter, r *http.Request, repo Repo, oid
 	if s.Await != nil {
 		if _, err := os.Stat(ObjectPath(repo.Dir, oid)); err != nil {
 			if err := s.Await(r.Context(), repo, oid); err != nil {
-				writeErr(w, http.StatusNotFound, "object is not available: "+err.Error())
+				status := http.StatusNotFound
+				if !errors.Is(err, ErrNotOnHub) {
+					status = http.StatusBadGateway
+				}
+				writeErr(w, status, "object is not available: "+err.Error())
 				return
 			}
 		}

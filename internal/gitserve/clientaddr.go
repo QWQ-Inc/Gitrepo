@@ -1,6 +1,7 @@
 package gitserve
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"net/netip"
@@ -46,4 +47,23 @@ func isTrusted(a netip.Addr, trusted []netip.Prefix) bool {
 		}
 	}
 	return false
+}
+
+// Origin tells where a Git request came from (for the audit log).
+type Origin struct {
+	Via    string // "http" or "ssh"
+	Client string
+}
+
+type originKey struct{}
+
+// WithOrigin returns ctx carrying o.
+func WithOrigin(ctx context.Context, o Origin) context.Context {
+	return context.WithValue(ctx, originKey{}, o)
+}
+
+// OriginFrom returns the origin stored by WithOrigin, if any.
+func OriginFrom(ctx context.Context) Origin {
+	o, _ := ctx.Value(originKey{}).(Origin)
+	return o
 }

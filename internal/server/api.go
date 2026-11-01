@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/qwq-inc/gitrepo/internal/auth"
@@ -425,6 +426,7 @@ func (s *Server) apiUpdateTarget(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, badRequest("targets cannot be renamed"))
 		return
 	}
+	old := *t
 	if err := s.applyTargetIn(t, &in); err != nil {
 		s.fail(w, err)
 		return
@@ -437,12 +439,90 @@ func (s *Server) apiUpdateTarget(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	// Mirrors that now point elsewhere (namespace, URL template, server
+	// changed) forget what was learnt about their old repositories first.
+	moved, err := s.relocateTargetRemotes(r.Context(), &old, t)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
 	if err := s.store.UpdateTarget(r.Context(), t); err != nil {
 		s.fail(w, err)
 		return
 	}
-	noteAudit(r, "changed %s", strings.Join(in.fields(), ", "))
+	for repoID, ids := range moved {
+		s.mgr.Enqueue(repoID, syncer.Request{Trigger: syncer.TriggerManual, RemoteIDs: ids})
+	}
+	if n := countIDs(moved); n > 0 {
+		noteAudit(r, "changed %s; %d mirror(s) now point at another location", strings.Join(in.fields(), ", "), n)
+	} else {
+		noteAudit(r, "changed %s", strings.Join(in.fields(), ", "))
+	}
 	writeJSON(w, http.StatusOK, toTargetOut(t))
+}
+
+// remoteLocation is where a remote points: its explicit URL, or the one its
+// target's provider derives.
+func remoteLocation(t *store.Target, rem *store.Remote) string {
+	if rem.URL != "" {
+		return rem.URL
+	}
+	p, err := provider.Get(t.Provider)
+	if err != nil {
+		return ""
+	}
+	u, _ := p.RepoURL(t, rem.Namespace, rem.Name)
+	return u
+}
+
+// relocateTargetRemotes forgets the state of the target's remotes whose
+// location differs between old and updated (see syncer.Relocate), grouped
+// by repository; it returns them for syncing.
+func (s *Server) relocateTargetRemotes(ctx context.Context, old, updated *store.Target) (map[int64][]int64, error) {
+	remotes, err := s.store.ListRemotesByTarget(ctx, old.ID)
+	if err != nil {
+		return nil, err
+	}
+	moved := map[int64][]int64{}
+	for _, rem := range remotes {
+		before := remoteLocation(old, rem)
+		rem.TargetNamespace = updated.Namespace
+		if remoteLocation(updated, rem) != before {
+			moved[rem.RepoID] = append(moved[rem.RepoID], rem.ID)
+		}
+	}
+	var (
+		wg   sync.WaitGroup
+		mu   sync.Mutex
+		errs []error
+	)
+	sem := make(chan struct{}, 8)
+	for repoID, ids := range moved {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			if err := s.mgr.Relocate(ctx, repoID, ids, nil); err != nil {
+				mu.Lock()
+				errs = append(errs, err)
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if len(errs) > 0 {
+		return nil, &apiError{status: http.StatusConflict, err: fmt.Errorf("the target was not changed: %w", errs[0])}
+	}
+	return moved, nil
+}
+
+func countIDs(m map[int64][]int64) int {
+	n := 0
+	for _, ids := range m {
+		n += len(ids)
+	}
+	return n
 }
 
 func (s *Server) apiDeleteTarget(w http.ResponseWriter, r *http.Request) {
@@ -960,6 +1040,12 @@ func (s *Server) apiUpdateRemote(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	t, err := s.store.GetTarget(r.Context(), rem.TargetID)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	before := remoteLocation(t, rem)
 	if in.Enabled != nil {
 		rem.Enabled = *in.Enabled
 	}
@@ -980,11 +1066,27 @@ func (s *Server) apiUpdateRemote(w http.ResponseWriter, r *http.Request) {
 	if in.Adopt != nil {
 		rem.Adopt = *in.Adopt
 	}
-	if err := s.store.UpdateRemoteConfig(r.Context(), rem); err != nil {
+	moved := remoteLocation(t, rem) != before
+	if moved {
+		// Another repository: nothing learnt about the old one applies,
+		// and it must be adopted (again) if it already has content.
+		if in.Adopt == nil {
+			rem.Adopt = false
+		}
+		err = s.mgr.Relocate(r.Context(), repo.ID, []int64{rem.ID}, func() error { return s.store.UpdateRemoteConfig(r.Context(), rem) })
+		if err != nil {
+			s.fail(w, err)
+			return
+		}
+	} else if err := s.store.UpdateRemoteConfig(r.Context(), rem); err != nil {
 		s.fail(w, err)
 		return
 	}
-	noteAudit(r, "mirror %s: enabled %t, on divergence %s, adopt %t", rem.Label(), rem.Enabled, rem.OnDivergence, rem.Adopt)
+	where := ""
+	if moved {
+		where = "; moved to another location (what was known about the old one is forgotten)"
+	}
+	noteAudit(r, "mirror %s: enabled %t, on divergence %s, adopt %t%s", rem.Label(), rem.Enabled, rem.OnDivergence, rem.Adopt, where)
 	s.mgr.Enqueue(repo.ID, syncer.Request{Trigger: syncer.TriggerManual, RemoteIDs: []int64{rem.ID}})
 	w.WriteHeader(http.StatusNoContent)
 }

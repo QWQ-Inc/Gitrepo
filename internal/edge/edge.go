@@ -83,8 +83,10 @@ type Replica struct {
 	lastPoll time.Time
 	lastErr  string
 	fills    map[string]*fill
-	fillSem  chan struct{}
-	ctx      context.Context
+	fillQ    chan fillJob
+	hubSem   chan struct{}
+	missing  map[string]map[string]time.Time // slug -> oid -> expiry
+	missingN int
 
 	// Tests: replace the fetch, and observe the moment between a fetch
 	// and the decision to go idle.
@@ -138,7 +140,9 @@ func (r *Replica) Load(ctx context.Context) error {
 	defer r.mu.Unlock()
 	r.repos = map[string]*repoState{}
 	r.fills = map[string]*fill{}
-	r.fillSem = make(chan struct{}, 8)
+	r.fillQ = make(chan fillJob, fillQueue)
+	r.hubSem = make(chan struct{}, hubQueries)
+	r.missing = map[string]map[string]time.Time{}
 	r.queue = make(chan string, 1<<16)
 	if v, _ := r.Store.EdgeMeta(ctx, "loaded"); v == "1" {
 		r.loaded = true
@@ -160,9 +164,9 @@ func (r *Replica) Load(ctx context.Context) error {
 
 // Run follows the hub until ctx ends. Load must have been called.
 func (r *Replica) Run(ctx context.Context) {
-	r.mu.Lock()
-	r.ctx = ctx
-	r.mu.Unlock()
+	for i := 0; i < fillWorkers; i++ {
+		go r.fillWorker(ctx)
+	}
 	workers := r.Workers
 	if workers <= 0 {
 		workers = 4
@@ -343,6 +347,9 @@ func (r *Replica) apply(ctx context.Context, st *State, refreshAll bool) error {
 					return err
 				}
 			}
+		}
+		if rs.want.version != hr.Version {
+			r.forgetMissing(slug)
 		}
 		rs.deleted = false
 		rs.want.version, rs.want.key, rs.want.head, rs.want.visibility = hr.Version, key, hr.DefaultBranch, hr.Visibility
@@ -565,85 +572,201 @@ func (r *Replica) Status() Status {
 
 // ------------------------------------------------------------------- LFS
 
-// FillLFS starts fetching LFS objects the edge does not have from the hub,
-// once per object however many clients ask; it does not wait.
-func (r *Replica) FillLFS(repo lfs.Repo, objects []lfs.Object) {
-	for _, o := range objects {
-		r.startFill(repo, o.OID, o.Size)
-	}
+const (
+	// hubQueries bounds concurrent LFS batch requests to the hub; fillQueue
+	// and fillWorkers bound the background downloads they start.
+	hubQueries  = 8
+	fillQueue   = 1024
+	fillWorkers = 8
+	// missingTTL: how long the hub's "no such object" answer is trusted.
+	// A push to the repository clears it sooner.
+	missingTTL = 30 * time.Second
+	maxMissing = 1 << 14
+)
+
+// errFillQueueFull: the background queue was full; a download fetches the
+// object itself.
+var errFillQueueFull = errors.New("fill queue full")
+
+type fillJob struct {
+	repo lfs.Repo
+	oid  string
+	link hubLink
+	f    *fill
 }
 
-func (r *Replica) startFill(repo lfs.Repo, oid string, size int64) *fill {
-	key := repo.Dir + "|" + oid
+// hubLink is a download link from the hub's batch answer.
+type hubLink struct {
+	size    int64
+	href    string
+	header  map[string]string
+	expires time.Time
+}
+
+func fillKey(repo lfs.Repo, oid string) string { return repo.Dir + "|" + oid }
+
+func stored(repo lfs.Repo, oid string) bool {
+	fi, err := os.Stat(lfs.ObjectPath(repo.Dir, oid))
+	return err == nil && fi.Mode().IsRegular()
+}
+
+// FillLFS asks the hub, in one batch request, which of the objects a
+// client's download batch needs it has, queues background downloads of
+// those (deduplicated, on a bounded queue) and reports them with their
+// sizes. Objects the hub does not have are remembered for a short while,
+// so a client listing made-up IDs costs one hub request, not one per ID.
+func (r *Replica) FillLFS(ctx context.Context, repo lfs.Repo, objects []lfs.Object) (map[string]int64, error) {
+	have := map[string]int64{}
+	var ask []lfs.Object
+	for _, o := range objects {
+		if !r.knownMissing(repo, o.OID) {
+			ask = append(ask, o)
+		}
+	}
+	if len(ask) == 0 {
+		return have, nil
+	}
+	links, err := r.queryHub(ctx, repo, ask)
+	if err != nil {
+		return have, err
+	}
+	for oid, l := range links {
+		have[oid] = l.size
+		r.enqueueFill(repo, oid, l)
+	}
+	return have, nil
+}
+
+// enqueueFill queues a background download of oid unless one is running.
+func (r *Replica) enqueueFill(repo lfs.Repo, oid string, l hubLink) {
+	key := fillKey(repo, oid)
 	r.mu.Lock()
-	if f := r.fills[key]; f != nil {
-		r.mu.Unlock()
-		return f
+	defer r.mu.Unlock()
+	if r.fills[key] != nil {
+		return
 	}
 	f := &fill{done: make(chan struct{})}
-	r.fills[key] = f
-	base := r.ctx
-	r.mu.Unlock()
-	if base == nil {
-		base = context.Background()
-	}
-	go func() {
-		ctx, cancel := context.WithTimeout(base, time.Hour)
-		defer cancel()
-		r.fillSem <- struct{}{}
-		f.err = r.fetchLFS(ctx, repo, oid, size)
-		<-r.fillSem
-		r.mu.Lock()
-		delete(r.fills, key)
-		r.mu.Unlock()
-		close(f.done)
-	}()
-	return f
-}
-
-// AwaitLFS waits until oid is stored (fetching it if nobody is).
-func (r *Replica) AwaitLFS(ctx context.Context, repo lfs.Repo, oid string) error {
-	if _, err := os.Stat(lfs.ObjectPath(repo.Dir, oid)); err == nil {
-		return nil
-	}
-	f := r.startFill(repo, oid, -1)
 	select {
-	case <-f.done:
-		if f.err != nil {
-			return f.err
-		}
-		if _, err := os.Stat(lfs.ObjectPath(repo.Dir, oid)); err != nil {
-			return errors.New("not on the hub")
-		}
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+	case r.fillQ <- fillJob{repo: repo, oid: oid, link: l, f: f}:
+		r.fills[key] = f
+	default:
+		// Full: the client's download fetches it (AwaitLFS).
 	}
 }
 
-func (r *Replica) fetchLFS(ctx context.Context, repo lfs.Repo, oid string, size int64) error {
-	if _, err := os.Stat(lfs.ObjectPath(repo.Dir, oid)); err == nil {
+// fillWorker runs queued background downloads.
+func (r *Replica) fillWorker(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case j := <-r.fillQ:
+			var err error
+			if !stored(j.repo, j.oid) {
+				jctx, cancel := context.WithTimeout(ctx, time.Hour)
+				if time.Now().Before(j.link.expires) {
+					err = r.download(jctx, j.repo, j.oid, j.link.href, j.link.header)
+				} else {
+					err = r.fetchLFS(jctx, j.repo, j.oid)
+				}
+				cancel()
+			}
+			r.finishFill(fillKey(j.repo, j.oid), j.f, err)
+		}
+	}
+}
+
+func (r *Replica) finishFill(key string, f *fill, err error) {
+	r.mu.Lock()
+	if r.fills[key] == f {
+		delete(r.fills, key)
+	}
+	f.err = err
+	close(f.done)
+	r.mu.Unlock()
+}
+
+// AwaitLFS waits until oid is stored: it waits for a running download, or
+// fetches the object itself (in the client's request, so the number of
+// these is bounded by the clients waiting).
+func (r *Replica) AwaitLFS(ctx context.Context, repo lfs.Repo, oid string) error {
+	key := fillKey(repo, oid)
+	for attempt := 0; attempt < 2; attempt++ {
+		if stored(repo, oid) {
+			return nil
+		}
+		if r.knownMissing(repo, oid) {
+			return lfs.ErrNotOnHub
+		}
+		r.mu.Lock()
+		f := r.fills[key]
+		if f == nil {
+			f = &fill{done: make(chan struct{})}
+			r.fills[key] = f
+			r.mu.Unlock()
+			err := r.fetchLFS(ctx, repo, oid)
+			r.finishFill(key, f, err)
+			if err != nil {
+				return err
+			}
+			continue
+		}
+		r.mu.Unlock()
+		select {
+		case <-f.done:
+			// Someone else's download failed (perhaps their client went
+			// away): try once more ourselves.
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if stored(repo, oid) {
 		return nil
 	}
-	if size < 0 {
-		size = 0 // unknown: the hub's answer carries it
+	return lfs.ErrNotOnHub
+}
+
+// fetchLFS fetches one object whose size is not known.
+func (r *Replica) fetchLFS(ctx context.Context, repo lfs.Repo, oid string) error {
+	if stored(repo, oid) {
+		return nil
 	}
-	body, _ := json.Marshal(map[string]any{"operation": "download", "transfers": []string{"basic"}, "objects": []lfs.Object{{OID: oid, Size: size}}})
+	links, err := r.queryHub(ctx, repo, []lfs.Object{{OID: oid, Size: 0}}) // 0: size unknown
+	if err != nil {
+		return err
+	}
+	l, ok := links[oid]
+	if !ok {
+		return lfs.ErrNotOnHub
+	}
+	return r.download(ctx, repo, oid, l.href, l.header)
+}
+
+// queryHub sends one download batch to the hub and returns the links it
+// gives; objects it reports missing are remembered (knownMissing).
+func (r *Replica) queryHub(ctx context.Context, repo lfs.Repo, objects []lfs.Object) (map[string]hubLink, error) {
+	select {
+	case r.hubSem <- struct{}{}:
+		defer func() { <-r.hubSem }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	body, _ := json.Marshal(map[string]any{"operation": "download", "transfers": []string{"basic"}, "objects": objects})
 	base := strings.TrimRight(r.Upstream, "/")
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/"+repo.Slug+".git/info/lfs/objects/batch", bytes.NewReader(body))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.SetBasicAuth("edge", r.Token)
 	req.Header.Set("Accept", "application/vnd.git-lfs+json")
 	req.Header.Set("Content-Type", "application/vnd.git-lfs+json")
 	resp, err := sameHostClient.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("hub LFS batch: %s", resp.Status)
+		return nil, fmt.Errorf("hub LFS batch: %s", resp.Status)
 	}
 	var out struct {
 		Objects []struct {
@@ -651,28 +774,100 @@ func (r *Replica) fetchLFS(ctx context.Context, repo lfs.Repo, oid string, size 
 			Size    int64  `json:"size"`
 			Actions struct {
 				Download *struct {
-					Href   string            `json:"href"`
-					Header map[string]string `json:"header"`
+					Href      string            `json:"href"`
+					Header    map[string]string `json:"header"`
+					ExpiresIn int               `json:"expires_in"`
 				} `json:"download"`
 			} `json:"actions"`
+			Error *struct {
+				Code int `json:"code"`
+			} `json:"error"`
 		} `json:"objects"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&out); err != nil {
-		return err
+		return nil, err
+	}
+	asked := map[string]bool{}
+	for _, o := range objects {
+		asked[o.OID] = true
 	}
 	up, _ := url.Parse(base)
+	links := map[string]hubLink{}
+	var missing []string
 	for _, o := range out.Objects {
-		d := o.Actions.Download
-		if o.OID != oid || d == nil {
+		if !asked[o.OID] {
 			continue
 		}
-		h, err := url.Parse(d.Href)
-		if err != nil || up == nil || h.Scheme != up.Scheme || h.Host != up.Host {
-			return errors.New("hub returned a download link on another host")
+		if d := o.Actions.Download; d != nil {
+			h, err := url.Parse(d.Href)
+			if err != nil || up == nil || h.Scheme != up.Scheme || h.Host != up.Host {
+				r.Log.Warn("edge: the hub returned an LFS link on another host; ignored", "repo", repo.Slug)
+				continue
+			}
+			ttl := time.Duration(d.ExpiresIn) * time.Second
+			if ttl <= 0 {
+				ttl = 5 * time.Minute
+			}
+			links[o.OID] = hubLink{size: o.Size, href: d.Href, header: d.Header, expires: time.Now().Add(ttl - ttl/4)}
+		} else if o.Error != nil && o.Error.Code == http.StatusNotFound {
+			missing = append(missing, o.OID)
 		}
-		return r.download(ctx, repo, oid, d.Href, d.Header)
 	}
-	return errors.New("not on the hub")
+	r.markMissing(repo, missing)
+	return links, nil
+}
+
+func (r *Replica) knownMissing(repo lfs.Repo, oid string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	exp, ok := r.missing[repo.Slug][oid]
+	return ok && time.Now().Before(exp)
+}
+
+func (r *Replica) markMissing(repo lfs.Repo, oids []string) {
+	if len(oids) == 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.missingN+len(oids) > maxMissing {
+		now := time.Now()
+		r.missingN = 0
+		for slug, m := range r.missing {
+			for oid, exp := range m {
+				if now.After(exp) {
+					delete(m, oid)
+				}
+			}
+			if len(m) == 0 {
+				delete(r.missing, slug)
+			}
+			r.missingN += len(m)
+		}
+		if r.missingN+len(oids) > maxMissing {
+			r.missing, r.missingN = map[string]map[string]time.Time{}, 0
+		}
+	}
+	m := r.missing[repo.Slug]
+	if m == nil {
+		m = map[string]time.Time{}
+		r.missing[repo.Slug] = m
+	}
+	exp := time.Now().Add(missingTTL)
+	for _, oid := range oids {
+		if _, ok := m[oid]; !ok {
+			r.missingN++
+		}
+		m[oid] = exp
+	}
+}
+
+// forgetMissing drops what is remembered as missing for slug (it changed:
+// LFS objects are uploaded before the push that references them).
+// r.mu must be held.
+func (r *Replica) forgetMissing(slug string) {
+	r.missingN -= len(r.missing[slug])
+	delete(r.missing, slug)
 }
 
 func (r *Replica) download(ctx context.Context, repo lfs.Repo, oid, href string, header map[string]string) error {

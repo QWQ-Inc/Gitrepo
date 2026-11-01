@@ -478,7 +478,8 @@ func (s *Server) exec(ctx context.Context, p *auth.Principal, ch ssh.Channel, cm
 	if s.Git.Upstream != "" && write {
 		return fail("this is a read-only edge node; push to %s", s.Git.Upstream)
 	}
-	repo, err := s.Git.Access(ctx, slug, p, write, create)
+	clientHost, _ := ctx.Value(clientKey{}).(string)
+	repo, err := s.Git.Access(gitserve.WithOrigin(ctx, gitserve.Origin{Via: "ssh", Client: clientHost}), slug, p, write, create)
 	if err != nil {
 		if errors.Is(err, gitserve.ErrNotFound) {
 			return fail("repository %s not found", slug)
@@ -511,7 +512,6 @@ func (s *Server) exec(ctx context.Context, p *auth.Principal, ch ssh.Channel, cm
 		defer done()
 	}
 	env := append([]string{"PATH=" + os.Getenv("PATH")}, s.Git.GitEnv(ctx, repo, p, write)...)
-	clientHost, _ := ctx.Value(clientKey{}).(string)
 	env = append(env, githooks.EnvTransport+"=ssh", githooks.EnvClientAddr+"="+clientHost)
 	if gitProtocol != "" {
 		env = append(env, "GIT_PROTOCOL="+gitProtocol)

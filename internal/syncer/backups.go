@@ -36,6 +36,9 @@ type Backup struct {
 // ErrNoSuchBackup is returned for unknown backup refs.
 var ErrNoSuchBackup = errors.New("no such backup")
 
+// ErrCannotRestore is returned when a backup cannot be published safely.
+var ErrCannotRestore = errors.New("cannot restore this backup")
+
 func parseBackupRef(ref string) (b Backup, ok bool) {
 	rest, ok := strings.CutPrefix(ref, "refs/backup/")
 	if !ok {
@@ -98,6 +101,13 @@ func (m *Manager) RestoreBackup(ctx context.Context, repo *store.Repo, backupRef
 	if _, ok := parseBackupRef(backupRef); !ok {
 		return "", ErrNoSuchBackup
 	}
+	// The lease keeps a purge from collecting the backup's objects while
+	// it is being published.
+	release, err := m.holdLease(ctx, repo.ID, "restore")
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	repoPath := m.reg.Path(repo.Slug)
 	refs, err := m.git.ForEachRef(ctx, repoPath, backupRef)
 	if err != nil {
@@ -117,6 +127,29 @@ func (m *Manager) RestoreBackup(ctx context.Context, repo *store.Repo, backupRef
 		return "", fmt.Errorf("backup %s does not point to a commit", backupRef)
 	}
 	sha := strings.TrimSpace(string(out))
+	// The same rule as for a push: published commits need their LFS
+	// files on the hub, or every later sync of them would fail.
+	published, err := m.git.HubRefs(ctx, repoPath)
+	if err != nil {
+		return "", err
+	}
+	var exclude []string
+	for _, v := range published {
+		exclude = append(exclude, v)
+	}
+	objs, err := m.git.LFSObjects(ctx, repoPath, []string{sha}, exclude)
+	if err != nil {
+		return "", err
+	}
+	missing := 0
+	for oid, size := range objs {
+		if !lfs.Has(repoPath, oid, size) {
+			missing++
+		}
+	}
+	if missing > 0 {
+		return "", fmt.Errorf("%w: the backup references %d Git LFS file(s) the hub does not have (they were never uploaded to it); restoring it would break syncing", ErrCannotRestore, missing)
+	}
 	target := "refs/heads/" + branch
 	if existing, err := m.git.ForEachRef(ctx, repoPath, target); err == nil {
 		if _, taken := existing[target]; taken {
@@ -287,4 +320,29 @@ func (m *Manager) holdLease(ctx context.Context, repoID int64, what string) (fun
 		case <-time.After(time.Second):
 		}
 	}
+}
+
+// Relocate is for remotes pointed at another location (a new URL, or a
+// target namespace change): under the repository's sync lease it forgets
+// what was learnt about the old location (Store.ForgetRemoteState: pushed
+// refs, divergences, release copies, adoption), then runs apply (which
+// stores the change; may be nil). The caller then syncs them. Without this the
+// new repository would be treated as one Gitrepo had already written to:
+// no adoption check, and leases and divergence handling based on another
+// repository's refs.
+func (m *Manager) Relocate(ctx context.Context, repoID int64, remoteIDs []int64, apply func() error) error {
+	release, err := m.holdLease(ctx, repoID, "relocate")
+	if err != nil {
+		return err
+	}
+	for _, id := range remoteIDs {
+		if err = m.store.ForgetRemoteState(ctx, id); err != nil {
+			break
+		}
+	}
+	if err == nil && apply != nil {
+		err = apply()
+	}
+	release()
+	return err
 }

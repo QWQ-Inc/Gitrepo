@@ -31,9 +31,11 @@ import (
 // CredGitHubApp is the credential kind of GitHub Apps.
 const CredGitHubApp = "github-app"
 
-// tokenMargin is how long a cached installation token must stay valid to be
-// reused: longer than a sync's push timeout.
-const tokenMargin = 20 * time.Minute
+// tokenMargin is how long a cached installation token (valid for an hour)
+// must stay valid to be reused: longer than the longest operation that uses
+// one - a release publish (30 minutes) or a sync (push_timeout, 10 minutes
+// by default).
+const tokenMargin = 40 * time.Minute
 
 type cachedToken struct {
 	mu      sync.Mutex

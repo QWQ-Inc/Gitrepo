@@ -75,9 +75,12 @@ func TestSSH(t *testing.T) {
 		}
 		var page auditPage
 		e.do(http.MethodGet, "/api/audit?repo=acme/sshdemo", nil, &page)
-		if len(page.Entries) != 1 || page.Entries[0].Actor != "ssh:dev" || page.Entries[0].Via != "ssh" ||
+		if len(page.Entries) != 2 || page.Entries[0].Actor != "ssh:dev" || page.Entries[0].Via != "ssh" ||
 			page.Entries[0].ClientAddr != "127.0.0.1" || !strings.HasPrefix(page.Entries[0].Detail, "main created at ") {
 			t.Fatalf("audit of the ssh push: %+v", page.Entries)
+		}
+		if c := page.Entries[1]; c.Action != "create repository (push)" || c.Actor != "ssh:dev" || c.Via != "ssh" || c.ClientAddr != "127.0.0.1" {
+			t.Fatalf("audit of the repository created over ssh: %+v", c)
 		}
 	})
 

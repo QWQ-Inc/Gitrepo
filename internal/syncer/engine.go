@@ -281,7 +281,7 @@ func (m *Manager) syncRemote(parent context.Context, repo *store.Repo, rem *stor
 	// 6. Upload the LFS objects the new refs reference before the refs
 	// themselves, so the mirror never holds pointers without content.
 	// Every sync scans for pointers (not only when the hub stores LFS
-	// objects), and a pointer whose object the hub lacks stops the run:
+	// objects), and a ref that needs an object the hub lacks is held back:
 	// pushing it would leave the mirror with a file it cannot serve.
 	if len(ops) > 0 {
 		n, missing, err := m.syncLFS(ctx, repoPath, url, cred, ops, remoteRefs)
@@ -289,7 +289,32 @@ func (m *Manager) syncRemote(parent context.Context, repo *store.Repo, rem *stor
 			return fail("upload LFS objects: %v", err)
 		}
 		if missing > 0 {
-			return fail("%d LFS object(s) referenced by the new refs are not stored on the hub; upload them with `git lfs push --all <hub url>` and sync again", missing)
+			// Hold back only the refs that need the missing objects; the
+			// others (e.g. an unrelated main) still reach the mirror.
+			var keep []Op
+			for _, op := range ops {
+				if op.Action == ActionDelete {
+					keep = append(keep, op)
+					continue
+				}
+				miss, err := m.missingLFS(ctx, repoPath, op.New, remoteRefs)
+				if err != nil {
+					return fail("scan LFS objects: %v", err)
+				}
+				if miss > 0 {
+					failures[op.Ref] = fmt.Sprintf("%d LFS object(s) it references are not stored on the hub; upload them with `git lfs push --all <hub url>` and sync again", miss)
+					continue
+				}
+				keep = append(keep, op)
+			}
+			ops, n = keep, 0
+			if len(ops) > 0 {
+				if n, missing, err = m.syncLFS(ctx, repoPath, url, cred, ops, remoteRefs); err != nil {
+					return fail("upload LFS objects: %v", err)
+				} else if missing > 0 {
+					return fail("%d LFS object(s) referenced by the new refs are not stored on the hub", missing)
+				}
+			}
 		}
 		if n > 0 {
 			detail = append(detail, fmt.Sprintf("uploaded %d LFS object(s)", n))
@@ -450,6 +475,26 @@ func (m *Manager) push(ctx context.Context, repoPath, url string, cred *gitexec.
 	return final, nil
 }
 
+// missingLFS counts LFS objects reachable from tip (and not from the
+// remote's refs) that the hub does not store.
+func (m *Manager) missingLFS(ctx context.Context, repoPath, tip string, remoteRefs map[string]string) (int, error) {
+	var exclude []string
+	for _, sha := range remoteRefs {
+		exclude = append(exclude, sha)
+	}
+	objs, err := m.git.LFSObjects(ctx, repoPath, []string{tip}, exclude)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for oid, size := range objs {
+		if !lfs.Has(repoPath, oid, size) {
+			n++
+		}
+	}
+	return n, nil
+}
+
 // syncLFS uploads the LFS objects introduced by ops, i.e. referenced from
 // the new values but not from anything the mirror already has.
 func (m *Manager) syncLFS(ctx context.Context, repoPath, url string, cred *gitexec.Cred, ops []Op, remoteRefs map[string]string) (uploaded, missing int, err error) {
@@ -596,6 +641,14 @@ func (m *Manager) backupRemote(ctx context.Context, repoPath, url string, cred *
 					errs[op.Ref] = err
 				case got[prefix+op.Ref] != op.Expect:
 					errs[op.Ref] = errors.New("remote changed while it was being backed up")
+				}
+			}
+			// Keep the mirror's LFS files with its commits, so the backup can
+			// be restored and synced later (best effort: a backup without
+			// them is still a backup, and restore refuses it).
+			if err == nil && len(got) > 0 && m.git.LFSAvailable(ctx) {
+				if lerr := m.git.LFSFetchAll(ctx, repoPath, url, cred, got); lerr != nil {
+					m.log.Warn("fetch LFS objects of backed-up mirror refs", "url", url, "err", lerr)
 				}
 			}
 		}

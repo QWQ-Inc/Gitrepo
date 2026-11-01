@@ -34,6 +34,9 @@ type Manager struct {
 
 	mu    sync.Mutex
 	locks map[string]*sync.Mutex
+	// gen counts removals per repository: a build that started before a
+	// removal must not install its (now outdated) bundle.
+	gen map[string]uint64
 }
 
 // Bundle is the current bundle of a repository. ID is its creation time in
@@ -126,10 +129,16 @@ func (m *Manager) Belongs(slug, id string, repoID int64) bool {
 // Remove deletes every bundle of slug: when the repository is unregistered
 // or its published history was rewritten (a bundle must never keep offering
 // commits that were force-pushed away).
+//
+// It never waits for a build in progress (a push's post-receive calls it):
+// the build notices the removal and discards its result.
 func (m *Manager) Remove(slug string) error {
-	l := m.lock(slug)
-	l.Lock()
-	defer l.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.gen == nil {
+		m.gen = map[string]uint64{}
+	}
+	m.gen[slug]++
 	return os.RemoveAll(m.dir(slug))
 }
 
@@ -188,6 +197,9 @@ func (m *Manager) Refresh(ctx context.Context, slug string, repoID int64, repoPa
 	l := m.lock(slug)
 	l.Lock()
 	defer l.Unlock()
+	m.mu.Lock()
+	gen := m.gen[slug]
+	m.mu.Unlock()
 
 	if m.stale(ctx, slug, repoPath) {
 		os.RemoveAll(m.dir(slug))
@@ -222,11 +234,34 @@ func (m *Manager) Refresh(ctx context.Context, slug string, repoID int64, repoPa
 		n, _ := strconv.ParseInt(prev[0], 10, 64)
 		id = strconv.FormatInt(n+1, 10) // keep ids strictly increasing
 	}
-	tmp := filepath.Join(m.dir(slug), "."+id+".tmp")
+	// Built outside the repository's directory, which Remove may delete
+	// meanwhile.
+	tmpDir := filepath.Join(m.Dir, ".building")
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		return false, err
+	}
+	f, err := os.CreateTemp(tmpDir, "bundle-*")
+	if err != nil {
+		return false, err
+	}
+	tmp := f.Name()
+	f.Close()
+	os.Remove(tmp) // git creates it (through tmp.lock)
 	defer os.Remove(tmp)
 	// Only published refs: hidden refs/backup/* must never be handed out.
-	if _, err := m.Git.Run(ctx, repoPath, "bundle", "create", tmp, "--branches", "--tags"); err != nil {
+	_, err = m.Git.Run(ctx, repoPath, "bundle", "create", tmp, "--branches", "--tags")
+	// Install atomically with respect to Remove: a bundle built from
+	// history that was rewritten meanwhile is thrown away.
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.gen[slug] != gen {
+		return false, nil
+	}
+	if err != nil {
 		return false, fmt.Errorf("git bundle create: %w", err)
+	}
+	if err := os.MkdirAll(m.dir(slug), 0o755); err != nil {
+		return false, err
 	}
 	if err := os.WriteFile(filepath.Join(m.dir(slug), id+".meta"), []byte(fmt.Sprintf("%d\n%s\n", repoID, fp)), 0o644); err != nil {
 		return false, err

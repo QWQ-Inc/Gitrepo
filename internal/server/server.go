@@ -203,7 +203,7 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*Server, error) {
 	}
 	// Repositories created by a push appear on edges right away (an LFS
 	// upload through an edge precedes the push's post-receive).
-	s.gitsrv.OnCreate = func(repo *store.Repo) { s.clock.bump(repo.Slug) }
+	s.gitsrv.OnCreate = s.onPushCreate
 	if cfg.Edge.Upstream != "" {
 		tok := strings.TrimSpace(os.Getenv(cfg.Edge.TokenEnv))
 		if tok == "" {
@@ -222,6 +222,7 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*Server, error) {
 		s.gitsrv.Edge = s.edge
 		s.gitsrv.LFS.Fill = s.edge.FillLFS
 		s.gitsrv.LFS.Await = s.edge.AwaitLFS
+		s.gitsrv.LFS.Available = func(repo lfs.Repo) bool { return s.edge.RepoReady(repo.Slug) }
 	}
 	if cfg.SSH.Listen != "" {
 		s.ssh = &sshserve.Server{

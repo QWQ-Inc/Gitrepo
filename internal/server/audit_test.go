@@ -140,7 +140,7 @@ func TestAuditLog(t *testing.T) {
 
 	t.Run("pushes are recorded with the pusher and forced updates", func(t *testing.T) {
 		var pushes auditPage
-		e.do(http.MethodGet, "/api/audit?action=push", nil, &pushes)
+		e.do(http.MethodGet, "/api/audit?action=git+push", nil, &pushes)
 		if len(pushes.Entries) != 3 {
 			t.Fatalf("pushes: %+v", pushes.Entries)
 		}
@@ -190,12 +190,12 @@ func TestAuditLog(t *testing.T) {
 	t.Run("filters and pagination", func(t *testing.T) {
 		var mine auditPage
 		e.do(http.MethodGet, "/api/audit?actor=dev", nil, &mine)
-		if len(mine.Entries) != 5 {
+		if len(mine.Entries) != 6 { // + creating acme/app by the first push
 			t.Fatalf("actor filter: %+v", mine.Entries)
 		}
 		var repo auditPage
 		e.do(http.MethodGet, "/api/audit?repo=acme/app", nil, &repo)
-		if len(repo.Entries) != 3 {
+		if len(repo.Entries) != 4 {
 			t.Fatalf("repo filter: %+v", repo.Entries)
 		}
 		var seen []int64

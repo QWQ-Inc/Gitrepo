@@ -165,7 +165,7 @@ remote: gitrepo:   [diverged] gitlab:acme-group/demo  refs/heads/main
 
 ## 备份与清除
 
-被覆盖的历史不会立刻消失。这包括 Hub 上的强推和删分支、带 `--force` 的导入、以及 `--overwrite` 覆盖掉的镜像提交，它们会以隐藏 ref 的形式在 Hub 上保留 `sync.backup_retention`（默认 30 天）。
+被覆盖的历史不会立刻消失。这包括 Hub 上的强推和删分支、带 `--force` 的导入、以及 `--overwrite` 覆盖掉的镜像提交，它们会以隐藏 ref 的形式在 Hub 上保留 `sync.backup_retention`（默认 30 天）。镜像上被覆盖的提交连同它引用的 LFS 文件一起取回保存。如果某个备份引用的 LFS 文件不在 Hub 上，恢复会被拒绝（409），因为恢复出来的分支永远无法同步到镜像。
 
 ```bash
 gr backup list acme/demo                                       # 时间、来源、原分支、提交、到期
@@ -177,6 +177,7 @@ gr backup purge acme/demo --all --lfs --yes                     # 彻底清除
 - 清除期间这个仓库的 push 会被拒绝，提示稍后重试：push 可能让一个正要被删除的旧对象重新被引用。清除会先等正在进行的 push 结束，大仓库的 gc 可能需要几分钟；
 - 最近 5 分钟内写入的内容会被保留，例如为下一次 push 刚上传的 LFS 文件；
 - 镜像平台上的副本要在各平台上自行处理；
+- 公开仓库的源码包和 bundle 如果经过 CDN 缓存，CDN 上可能还留着旧副本，需要在 CDN 上自行清除；
 - 无论如何都要轮换泄露的密钥。
 
 控制台仓库页的"备份"一节也可以恢复和清除。
@@ -190,6 +191,8 @@ remote: gitrepo:   [failed]   github:acme/app  adoption required: the mirror rep
 ```
 
 确认它就是这个 Hub 仓库对应的镜像后再接管：`gr remote adopt acme/app github`（或在 `gr remote add` 时加 `--adopt`）。接管后，已有的分支只会快进或被报告为分叉，不会被覆盖。这样可以防止某条备份规则把一个新的 Hub 仓库指向别人已有的项目。
+
+修改镜像的地址（`url`），或者修改 target 的命名空间、URL 模板、服务器地址之后，镜像指向的已经是另一个仓库。Gitrepo 会忘掉关于旧仓库的一切记录（推送过的 ref、分叉、已同步的 Release、接管状态），把新位置当作新加的镜像：新位置已有内容时同样需要先接管。
 
 ## 导入已有项目 / 从镜像恢复
 
@@ -207,7 +210,7 @@ Hub 的数据丢失时，也用同一条命令从任意一个镜像恢复。如�
 
 客户端照常使用：`git lfs track`、`git push`。Hub 本身就是 LFS 服务器（`<仓库地址>/info/lfs`），使用相同的令牌和权限。读权限可以下载，写权限可以上传，公开仓库允许匿名下载。
 
-同步时，Gitrepo 先把本次新引用的 LFS 对象用 `git lfs push` 上传到各镜像，再推送 ref。只上传本次同步新增的对象，不会每次重传整个历史。如果某个指针对应的对象不在 Hub 上，这个镜像的同步会失败并提示原因，而不是把缺内容的指针推出去。
+同步时，Gitrepo 先把本次新引用的 LFS 对象用 `git lfs push` 上传到各镜像，再推送 ref。只上传本次同步新增的对象，不会每次重传整个历史。如果某个指针对应的对象不在 Hub 上，引用它的 ref 会被暂缓并报告原因，而不是把缺内容的指针推出去；其余 ref 照常同步。
 
 仓库里提交的 `.lfsconfig` 不会影响 Gitrepo 向镜像同步时使用的 LFS 地址：git-lfs 在一个看不到仓库内容的临时仓库里运行。镜像凭据也只会发给该镜像自己的地址。
 
@@ -309,7 +312,7 @@ gr webhook test 2
 
 `--format` 支持 `json`（默认，完整载荷）、`slack`、`wecom`、`feishu`、`dingtalk`。
 
-JSON 投递带以下请求头：`X-Gitrepo-Event`、`X-Gitrepo-Delivery`；配置了 secret 时还带 `X-Gitrepo-Signature-256: sha256=<HMAC-SHA256(secret, body)>`，校验方式与 GitHub webhook 相同。失败的投递会在 5s、30s、2m 后重试。`--repos 'acme/*'` 可以只接收部分仓库的事件。飞书和钉钉机器人的"签名校验"安全设置暂不支持，请改用关键词（例如 `Gitrepo`）或 IP 白名单。
+JSON 投递带以下请求头：`X-Gitrepo-Event`、`X-Gitrepo-Delivery`；配置了 secret 时还带 `X-Gitrepo-Signature-256: sha256=<HMAC-SHA256(secret, body)>`，校验方式与 GitHub webhook 相同。失败的投递会在 5s、30s、2m 后重试。`--repos 'acme/*'` 可以只接收部分仓库的事件；这样的 webhook 收不到不属于某个仓库的事件（`credential.expiring`），以免一个团队的 webhook 得知整个实例的凭据情况。飞书和钉钉机器人的"签名校验"安全设置暂不支持，请改用关键词（例如 `Gitrepo`）或 IP 白名单。
 
 ## 策略
 
@@ -347,7 +350,7 @@ JSON 投递带以下请求头：`X-Gitrepo-Event`、`X-Gitrepo-Delivery`；配�
 Gitrepo 保管着各平台的凭据，所以"谁在什么时候改了什么"都有记录：
 
 - **管理操作**：所有修改类 API 调用（新增、修改凭据、删除、签发 token、清除备份……），包括被拒绝的。记录内容为操作者、来源地址、路由和路径、HTTP 状态，以及一句说明，例如 `token ci (scopes read; repos acme/*)`、`changed credential`，被拒绝时是错误信息。**请求内容从不记录**，凭据、webhook URL 和 token 都不会出现在日志里。只读请求和未通过认证的请求不记录。
-- **push**：Hub 接受的每次 push，包括推送者（token 名或 `ssh:公钥名`）、HTTPS 还是 SSH、来源地址，以及每个 ref 的变化。强推会标出 `(forced)`：
+- **push**：Hub 接受的每次 push，包括推送者（token 名或 `ssh:公钥名`）、HTTPS 还是 SSH、来源地址，以及每个 ref 的变化。强推会标出 `(forced)`。push 到新地址自动建仓也会单独记一条（`create repository (push)`，列出由备份规则带来的镜像）：
 
 ```
 $ gr audit --repo acme/app
@@ -448,8 +451,8 @@ docker run -d -p 8080:8080 -v gitrepo-edge:/data \
   - 边缘对 Hub 做长轮询，Hub 上每次 push 或管理变更都会立即唤醒它，只 fetch 有变化的仓库。测试中，Hub 上 push 到边缘可读大约 0.1 秒。
   - 刚 push 完就从边缘 fetch，如果边缘正在拉这个仓库，会先等它拉完（最多 15 秒）。
   - token 被吊销、仓库被注销，也会在几秒内同步到边缘，即使边缘正在拉取大仓库也不受影响。
-  - Hub 上清除了备份，或者删除仓库后用同一个名字重建，边缘会丢弃旧副本重新拉取，被清除或已删除的内容不会再从边缘取到，按 SHA 也不行。重新拉取完成之前，这个仓库在边缘上返回 503。
-- **LFS**：边缘第一次被请求某个对象时，从 Hub 下载并按 SHA-256 校验，之后都从本地提供。
+  - Hub 上清除了备份，或者删除仓库后用同一个名字重建，或者 Hub 从快照恢复，边缘会丢弃旧副本重新拉取，被清除、已删除或快照之后才有的内容不会再从边缘取到，按 SHA 也不行。重新拉取完成之前，这个仓库在边缘上返回 503。
+- **LFS**：边缘第一次被请求某个对象时，从 Hub 下载并按 SHA-256 校验，之后都从本地提供。一次批量请求只向 Hub 查询一次，只为 Hub 上确实存在的对象给出下载链接，后台下载有并发上限；Hub 上没有的对象会被记住一小段时间（这个仓库有新 push 时立即失效），所以编造的对象 ID 不会让边缘反复请求 Hub。副本正在重建时，LFS 请求同样返回 503。
 - **按区域路由**：给同一个域名配 GeoDNS，或者给不同地区各配一个域名，让读取落到最近的边缘节点，push 地址指向 Hub。
 - **监控**：边缘的 `/healthz` 在尚未加载、或被 Hub 拒绝时返回 503。边缘的 `/metrics`（用边缘自己的 `GITREPO_ADMIN_TOKEN`）提供 `gitrepo_edge_ready`、`gitrepo_edge_last_update_timestamp_seconds`、`gitrepo_edge_pending_fetches`、`gitrepo_edge_upstream_ok`。
 - **注意**：
@@ -496,7 +499,7 @@ docker compose exec gitrepo gitrepo backup /data/snapshots/$(date +%F)
 docker run --rm -v gitrepo-data-new:/data -v /backups/2026-11-01:/snapshot:ro gitrepo:local restore /snapshot
 ```
 
-恢复前会先校验每个 bundle，并核对 ref 和 LFS 对象的数量，然后用**原来的** `GITREPO_SECRET_KEY` 启动服务。目标数据目录里已有数据库或仓库时，恢复会拒绝执行，不会覆盖现有实例。
+恢复前会先校验每个 bundle，并核对 ref 和 LFS 对象的数量，然后用**原来的** `GITREPO_SECRET_KEY` 启动服务。目标数据目录里已有数据库或仓库时，恢复会拒绝执行，不会覆盖现有实例。恢复后的 Hub 会让所有边缘节点丢弃副本、重新拉取，快照之后才 push 的内容不会继续留在边缘上。
 
 配置文件示例见 [`deploy/gitrepo.example.yaml`](deploy/gitrepo.example.yaml)，实现上与原设计的差异见 [`docs/design-notes.md`](docs/design-notes.md)。
 

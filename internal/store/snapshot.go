@@ -34,3 +34,12 @@ func (s *Store) ClearLeases(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM leases`)
 	return err
 }
+
+// MarkAllRebuilt changes every repository's purge time, so edge nodes
+// discard their copies and fetch them again: after restoring an older
+// snapshot, objects pushed since it was taken must not stay fetchable (by
+// SHA) from an edge although the hub no longer has them.
+func (s *Store) MarkAllRebuilt(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE repos SET purged_at = MAX(purged_at + 1, ?)`, Now())
+	return err
+}

@@ -62,3 +62,27 @@ func TestPushText(t *testing.T) {
 		}
 	}
 }
+
+// Instance-wide events (credential.expiring names targets) reach only
+// webhooks that are not limited to some repositories.
+func TestInstanceEventsSkipRepoScopedWebhooks(t *testing.T) {
+	cases := []struct {
+		patterns []string
+		repo     string
+		want     bool
+	}{
+		{nil, "", true},
+		{[]string{"*"}, "", true},
+		{[]string{"*/*"}, "", true},
+		{[]string{"team/*"}, "", false},
+		{[]string{"team/*", "*"}, "", false},
+		{[]string{"team/*"}, "team/app", true},
+		{[]string{"team/*"}, "other/app", false},
+		{nil, "other/app", true},
+	}
+	for _, c := range cases {
+		if got := wants(c.patterns, c.repo); got != c.want {
+			t.Errorf("wants(%v, %q) = %v, want %v", c.patterns, c.repo, got, c.want)
+		}
+	}
+}

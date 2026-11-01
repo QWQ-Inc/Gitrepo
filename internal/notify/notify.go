@@ -255,7 +255,7 @@ func (n *Notifier) Emit(e Event) {
 		if !h.Enabled || !Matches(h.Events, e.Event) {
 			continue
 		}
-		if e.Repo != "" && !auth.MatchRepo(h.Repos, e.Repo) {
+		if !wants(h.Repos, e.Repo) {
 			continue
 		}
 		ev := e
@@ -265,6 +265,23 @@ func (n *Notifier) Emit(e Event) {
 			n.log.Warn("webhook queue full; dropping event", "webhook", h.Name, "event", e.Event)
 		}
 	}
+}
+
+// wants reports whether a webhook limited to the repository patterns gets
+// an event about repo. Instance-wide events (no repository, such as
+// credential.expiring) go only to webhooks without a repository filter, or
+// one that matches every repository: a webhook set up for one team's
+// repositories must not learn about the whole instance's credentials.
+func wants(patterns []string, repo string) bool {
+	if repo != "" {
+		return auth.MatchRepo(patterns, repo)
+	}
+	for _, p := range patterns {
+		if p != "*" && p != "*/*" {
+			return false
+		}
+	}
+	return true
 }
 
 // Test delivers a ping synchronously and returns the outcome.

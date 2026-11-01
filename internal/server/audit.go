@@ -85,10 +85,23 @@ func (s *Server) withAudit(p *auth.Principal, fn http.HandlerFunc) http.HandlerF
 			})
 		}()
 		fn(sw, r.WithContext(context.WithValue(r.Context(), auditKey{}, note)))
-		if sw.status < 400 && s.clock != nil {
+		if sw.status < 400 && s.clock != nil && edgeRelevant(r.Pattern) {
 			s.clock.bump(note.repo) // edges pick up the change
 		}
 	}
+}
+
+// edgeRelevant reports whether a change made through the API route pattern
+// can affect what edge nodes replicate (repositories, their refs and
+// visibility, tokens, SSH keys). Others - release uploads above all - must
+// not make every edge poll again and re-fetch the repository.
+func edgeRelevant(pattern string) bool {
+	for _, p := range []string{"/releases", "/remotes", "/sync", "/api/webhooks", "/api/targets", "/api/bindings"} {
+		if strings.Contains(pattern, p) {
+			return false
+		}
+	}
+	return true
 }
 
 // recordAudit stores an entry; the request it describes has already been
@@ -138,6 +151,29 @@ func (s *Server) auditPush(pusher, transport, client, slug string, updates []syn
 	s.recordAudit(&store.AuditEntry{
 		Actor: pusher, Via: transport, ClientAddr: client,
 		Action: "git push", Repo: slug, Detail: b.String(),
+	})
+}
+
+// onPushCreate records a repository created by a push (it gets the mirrors
+// its bindings give it, so it is as consequential as POST /api/repos).
+func (s *Server) onPushCreate(ctx context.Context, repo *store.Repo, p *auth.Principal) {
+	s.clock.bump(repo.Slug)
+	o := gitserve.OriginFrom(ctx)
+	actor := "unknown"
+	if p != nil {
+		actor = p.Name
+	}
+	detail := "created by a push"
+	if remotes, err := s.store.ListRemotes(ctx, repo.ID); err == nil && len(remotes) > 0 {
+		var names []string
+		for _, rm := range remotes {
+			names = append(names, rm.Label())
+		}
+		detail += "; mirrors: " + strings.Join(names, ", ")
+	}
+	s.recordAudit(&store.AuditEntry{
+		Actor: actor, Via: o.Via, ClientAddr: o.Client,
+		Action: "create repository (push)", Repo: repo.Slug, Detail: detail,
 	})
 }
 

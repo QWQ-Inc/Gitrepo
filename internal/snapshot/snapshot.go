@@ -302,6 +302,9 @@ func Restore(ctx context.Context, cfg *config.Config, g *gitexec.Git, src string
 	// would block syncs after the first start.
 	err = st.ClearLeases(ctx)
 	if err == nil {
+		err = st.MarkAllRebuilt(ctx)
+	}
+	if err == nil {
 		err = checkReleaseFiles(ctx, st, cfg)
 	}
 	st.Close()

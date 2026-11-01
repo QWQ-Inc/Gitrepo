@@ -90,10 +90,14 @@ func (s *Server) handlePostReceive(w http.ResponseWriter, r *http.Request) {
 		s.bundles.Remove(org + "/" + name)
 	}
 
-	ctx := r.Context()
+	// The refs are already updated: HEAD, the push event, edges and the
+	// sync must follow even if the client stops waiting (a slow step can
+	// outlast the hook's timeout).
+	ctx := context.WithoutCancel(r.Context())
 	repo, err := s.store.GetRepoBySlug(ctx, org+"/"+name)
 	if err != nil {
 		s.clock.bump(org + "/" + name)
+		s.log.Error("post-receive: repository lookup", "repo", org+"/"+name, "err", err)
 		say("warning: repository is not registered: %v", err)
 		return
 	}

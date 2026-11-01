@@ -113,8 +113,9 @@ func TestInstallationTokens(t *testing.T) {
 	if err != nil || a != "ghs_1" || b != "ghs_1" || mints.Load() != 1 {
 		t.Fatalf("cached token: %q %q %v (mints %d)", a, b, err, mints.Load())
 	}
-	// A token that would expire during a long push is replaced.
-	ttl = 10 * time.Minute
+	// A token that could expire during a release publish (up to 30
+	// minutes) is replaced.
+	ttl = 35 * time.Minute
 	tg2 := *tg
 	tg2.InstallationID = "77"
 	other := keyPEM + "\n" // a different key text: a separate cache entry

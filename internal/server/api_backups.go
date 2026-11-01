@@ -75,6 +75,9 @@ func (s *Server) apiRestoreBackup(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, syncer.ErrNoSuchBackup):
 		s.fail(w, &apiError{status: http.StatusNotFound, err: err})
 		return
+	case errors.Is(err, syncer.ErrCannotRestore):
+		s.fail(w, &apiError{status: http.StatusConflict, err: err})
+		return
 	case err != nil:
 		s.fail(w, badRequest("%v", err))
 		return
