@@ -66,8 +66,11 @@ func (s *Server) withAudit(p *auth.Principal, fn http.HandlerFunc) http.HandlerF
 				status = http.StatusInternalServerError
 				defer panic(rec)
 			}
-			if note.detail == "" && status >= 400 {
-				note.detail = sw.errorMessage()
+			if msg := sw.errorMessage(); status >= 400 && msg != "" {
+				if note.detail != "" {
+					msg = note.detail + "; " + msg
+				}
+				note.detail = msg
 			}
 			s.recordAudit(&store.AuditEntry{
 				At:         store.FromTime(start),

@@ -1036,7 +1036,7 @@ func (s *Server) apiCreateToken(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, badRequest("name is required (letters, digits, '-', '_', '.')"))
 		return
 	}
-	if in.Name == auth.Admin().Name {
+	if strings.EqualFold(in.Name, auth.Admin().Name) {
 		s.fail(w, badRequest("%q is reserved for the bootstrap admin token", in.Name))
 		return
 	}

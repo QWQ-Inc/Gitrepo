@@ -1,6 +1,7 @@
 package server_test
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/qwq-inc/gitrepo/internal/client"
+	"github.com/qwq-inc/gitrepo/internal/config"
 	"github.com/qwq-inc/gitrepo/internal/lfs"
 )
 
@@ -138,4 +140,86 @@ func putLFS(t *testing.T, repo, oid string, content []byte) {
 func sha256hex(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
+}
+
+// A push must not land while a purge drops unreachable objects: it could
+// make an old object reachable again after gc decided it was garbage.
+func TestPurgeHoldsOffPushes(t *testing.T) {
+	mark := t.TempDir()
+	wrapper := filepath.Join(t.TempDir(), "git")
+	os.WriteFile(wrapper, []byte(`#!/bin/sh
+case " $* " in *" gc "*)
+  touch `+mark+`/started
+  while [ ! -f `+mark+`/go ]; do sleep 0.05; done ;;
+esac
+exec git "$@"
+`), 0o755)
+	e := newEnv(t, func(c *config.Config) { c.Git.Binary = wrapper })
+	var dev client.Token
+	e.do(http.MethodPost, "/api/tokens", map[string]any{"name": "dev", "scopes": []string{"create"}}, &dev)
+	hub := e.hubURL(dev.Token, "acme/busy")
+	work := filepath.Join(t.TempDir(), "work")
+	e.run("", "init", "-q", "-b", "main", work)
+	e.commit(work, "a.txt", "1\n")
+	e.run(work, "push", "-q", hub, "main")
+	e.commit(work, "a.txt", "2\n")
+	e.run(work, "push", "-q", hub, "main")
+	e.run(work, "reset", "-q", "--hard", "HEAD~1")
+	e.run(work, "push", "-q", "--force", hub, "main")
+
+	purged := make(chan error, 1)
+	go func() {
+		purged <- e.api.Do(context.Background(), http.MethodPost, "/api/repos/acme/busy/backups/purge", map[string]any{"all": true}, nil)
+	}()
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(mark, "started")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("purge did not reach gc")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	e.commit(work, "b.txt", "during purge\n")
+	out, err := gitCmd(work, "push", hub, "main")
+	if err == nil {
+		t.Fatalf("a push landed during the purge:\n%s", out)
+	}
+	mustContain(t, out, "maintenance in progress")
+	os.WriteFile(filepath.Join(mark, "go"), nil, 0o644)
+	if err := <-purged; err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	e.run(work, "push", "-q", hub, "main") // reopened afterwards
+}
+
+func TestRestoreTagBackup(t *testing.T) {
+	e := newEnv(t)
+	var dev client.Token
+	e.do(http.MethodPost, "/api/tokens", map[string]any{"name": "dev", "scopes": []string{"create"}}, &dev)
+	hub := e.hubURL(dev.Token, "acme/tags")
+	work := filepath.Join(t.TempDir(), "work")
+	e.run("", "init", "-q", "-b", "main", work)
+	first := e.commit(work, "a.txt", "1\n")
+	e.run(work, "tag", "-a", "-m", "release", "v1")
+	e.run(work, "push", "-q", hub, "main", "v1")
+	e.commit(work, "a.txt", "2\n")
+	e.run(work, "tag", "-f", "-a", "-m", "moved", "v1")
+	e.run(work, "push", "-q", "--force", hub, "main", "v1")
+
+	var list []backupEntry
+	e.do(http.MethodGet, "/api/repos/acme/tags/backups", nil, &list)
+	if len(list) != 1 || list[0].Original != "refs/tags/v1" {
+		t.Fatalf("backups: %+v", list)
+	}
+	var res struct{ Branch, SHA string }
+	e.do(http.MethodPost, "/api/repos/acme/tags/backups/restore", map[string]any{"backup": list[0].Ref, "branch": "old-v1"}, &res)
+	if res.SHA != first || e.refs(e.hubRepo("acme/tags"))["refs/heads/old-v1"] != first {
+		t.Fatalf("restore of a tag backup: %+v, want commit %s", res, first)
+	}
+	err := e.api.Do(t.Context(), http.MethodPost, "/api/repos/acme/tags/backups/restore", map[string]any{"backup": list[0].Ref, "branch": "old-v1"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("restore over an existing branch: %v", err)
+	}
 }

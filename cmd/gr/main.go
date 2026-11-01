@@ -20,6 +20,7 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+	"unicode"
 
 	"github.com/spf13/cobra"
 
@@ -901,8 +902,23 @@ func runsCmd() *cobra.Command {
 	return c
 }
 
+// oneLine makes server-provided text (commit subjects, audit details) safe
+// for a table row: newlines become spaces, other control and formatting
+// characters (terminal escapes, bidi overrides) are shown escaped.
 func oneLine(s string) string {
 	s = strings.ReplaceAll(strings.TrimSpace(s), "\n", " ")
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r == '\t':
+			b.WriteByte(' ')
+		case unicode.IsControl(r) || unicode.Is(unicode.Cf, r):
+			fmt.Fprintf(&b, "\\u%04x", r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	s = b.String()
 	if r := []rune(s); len(r) > 120 {
 		s = string(r[:120]) + "…"
 	}
@@ -1386,11 +1402,17 @@ Entries are kept for audit.retention (default 365 days).`,
 				if e.Status != 0 {
 					status = strconv.Itoa(e.Status)
 				}
-				fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", e.ID, e.At.Local().Format("2006-01-02 15:04:05"), e.Actor, e.Via, orDash(e.ClientAddr), what, status, oneLine(e.Detail))
+				fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", e.ID, e.At.Local().Format("2006-01-02 15:04:05"), oneLine(e.Actor), oneLine(e.Via), orDash(oneLine(e.ClientAddr)), oneLine(what), status, oneLine(e.Detail))
 			}
 			w.Flush()
 			if page.Next != 0 {
-				fmt.Printf("\nolder entries: gr audit --before %d\n", page.Next)
+				more := fmt.Sprintf("gr audit --before %d -n %d", page.Next, limit)
+				for _, f := range [][2]string{{"repo", repo}, {"actor", actor}, {"action", action}} {
+					if f[1] != "" {
+						more += fmt.Sprintf(" --%s %q", f[0], f[1])
+					}
+				}
+				fmt.Printf("\nolder entries: %s\n", more)
 			}
 			return nil
 		},

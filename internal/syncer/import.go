@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -45,26 +44,11 @@ type ImportResult struct {
 // Import holds the repository's sync lease, so it never interleaves with a
 // sync run. Afterwards a sync of the remaining mirrors is queued.
 func (m *Manager) Import(ctx context.Context, repo *store.Repo, rem *store.Remote, force bool) (*ImportResult, error) {
-	leaseName := "repo:" + strconv.FormatInt(repo.ID, 10)
-	deadline := time.Now().Add(2 * time.Minute)
-	for {
-		ok, err := m.store.AcquireLease(ctx, leaseName, m.holder+"-import", m.opts.PushTimeout.Milliseconds()+leaseTTL.Milliseconds())
-		if err != nil {
-			return nil, err
-		}
-		if ok {
-			break
-		}
-		if time.Now().After(deadline) {
-			return nil, errors.New("a sync of this repository is running; try again shortly")
-		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(time.Second):
-		}
+	release, err := m.holdLease(ctx, repo.ID, "import")
+	if err != nil {
+		return nil, err
 	}
-	defer m.store.ReleaseLease(context.Background(), leaseName, m.holder+"-import")
+	defer release()
 
 	ctx, cancel := context.WithTimeout(ctx, m.opts.PushTimeout)
 	defer cancel()

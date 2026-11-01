@@ -142,7 +142,9 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*Server, error) {
 	}
 	s.reg = &registry.Registry{Store: st, Git: s.git, ReposDir: cfg.ReposDir(), TrashDir: cfg.TrashDir()}
 	s.notify = notify.New(st, box, log)
+	gate := &gitserve.Gate{}
 	s.mgr = syncer.New(st, s.git, box, s.reg, log, syncer.Options{
+		Quiesce:            gate.Maintain,
 		Workers:            cfg.Sync.Workers,
 		PushTimeout:        cfg.Sync.PushTimeout.D(),
 		RetryBase:          cfg.Sync.RetryBase.D(),
@@ -173,6 +175,7 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*Server, error) {
 		PublicURL:       cfg.PublicURL,
 		Git:             s.git,
 		TrustedProxies:  cfg.TrustedProxyPrefixes(),
+		Gate:            gate,
 	}
 	if cfg.Bundles.Enabled {
 		s.bundles = &bundles.Manager{Dir: cfg.BundlesDir(), Git: s.git, Interval: cfg.Bundles.Interval.D(), MinSize: int64(cfg.Bundles.MinSize), Log: log}

@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/qwq-inc/gitrepo/internal/gitexec"
@@ -102,16 +103,28 @@ func (m *Manager) RestoreBackup(ctx context.Context, repo *store.Repo, backupRef
 	if err != nil {
 		return "", err
 	}
-	sha, ok := refs[backupRef]
+	obj, ok := refs[backupRef]
 	if !ok {
 		return "", ErrNoSuchBackup
 	}
 	if _, err := m.git.Run(ctx, "", "check-ref-format", "--branch", branch); err != nil || strings.HasPrefix(branch, "-") {
 		return "", fmt.Errorf("invalid branch name %q", branch)
 	}
+	// A backed-up annotated tag points at a tag object; a branch needs the
+	// commit it tags.
+	out, err := m.git.Run(ctx, repoPath, "rev-parse", "--verify", "--quiet", obj+"^{commit}")
+	if err != nil {
+		return "", fmt.Errorf("backup %s does not point to a commit", backupRef)
+	}
+	sha := strings.TrimSpace(string(out))
 	target := "refs/heads/" + branch
+	if existing, err := m.git.ForEachRef(ctx, repoPath, target); err == nil {
+		if _, taken := existing[target]; taken {
+			return "", fmt.Errorf("branch %s already exists", branch)
+		}
+	}
 	if err := m.git.UpdateRefs(ctx, repoPath, []string{"create " + target + " " + sha}); err != nil {
-		return "", fmt.Errorf("branch %s already exists", branch)
+		return "", fmt.Errorf("create branch %s: %w", branch, err)
 	}
 	m.Enqueue(repo.ID, Request{Trigger: TriggerManual})
 	return sha, nil
@@ -128,15 +141,28 @@ type PurgeResult struct {
 // purged commits can no longer be fetched even by SHA. With purgeLFS, LFS
 // objects no ref references any more are deleted too.
 //
-// It holds the repository's sync lease. Objects younger than five minutes
-// are kept: a push that is being accepted right now may not have published
-// its refs yet.
+// It holds the repository's sync lease (no sync or import runs) and, through
+// Options.Quiesce, keeps pushes out while it runs. Objects younger than five
+// minutes are kept as a further margin, e.g. LFS uploads for a push that has
+// not started yet.
 func (m *Manager) PurgeBackups(ctx context.Context, repo *store.Repo, refs []string, purgeLFS bool) (*PurgeResult, error) {
 	release, err := m.holdLease(ctx, repo.ID, "purge")
 	if err != nil {
 		return nil, err
 	}
 	defer release()
+	// No push may run while unreachable objects are dropped: a push can
+	// make an old object (or LFS object) reachable again after gc or the
+	// LFS walk has decided it is garbage.
+	if m.opts.Quiesce != nil {
+		qctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		reopen, err := m.opts.Quiesce(qctx, repo.ID)
+		cancel()
+		if err != nil {
+			return nil, err
+		}
+		defer reopen()
+	}
 	repoPath := m.reg.Path(repo.Slug)
 	existing, err := m.git.ForEachRef(ctx, repoPath, "refs/backup/")
 	if err != nil {
@@ -215,18 +241,42 @@ func (m *Manager) pruneLFS(ctx context.Context, repoPath string) (int, error) {
 }
 
 // holdLease takes the repository's sync lease for a maintenance task,
-// waiting up to two minutes for a running sync.
+// waiting up to two minutes for a running sync. Like a sync run, it holds a
+// short lease and renews it until released, so a long task (gc of a large
+// repository) keeps it and a crashed process blocks the repository for at
+// most leaseTTL.
 func (m *Manager) holdLease(ctx context.Context, repoID int64, what string) (func(), error) {
 	name := "repo:" + strconv.FormatInt(repoID, 10)
 	holder := m.holder + "-" + what
 	deadline := time.Now().Add(2 * time.Minute)
 	for {
-		ok, err := m.store.AcquireLease(ctx, name, holder, m.opts.PushTimeout.Milliseconds()+leaseTTL.Milliseconds())
+		ok, err := m.store.AcquireLease(ctx, name, holder, leaseTTL.Milliseconds())
 		if err != nil {
 			return nil, err
 		}
 		if ok {
-			return func() { m.store.ReleaseLease(context.Background(), name, holder) }, nil
+			stop := make(chan struct{})
+			go func() {
+				t := time.NewTicker(leaseTTL / 3)
+				defer t.Stop()
+				for {
+					select {
+					case <-stop:
+						return
+					case <-t.C:
+						if _, err := m.store.AcquireLease(context.Background(), name, holder, leaseTTL.Milliseconds()); err != nil {
+							m.log.Warn("renew lease", "lease", name, "task", what, "err", err)
+						}
+					}
+				}
+			}()
+			var once sync.Once
+			return func() {
+				once.Do(func() {
+					close(stop)
+					m.store.ReleaseLease(context.Background(), name, holder)
+				})
+			}, nil
 		}
 		if time.Now().After(deadline) {
 			return nil, errors.New("a sync of this repository is running; try again shortly")

@@ -476,6 +476,13 @@ func (s *Server) exec(ctx context.Context, p *auth.Principal, ch ssh.Channel, cm
 		return 0
 	}
 
+	if verb == "git-receive-pack" && s.Git.Gate != nil {
+		done, err := s.Git.Gate.BeginPush(repo.ID)
+		if err != nil {
+			return fail("%v", err)
+		}
+		defer done()
+	}
 	env := append([]string{"PATH=" + os.Getenv("PATH")}, s.Git.GitEnv(ctx, repo, p, write)...)
 	clientHost, _ := ctx.Value(clientKey{}).(string)
 	env = append(env, githooks.EnvTransport+"=ssh", githooks.EnvClientAddr+"="+clientHost)

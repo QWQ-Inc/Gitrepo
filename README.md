@@ -149,12 +149,13 @@ remote: gitrepo:   [diverged] gitlab:acme-group/demo  refs/heads/main
 
 ```bash
 gr backup list acme/demo                                       # 时间、来源、原分支、提交、到期
-gr backup restore acme/demo refs/backup/<时间>/refs/heads/main  # 恢复成新分支 restore/main-<时间>，也会同步到镜像
+gr backup restore acme/demo refs/backup/<时间>/refs/heads/main  # 恢复成新分支 restore/main-<时间>，也会同步到镜像（标签的备份恢复成它指向的提交）
 gr backup purge acme/demo --all --lfs --yes                     # 彻底清除
 ```
 
 **推送了密钥怎么办**：先强推去掉它，再执行 `gr backup purge … --lfs`。清除会删除备份，并把只被备份引用的提交和 LFS 文件从 Hub 上彻底删掉（`git gc`），此后按 SHA 也取不回来。几点注意：
-- 最近 5 分钟内写入的内容会被保留，以免误删正在进行的 push；
+- 清除期间这个仓库的 push 会被拒绝，提示稍后重试：push 可能让一个正要被删除的旧对象重新被引用。清除会先等正在进行的 push 结束，大仓库的 gc 可能需要几分钟；
+- 最近 5 分钟内写入的内容会被保留，例如为下一次 push 刚上传的 LFS 文件；
 - 镜像平台上的副本要在各平台上自行处理；
 - 无论如何都要轮换泄露的密钥。
 

@@ -17,6 +17,8 @@ package snapshot
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -128,21 +130,22 @@ func backupRepo(ctx context.Context, g *gitexec.Git, repoPath, dest, slug string
 	if head, err := g.SymbolicRef(ctx, repoPath); err == nil {
 		e.Head = head
 	}
-	refs, err := g.ForEachRef(ctx, repoPath)
-	if err != nil {
-		return nil, err
-	}
-	e.Refs = len(refs)
 	base := filepath.Join(dest, "repos", filepath.FromSlash(slug))
 	if err := os.MkdirAll(filepath.Dir(base), 0o700); err != nil {
 		return nil, err
 	}
-	if len(refs) > 0 {
-		// The bundle records the refs it read and packs exactly what they
-		// reach, so a push during the backup cannot make it inconsistent.
-		if _, err := g.Run(ctx, repoPath, "bundle", "create", "--quiet", base+".bundle", "--all"); err != nil {
-			return nil, fmt.Errorf("git bundle: %w", err)
-		}
+	refs, err := bundleRepo(ctx, g, repoPath, base+".bundle")
+	if errors.Is(err, fs.ErrNotExist) {
+		e.Missing = true // deleted while the snapshot was taken
+		return e, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	// The count comes from the bundle itself, not from a separate listing
+	// that a concurrent push could make disagree with it.
+	e.Refs = refs
+	if refs > 0 {
 		e.Bundle = filepath.ToSlash(filepath.Join("repos", slug+".bundle"))
 	}
 	// LFS objects are copied after the bundle: the hub only accepts a push
@@ -154,6 +157,47 @@ func backupRepo(ctx context.Context, g *gitexec.Git, repoPath, dest, slug string
 	}
 	e.LFSObjects, e.LFSBytes = n, size
 	return e, nil
+}
+
+// bundleRepo writes `git bundle --all` of the repository and returns the
+// number of refs in it (0, and no file, for an empty repository). The
+// bundle records the refs it read and packs exactly what they reach, so a
+// push during the backup cannot make it inconsistent. A concurrent purge can
+// remove objects of refs it already listed; that attempt fails and is
+// retried.
+func bundleRepo(ctx context.Context, g *gitexec.Git, repoPath, file string) (int, error) {
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		if _, statErr := os.Stat(filepath.Join(repoPath, "HEAD")); statErr != nil {
+			return 0, fs.ErrNotExist
+		}
+		var refs map[string]string
+		if refs, err = g.ForEachRef(ctx, repoPath); err != nil {
+			continue
+		}
+		if len(refs) == 0 {
+			return 0, nil
+		}
+		os.Remove(file)
+		if _, err = g.Run(ctx, repoPath, "bundle", "create", "--quiet", file, "--all"); err != nil {
+			continue
+		}
+		var out []byte
+		if out, err = g.Run(ctx, repoPath, "bundle", "list-heads", file); err != nil {
+			continue
+		}
+		n := 0
+		for _, line := range strings.Split(string(out), "\n") {
+			if _, ref, ok := strings.Cut(strings.TrimSpace(line), " "); ok && strings.HasPrefix(ref, "refs/") {
+				n++
+			}
+		}
+		return n, nil
+	}
+	if _, statErr := os.Stat(filepath.Join(repoPath, "HEAD")); statErr != nil {
+		return 0, fs.ErrNotExist
+	}
+	return 0, fmt.Errorf("git bundle: %w", err)
 }
 
 // Restore recreates an instance from the snapshot at src in cfg's data
@@ -211,7 +255,14 @@ func Restore(ctx context.Context, cfg *config.Config, g *gitexec.Git, src string
 		os.Remove(tmp)
 		return nil, fmt.Errorf("database snapshot: %w", err)
 	}
+	// Leases held by the original instance's syncs mean nothing here and
+	// would block syncs after the first start.
+	err = st.ClearLeases(ctx)
 	st.Close()
+	if err != nil {
+		os.Remove(tmp)
+		return nil, err
+	}
 	if err := os.Rename(tmp, cfg.DBPath()); err != nil {
 		return nil, err
 	}
@@ -315,16 +366,21 @@ func copyLFS(repoPath, dest string) (int, int64, error) {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() || !lfs.ValidOID(d.Name()) {
+		if !d.Type().IsRegular() || !lfs.ValidOID(d.Name()) {
 			return nil
 		}
 		oid := d.Name()
 		target := filepath.Join(dest, oid[0:2], oid[2:4], oid)
 		info, err := d.Info()
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil // removed by a purge meanwhile: no longer referenced
+		}
 		if err != nil {
 			return err
 		}
-		if err := linkOrCopy(path, target); err != nil {
+		if err := linkOrCopy(path, target); errors.Is(err, fs.ErrNotExist) {
+			return nil
+		} else if err != nil {
 			return err
 		}
 		n++
@@ -346,18 +402,53 @@ func copyLFSBack(src, repoPath string) (int, int64, error) {
 		if d.IsDir() || !lfs.ValidOID(d.Name()) {
 			return nil
 		}
-		info, err := d.Info()
+		// Only regular files whose content matches their name are taken:
+		// a snapshot is data from outside, and a symlink here would make
+		// the LFS endpoint serve any file on the server.
+		if !d.Type().IsRegular() {
+			return fmt.Errorf("%s is not a regular file", path)
+		}
+		written, err := copyVerified(path, lfs.ObjectPath(repoPath, d.Name()), d.Name())
 		if err != nil {
 			return err
 		}
-		if err := linkOrCopy(path, lfs.ObjectPath(repoPath, d.Name())); err != nil {
-			return err
-		}
 		n++
-		size += info.Size()
+		size += written
 		return nil
 	})
 	return n, size, err
+}
+
+// copyVerified copies an LFS object and checks its SHA-256 against oid.
+func copyVerified(src, dst, oid string) (int64, error) {
+	in, err := os.Open(src)
+	if err != nil {
+		return 0, err
+	}
+	defer in.Close()
+	if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
+		return 0, err
+	}
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o640)
+	if err != nil {
+		return 0, err
+	}
+	h := sha256.New()
+	written, err := io.Copy(io.MultiWriter(out, h), in)
+	if err == nil {
+		err = out.Sync()
+	}
+	if cerr := out.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil && hex.EncodeToString(h.Sum(nil)) != oid {
+		err = fmt.Errorf("%s: content does not match its object id", src)
+	}
+	if err != nil {
+		os.Remove(dst)
+		return 0, err
+	}
+	return written, nil
 }
 
 func linkOrCopy(src, dst string) error {

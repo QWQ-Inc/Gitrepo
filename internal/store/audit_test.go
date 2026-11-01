@@ -61,3 +61,22 @@ func TestAuditStore(t *testing.T) {
 		t.Errorf("after prune: %d", n)
 	}
 }
+
+func TestCleanText(t *testing.T) {
+	for in, want := range map[string]string{
+		"plain → text":              "plain → text",
+		"a\nb\tc":                   `a\x0ab\x09c`,
+		"\x1b[2Kgone":               `\x1b[2Kgone`,
+		"rtl\u202eevil":             `rtl\u202eevil`,
+		"bad\xffbyte":               `bad\xffbyte`,
+		"del\x7f":                   `del\x7f`,
+		strings.Repeat("é", 10)[:5]: `éé\xc3`,
+	} {
+		if got := cleanText(in, 1000); got != want {
+			t.Errorf("cleanText(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if got := cleanText(strings.Repeat("x", 600), 512); len(got) != 512 || !strings.HasSuffix(got, "...") {
+		t.Errorf("cap: %d %q", len(got), got[len(got)-5:])
+	}
+}

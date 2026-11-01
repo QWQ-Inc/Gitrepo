@@ -92,6 +92,20 @@ func TestAuditLog(t *testing.T) {
 		t.Fatalf("create binding: %s", resp.Status)
 	}
 
+	// A refused call whose path carries a newline and a terminal escape,
+	// trying to forge an extra row in `gr audit`.
+	forge, _ := http.NewRequest(http.MethodPost, base+"/api/repos/x%0A99%09admin/y%1b%5B2K/sync", nil)
+	forge.Header.Set("Authorization", "Bearer "+dev.Token)
+	if resp, err := http.DefaultClient.Do(forge); err != nil {
+		t.Fatal(err)
+	} else {
+		resp.Body.Close()
+	}
+	// An import that fails after the handler described it.
+	if err := e.api.Do(t.Context(), http.MethodPost, "/api/repos/acme/ghost/import", map[string]any{"target": "mirror-a"}, nil); err == nil {
+		t.Fatal("import of a missing repository succeeded")
+	}
+
 	var all auditPage
 	e.do(http.MethodGet, "/api/audit", nil, &all)
 	for i := 1; i < len(all.Entries); i++ {
@@ -143,7 +157,7 @@ func TestAuditLog(t *testing.T) {
 	})
 
 	t.Run("refused calls are recorded, unauthenticated calls and reads are not", func(t *testing.T) {
-		denied := all.find(func(r auditRow) bool { return r.Actor == "dev" && r.Via == "api" })
+		denied := all.find(func(r auditRow) bool { return r.Actor == "dev" && r.Via == "api" && r.Path == "/api/targets/mirror-a" })
 		if denied == nil || denied.Status != 403 || denied.Action != "DELETE /api/targets/{name}" || denied.Detail != "error: admin scope required" {
 			t.Fatalf("refused call: %+v", denied)
 		}
@@ -159,10 +173,24 @@ func TestAuditLog(t *testing.T) {
 		}
 	})
 
+	t.Run("control characters from the request are stored escaped", func(t *testing.T) {
+		f := all.find(func(r auditRow) bool { return strings.Contains(r.Path, "/sync") })
+		if f == nil || strings.ContainsAny(f.Path+f.Repo, "\n\t\x1b") || !strings.Contains(f.Path, `x\x0a99\x09admin/y\x1b[2K`) {
+			t.Fatalf("forged path: %+v", f)
+		}
+	})
+
+	t.Run("a failure keeps both the description and the reason", func(t *testing.T) {
+		imp := all.find(func(r auditRow) bool { return r.Action == "POST /api/repos/{org}/{name}/import" })
+		if imp == nil || imp.Status < 400 || !strings.HasPrefix(imp.Detail, "from mirror-a:ghost") || !strings.Contains(imp.Detail, "; error: ") {
+			t.Fatalf("failed import: %+v", imp)
+		}
+	})
+
 	t.Run("filters and pagination", func(t *testing.T) {
 		var mine auditPage
 		e.do(http.MethodGet, "/api/audit?actor=dev", nil, &mine)
-		if len(mine.Entries) != 4 {
+		if len(mine.Entries) != 5 {
 			t.Fatalf("actor filter: %+v", mine.Entries)
 		}
 		var repo auditPage

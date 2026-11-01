@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"net/url"
@@ -25,4 +26,11 @@ func SnapshotTo(src, dest string) error {
 		return fmt.Errorf("snapshot database: %w", err)
 	}
 	return os.Chmod(dest, 0o600)
+}
+
+// ClearLeases drops all leases, e.g. after restoring a database copied from
+// another (running) instance.
+func (s *Store) ClearLeases(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM leases`)
+	return err
 }

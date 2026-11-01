@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -37,18 +39,20 @@ type AuditFilter struct {
 
 const maxAuditDetail = 4096
 
-// AddAudit appends an entry.
+// AddAudit appends an entry. Fields are made safe to print first: some
+// come from the request (the path of a refused call can hold anything), and
+// the log is read in terminals.
 func (s *Store) AddAudit(ctx context.Context, e *AuditEntry) error {
 	if e.At == 0 {
 		e.At = Now()
 	}
-	if len(e.Detail) > maxAuditDetail {
-		cut := maxAuditDetail - 3
-		for cut > 0 && !utf8.RuneStart(e.Detail[cut]) {
-			cut--
-		}
-		e.Detail = e.Detail[:cut] + "..."
-	}
+	e.Actor = cleanText(e.Actor, 128)
+	e.Via = cleanText(e.Via, 16)
+	e.ClientAddr = cleanText(e.ClientAddr, 64)
+	e.Action = cleanText(e.Action, 256)
+	e.Path = cleanText(e.Path, 512)
+	e.Repo = cleanText(e.Repo, 256)
+	e.Detail = cleanText(e.Detail, maxAuditDetail)
 	res, err := s.db.ExecContext(ctx, `INSERT INTO audit_log (at, actor, via, client_addr, action, path, repo, status, detail)
 VALUES (?,?,?,?,?,?,?,?,?)`, e.At, e.Actor, e.Via, e.ClientAddr, e.Action, e.Path, e.Repo, e.Status, e.Detail)
 	if err != nil {
@@ -109,3 +113,33 @@ func (s *Store) PruneAudit(ctx context.Context, before int64) (int64, error) {
 }
 
 var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
+// cleanText escapes control and formatting characters (newlines, terminal
+// escapes, bidi overrides) and invalid UTF-8, and caps the length in bytes
+// at a character boundary.
+func cleanText(s string, max int) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		switch {
+		case r == utf8.RuneError && size == 1:
+			fmt.Fprintf(&b, `\x%02x`, s[i])
+		case r < 0x20 || r == 0x7f:
+			fmt.Fprintf(&b, `\x%02x`, r)
+		case unicode.IsControl(r) || unicode.Is(unicode.Cf, r):
+			fmt.Fprintf(&b, `\u%04x`, r)
+		default:
+			b.WriteRune(r)
+		}
+		i += size
+	}
+	out := b.String()
+	if len(out) > max {
+		cut := max - 3
+		for cut > 0 && !utf8.RuneStart(out[cut]) {
+			cut--
+		}
+		out = out[:cut] + "..."
+	}
+	return out
+}

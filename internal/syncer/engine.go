@@ -630,10 +630,9 @@ func BackupHubUpdates(ctx context.Context, g *gitexec.Git, repoPath string, upda
 			refs = append(refs, u.Ref)
 		}
 	}
-	if err := g.UpdateRefs(ctx, repoPath, lines); err != nil {
-		return nil, err
-	}
-	return refs, nil
+	// The overwritten refs are returned even when the backup failed: the
+	// caller still reports them as forced.
+	return refs, g.UpdateRefs(ctx, repoPath, lines)
 }
 
 // PruneBackups deletes backup refs older than retention.

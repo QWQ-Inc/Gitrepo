@@ -59,6 +59,8 @@ type Server struct {
 	Git *gitexec.Git
 	// TrustedProxies may set X-Forwarded-For (see ClientAddr).
 	TrustedProxies []netip.Prefix
+	// Gate refuses pushes while a repository is under maintenance.
+	Gate *Gate
 }
 
 const (
@@ -135,6 +137,23 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if write && s.Gate != nil {
+		// Refusing at info/refs lets git show the reason to the user; the
+		// POST is where the push actually happens, so it registers.
+		if rest == "info/refs" {
+			if s.Gate.Maintaining(repo.ID) {
+				http.Error(w, "gitrepo: "+ErrMaintenance.Error(), http.StatusServiceUnavailable)
+				return
+			}
+		} else {
+			done, err := s.Gate.BeginPush(repo.ID)
+			if err != nil {
+				http.Error(w, "gitrepo: "+err.Error(), http.StatusServiceUnavailable)
+				return
+			}
+			defer done()
+		}
+	}
 	env := append([]string{
 		"GIT_PROJECT_ROOT=" + s.ReposDir,
 		"GIT_HTTP_EXPORT_ALL=1",

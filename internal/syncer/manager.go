@@ -70,6 +70,9 @@ type Options struct {
 	PublicURL string
 	// Notify receives events (may be nil).
 	Notify func(notify.Event)
+	// Quiesce, when set, refuses new pushes to a repository and waits for
+	// running ones; a backup purge holds it around git gc and LFS cleanup.
+	Quiesce func(ctx context.Context, repoID int64) (release func(), err error)
 }
 
 type Manager struct {
