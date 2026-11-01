@@ -9,13 +9,17 @@ func TestProtectRules(t *testing.T) {
 	const zero = "0000000000000000000000000000000000000000"
 	// "ff" pairs are fast-forwards; everything else is a rewrite.
 	isAncestor = func(old, new string) (bool, error) { return old+new == "aaaabbbb", nil }
-	defer func() { isAncestor = defaultIsAncestor }()
+	// Backups: what a deleted ref pointed to.
+	backups := map[string]string{"refs/heads/develop": "aaaa", "refs/tags/v0.9": "aaaa"}
+	lastBackup = func(ref string) (string, bool, error) { v, ok := backups[ref]; return v, ok, nil }
+	defer func() { isAncestor, lastBackup = defaultIsAncestor, defaultLastBackup }()
 	a, b, c := "aaaa", "bbbb", "cccc"
 
 	rules := []ProtectRule{
 		{Ref: "main", DenyForce: true, DenyDelete: true},
 		{Ref: "release/*", DenyForce: true},
 		{Ref: "refs/tags/v*", DenyForce: true, DenyDelete: true},
+		{Ref: "develop", DenyForce: true},
 	}
 	cases := []struct {
 		u    RefUpdate
@@ -35,6 +39,12 @@ func TestProtectRules(t *testing.T) {
 		{RefUpdate{Old: zero, New: a, Ref: "refs/tags/v2.0"}, ""},
 		{RefUpdate{Old: a, New: c, Ref: "refs/tags/nightly"}, ""},
 		{RefUpdate{Old: a, New: a, Ref: "refs/heads/main"}, ""},
+		// Deleted, then re-created: only with its earlier history.
+		{RefUpdate{Old: a, New: zero, Ref: "refs/heads/develop"}, ""},
+		{RefUpdate{Old: zero, New: b, Ref: "refs/heads/develop"}, ""},
+		{RefUpdate{Old: zero, New: c, Ref: "refs/heads/develop"}, "without its earlier history"},
+		{RefUpdate{Old: zero, New: a, Ref: "refs/tags/v0.9"}, ""},
+		{RefUpdate{Old: zero, New: b, Ref: "refs/tags/v0.9"}, "cannot be re-created on another commit"},
 	}
 	for _, c := range cases {
 		got := strings.Join(checkProtected(rules, []RefUpdate{c.u}), "; ")

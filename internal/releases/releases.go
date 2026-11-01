@@ -494,6 +494,9 @@ func (m *Manager) publishTo(parent context.Context, repo *store.Repo, rel *store
 		res.State, res.Error = store.RelFailed, err.Error()
 		return res
 	}
+	// Results are recorded only while the remote still points where this
+	// work is done: a move (Store.RelocateRemote) makes them meaningless.
+	st.RemoteGen = rem.LocationGen
 	save := func(state, msg string) Result {
 		st.State, st.LastError = state, msg
 		switch state {
@@ -722,6 +725,7 @@ func (m *Manager) Delete(ctx context.Context, repo *store.Repo, rel *store.Relea
 			if err != nil {
 				continue
 			}
+			st.RemoteGen = rem.LocationGen
 			state, err := m.deleteOn(ctx, repo, rel, rem, st)
 			res := Result{RemoteID: rem.ID, Mirror: rem.Label(), State: state}
 			if err != nil {

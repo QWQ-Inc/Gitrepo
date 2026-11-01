@@ -79,9 +79,36 @@ func defaultIsAncestor(old, new string) (bool, error) {
 	}
 }
 
+// lastBackup returns the newest hub backup of ref (refs/backup/<stamp>/<ref>,
+// not a mirror's under refs/backup/<stamp>/remotes/): the value the ref had
+// when it was last overwritten or deleted.
+var lastBackup = defaultLastBackup
+
+func defaultLastBackup(ref string) (string, bool, error) {
+	out, err := exec.Command(gitBin(), "for-each-ref", "--format=%(objectname) %(refname)", "refs/backup/").Output()
+	if err != nil {
+		return "", false, err
+	}
+	best, sha := "", ""
+	for _, line := range strings.Split(string(out), "\n") {
+		obj, name, ok := strings.Cut(line, " ")
+		if !ok {
+			continue
+		}
+		stamp, rest, ok := strings.Cut(strings.TrimPrefix(name, "refs/backup/"), "/")
+		if ok && rest == ref && stamp > best { // stamps sort by time
+			best, sha = stamp, obj
+		}
+	}
+	return sha, sha != "", nil
+}
+
 // checkProtected reports updates the rules forbid: deleting a protected
 // ref, rewriting a protected branch (not a fast-forward), or moving a
-// protected tag.
+// protected tag. Re-creating a deleted ref counts as rewriting it when the
+// new value does not contain the old one (still kept as a backup):
+// otherwise a rule that allows deletion but not force-pushes could be
+// bypassed with two pushes.
 func checkProtected(rules []ProtectRule, updates []RefUpdate) []string {
 	var problems []string
 	for _, u := range updates {
@@ -94,6 +121,21 @@ func checkProtected(rules []ProtectRule, updates []RefUpdate) []string {
 		}
 		created, deleted := gitexec.IsZero(u.Old), gitexec.IsZero(u.New)
 		switch {
+		case created && force:
+			prev, ok, err := lastBackup(u.Ref)
+			switch {
+			case err != nil:
+				problems = append(problems, fmt.Sprintf("%s: cannot check its earlier value: %v", u.Ref, err))
+			case !ok || prev == u.New:
+			case strings.HasPrefix(u.Ref, "refs/tags/"):
+				problems = append(problems, fmt.Sprintf("%s: protected on the hub; it was deleted and cannot be re-created on another commit (the tag cannot be moved)", u.Ref))
+			default:
+				if ff, err := isAncestor(prev, u.New); err != nil {
+					problems = append(problems, fmt.Sprintf("%s: cannot check whether this keeps its history: %v", u.Ref, err))
+				} else if !ff {
+					problems = append(problems, fmt.Sprintf("%s: protected on the hub; it was deleted, and re-creating it without its earlier history (%.12s) would rewrite it like a force-push", u.Ref, prev))
+				}
+			}
 		case created || u.Old == u.New:
 		case deleted:
 			if del {

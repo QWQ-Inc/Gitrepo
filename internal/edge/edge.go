@@ -24,6 +24,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -85,7 +86,7 @@ type Replica struct {
 	fills    map[string]*fill
 	fillQ    chan fillJob
 	hubSem   chan struct{}
-	missing  map[string]map[string]time.Time // slug -> oid -> expiry
+	missing  map[string]map[string]time.Time // slug -> missKey -> expiry
 	missingN int
 
 	// Tests: replace the fetch, and observe the moment between a fetch
@@ -619,7 +620,7 @@ func (r *Replica) FillLFS(ctx context.Context, repo lfs.Repo, objects []lfs.Obje
 	have := map[string]int64{}
 	var ask []lfs.Object
 	for _, o := range objects {
-		if !r.knownMissing(repo, o.OID) {
+		if !r.knownMissing(repo, o.OID, o.Size) {
 			ask = append(ask, o)
 		}
 	}
@@ -695,7 +696,7 @@ func (r *Replica) AwaitLFS(ctx context.Context, repo lfs.Repo, oid string) error
 		if stored(repo, oid) {
 			return nil
 		}
-		if r.knownMissing(repo, oid) {
+		if r.knownMissing(repo, oid, 0) {
 			return lfs.ErrNotOnHub
 		}
 		r.mu.Lock()
@@ -787,15 +788,16 @@ func (r *Replica) queryHub(ctx context.Context, repo lfs.Repo, objects []lfs.Obj
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&out); err != nil {
 		return nil, err
 	}
-	asked := map[string]bool{}
+	asked := map[string]int64{}
 	for _, o := range objects {
-		asked[o.OID] = true
+		asked[o.OID] = o.Size
 	}
 	up, _ := url.Parse(base)
 	links := map[string]hubLink{}
 	var missing []string
 	for _, o := range out.Objects {
-		if !asked[o.OID] {
+		size, ok := asked[o.OID]
+		if !ok {
 			continue
 		}
 		if d := o.Actions.Download; d != nil {
@@ -810,33 +812,38 @@ func (r *Replica) queryHub(ctx context.Context, repo lfs.Repo, objects []lfs.Obj
 			}
 			links[o.OID] = hubLink{size: o.Size, href: d.Href, header: d.Header, expires: time.Now().Add(ttl - ttl/4)}
 		} else if o.Error != nil && o.Error.Code == http.StatusNotFound {
-			missing = append(missing, o.OID)
+			missing = append(missing, missKey(o.OID, size))
 		}
 	}
 	r.markMissing(repo, missing)
 	return links, nil
 }
 
-func (r *Replica) knownMissing(repo lfs.Repo, oid string) bool {
+// missKey: a miss is remembered for the size that was asked (0 = unknown).
+// The hub answers 404 for a real object asked with a wrong size, which
+// must not make the edge refuse that object to everyone else.
+func missKey(oid string, size int64) string { return oid + "/" + strconv.FormatInt(size, 10) }
+
+func (r *Replica) knownMissing(repo lfs.Repo, oid string, size int64) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	exp, ok := r.missing[repo.Slug][oid]
+	exp, ok := r.missing[repo.Slug][missKey(oid, size)]
 	return ok && time.Now().Before(exp)
 }
 
-func (r *Replica) markMissing(repo lfs.Repo, oids []string) {
-	if len(oids) == 0 {
+func (r *Replica) markMissing(repo lfs.Repo, keys []string) {
+	if len(keys) == 0 {
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.missingN+len(oids) > maxMissing {
+	if r.missingN+len(keys) > maxMissing {
 		now := time.Now()
 		r.missingN = 0
 		for slug, m := range r.missing {
-			for oid, exp := range m {
+			for k, exp := range m {
 				if now.After(exp) {
-					delete(m, oid)
+					delete(m, k)
 				}
 			}
 			if len(m) == 0 {
@@ -844,7 +851,7 @@ func (r *Replica) markMissing(repo lfs.Repo, oids []string) {
 			}
 			r.missingN += len(m)
 		}
-		if r.missingN+len(oids) > maxMissing {
+		if r.missingN+len(keys) > maxMissing {
 			r.missing, r.missingN = map[string]map[string]time.Time{}, 0
 		}
 	}
@@ -854,11 +861,11 @@ func (r *Replica) markMissing(repo lfs.Repo, oids []string) {
 		r.missing[repo.Slug] = m
 	}
 	exp := time.Now().Add(missingTTL)
-	for _, oid := range oids {
-		if _, ok := m[oid]; !ok {
+	for _, k := range keys {
+		if _, ok := m[k]; !ok {
 			r.missingN++
 		}
-		m[oid] = exp
+		m[k] = exp
 	}
 }
 

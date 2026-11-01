@@ -3,7 +3,6 @@ package server
 import (
 	"fmt"
 	"net/http"
-	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -64,8 +63,8 @@ func (s *Server) apiCreateProtection(w http.ResponseWriter, r *http.Request) {
 	if in.Repos == "" {
 		in.Repos = "*"
 	}
-	if _, err := path.Match(in.Repos, "a/b"); err != nil || strings.ContainsAny(in.Repos, " \t\n") {
-		s.fail(w, badRequest("repos must be a repository or pattern, e.g. acme/app, acme/* or *"))
+	if err := auth.ValidateRepoPattern(in.Repos); err != nil {
+		s.fail(w, badRequest("%v", err))
 		return
 	}
 	if err := githooks.ValidateRefPattern(in.Ref); err != nil {

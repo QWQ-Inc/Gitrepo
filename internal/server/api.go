@@ -11,7 +11,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/qwq-inc/gitrepo/internal/auth"
@@ -459,13 +458,21 @@ func (s *Server) apiUpdateTarget(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// Mirrors that now point elsewhere (namespace, URL template, server
-	// changed) forget what was learnt about their old repositories first.
-	moved, err := s.relocateTargetRemotes(r.Context(), &old, t)
+	// changed) forget what was learnt about their old repositories, in the
+	// same transaction that stores the change, while no sync of those
+	// repositories runs. The update only applies if nobody changed the
+	// target meanwhile (the waits above and below can be long).
+	moved, release, err := s.leaseMovedRemotes(r.Context(), &old, t)
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
-	if err := s.store.UpdateTarget(r.Context(), t); err != nil {
+	err = s.store.UpdateTargetChecked(r.Context(), t, old.UpdatedAt, flattenIDs(moved))
+	release()
+	if errors.Is(err, store.ErrConflict) {
+		err = &apiError{status: http.StatusConflict, err: errors.New("the target was changed by someone else meanwhile; nothing was changed, reload it and try again")}
+	}
+	if err != nil {
 		s.fail(w, err)
 		return
 	}
@@ -494,46 +501,69 @@ func remoteLocation(t *store.Target, rem *store.Remote) string {
 	return u
 }
 
-// relocateTargetRemotes forgets the state of the target's remotes whose
-// location differs between old and updated (see syncer.Relocate), grouped
-// by repository; it returns them for syncing.
-func (s *Server) relocateTargetRemotes(ctx context.Context, old, updated *store.Target) (map[int64][]int64, error) {
+// movedRemotes groups by repository the target's remotes whose location
+// differs between old and updated.
+func (s *Server) movedRemotes(ctx context.Context, old, updated *store.Target) (map[int64][]int64, error) {
 	remotes, err := s.store.ListRemotesByTarget(ctx, old.ID)
 	if err != nil {
 		return nil, err
 	}
 	moved := map[int64][]int64{}
 	for _, rem := range remotes {
-		before := remoteLocation(old, rem)
-		rem.TargetNamespace = updated.Namespace
-		if remoteLocation(updated, rem) != before {
+		if remoteLocation(updated, rem) != remoteLocation(old, rem) {
 			moved[rem.RepoID] = append(moved[rem.RepoID], rem.ID)
 		}
 	}
-	var (
-		wg   sync.WaitGroup
-		mu   sync.Mutex
-		errs []error
-	)
-	sem := make(chan struct{}, 8)
-	for repoID, ids := range moved {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			if err := s.mgr.Relocate(ctx, repoID, ids, nil); err != nil {
-				mu.Lock()
-				errs = append(errs, err)
-				mu.Unlock()
-			}
-		}()
-	}
-	wg.Wait()
-	if len(errs) > 0 {
-		return nil, &apiError{status: http.StatusConflict, err: fmt.Errorf("the target was not changed: %w", errs[0])}
-	}
 	return moved, nil
+}
+
+// leaseMovedRemotes takes the sync leases of every repository with a remote
+// that the target change moves, and returns those remotes (as of when all
+// the leases are held: a remote added while waiting is included). release
+// must be called once the change is stored.
+func (s *Server) leaseMovedRemotes(ctx context.Context, old, updated *store.Target) (map[int64][]int64, func(), error) {
+	var releases []func()
+	release := func() {
+		for _, r := range releases {
+			r()
+		}
+	}
+	held := map[int64]bool{}
+	for attempt := 0; attempt < 5; attempt++ {
+		moved, err := s.movedRemotes(ctx, old, updated)
+		if err != nil {
+			release()
+			return nil, nil, err
+		}
+		var need []int64
+		for repoID := range moved {
+			if !held[repoID] {
+				need = append(need, repoID)
+			}
+		}
+		if len(need) == 0 {
+			return moved, release, nil
+		}
+		r, err := s.mgr.HoldLeases(ctx, need, "relocate")
+		if err != nil {
+			release()
+			return nil, nil, &apiError{status: http.StatusConflict, err: fmt.Errorf("the target was not changed: %w", err)}
+		}
+		releases = append(releases, r)
+		for _, id := range need {
+			held[id] = true
+		}
+	}
+	release()
+	return nil, nil, &apiError{status: http.StatusConflict, err: errors.New("the target was not changed: its mirrors keep changing; try again")}
+}
+
+func flattenIDs(m map[int64][]int64) []int64 {
+	var out []int64
+	for _, ids := range m {
+		out = append(out, ids...)
+	}
+	return out
 }
 
 func countIDs(m map[int64][]int64) int {
@@ -1127,11 +1157,6 @@ func (s *Server) apiUpdateRemote(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	rem, err := s.remoteFromPath(r, repo)
-	if err != nil {
-		s.fail(w, err)
-		return
-	}
 	var in struct {
 		Enabled      *bool   `json:"enabled"`
 		OnDivergence *string `json:"on_divergence"`
@@ -1139,6 +1164,25 @@ func (s *Server) apiUpdateRemote(w http.ResponseWriter, r *http.Request) {
 		Adopt        *bool   `json:"adopt"`
 	}
 	if err := decode(r, &in); err != nil {
+		s.fail(w, err)
+		return
+	}
+	if in.OnDivergence != nil && *in.OnDivergence != store.OnDivergenceAlert && *in.OnDivergence != store.OnDivergenceOverwrite {
+		s.fail(w, badRequest("on_divergence must be alert or overwrite"))
+		return
+	}
+	release := func() {}
+	if in.URL != nil {
+		// The remote may move: no sync of the repository may run (and learn
+		// about the old location) between reading it and storing the move.
+		if release, err = s.mgr.HoldLeases(r.Context(), []int64{repo.ID}, "relocate"); err != nil {
+			s.fail(w, &apiError{status: http.StatusConflict, err: err})
+			return
+		}
+		defer release() // releasing twice is harmless
+	}
+	rem, err := s.remoteFromPath(r, repo)
+	if err != nil {
 		s.fail(w, err)
 		return
 	}
@@ -1152,10 +1196,6 @@ func (s *Server) apiUpdateRemote(w http.ResponseWriter, r *http.Request) {
 		rem.Enabled = *in.Enabled
 	}
 	if in.OnDivergence != nil {
-		if *in.OnDivergence != store.OnDivergenceAlert && *in.OnDivergence != store.OnDivergenceOverwrite {
-			s.fail(w, badRequest("on_divergence must be alert or overwrite"))
-			return
-		}
 		rem.OnDivergence = *in.OnDivergence
 	}
 	if in.URL != nil {
@@ -1175,12 +1215,11 @@ func (s *Server) apiUpdateRemote(w http.ResponseWriter, r *http.Request) {
 		if in.Adopt == nil {
 			rem.Adopt = false
 		}
-		err = s.mgr.Relocate(r.Context(), repo.ID, []int64{rem.ID}, func() error { return s.store.UpdateRemoteConfig(r.Context(), rem) })
-		if err != nil {
-			s.fail(w, err)
-			return
-		}
-	} else if err := s.store.UpdateRemoteConfig(r.Context(), rem); err != nil {
+		err = s.store.RelocateRemote(r.Context(), rem)
+	} else {
+		err = s.store.UpdateRemoteConfig(r.Context(), rem)
+	}
+	if err != nil {
 		s.fail(w, err)
 		return
 	}
@@ -1189,6 +1228,7 @@ func (s *Server) apiUpdateRemote(w http.ResponseWriter, r *http.Request) {
 		where = "; moved to another location (what was known about the old one is forgotten)"
 	}
 	noteAudit(r, "mirror %s: enabled %t, on divergence %s, adopt %t%s", rem.Label(), rem.Enabled, rem.OnDivergence, rem.Adopt, where)
+	release() // the sync needs the lease
 	s.mgr.Enqueue(repo.ID, syncer.Request{Trigger: syncer.TriggerManual, RemoteIDs: []int64{rem.ID}})
 	w.WriteHeader(http.StatusNoContent)
 }

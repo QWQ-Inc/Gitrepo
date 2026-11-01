@@ -71,6 +71,10 @@ type ReleaseMirror struct {
 	SyncedHash  string
 	Assets      map[string]MirroredAsset
 	LastError   string
+	// RemoteGen is the remote's location generation the work was done for
+	// (Remote.LocationGen): SaveReleaseMirror records nothing when the
+	// remote has been pointed elsewhere since.
+	RemoteGen   int64
 	Failures    int
 	NextRetryAt int64
 	UpdatedAt   int64
@@ -222,11 +226,12 @@ func (s *Store) SaveReleaseMirror(ctx context.Context, m *ReleaseMirror) error {
 	}
 	assets, _ := json.Marshal(m.Assets)
 	_, err := s.db.ExecContext(ctx, `INSERT INTO release_mirrors (release_id, remote_id, remote_release, state, synced_hash, assets, last_error, failures, next_retry_at, updated_at, adopted, creating, attempt_hash)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+SELECT ?,?,?,?,?,?,?,?,?,?,?,?,? WHERE (SELECT location_gen FROM remotes WHERE id=?) = ?
 ON CONFLICT (release_id, remote_id) DO UPDATE SET remote_release=excluded.remote_release, state=excluded.state, synced_hash=excluded.synced_hash,
 assets=excluded.assets, last_error=excluded.last_error, failures=excluded.failures, next_retry_at=excluded.next_retry_at, updated_at=excluded.updated_at,
 adopted=excluded.adopted, creating=excluded.creating, attempt_hash=excluded.attempt_hash`,
-		m.ReleaseID, m.RemoteID, m.RemoteRelease, m.State, m.SyncedHash, string(assets), m.LastError, m.Failures, m.NextRetryAt, m.UpdatedAt, b2i(m.Adopted), b2i(m.Creating), m.AttemptHash)
+		m.ReleaseID, m.RemoteID, m.RemoteRelease, m.State, m.SyncedHash, string(assets), m.LastError, m.Failures, m.NextRetryAt, m.UpdatedAt, b2i(m.Adopted), b2i(m.Creating), m.AttemptHash,
+		m.RemoteID, m.RemoteGen)
 	return wrapErr(err)
 }
 

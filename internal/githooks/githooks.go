@@ -63,18 +63,46 @@ type AskpassRequest struct {
 	Prompt string `json:"prompt"`
 }
 
+// readUpdates parses git's "<old> <new> <ref>" lines. The fields are
+// separated by exactly one ASCII space; ref names may contain other
+// (Unicode) spaces, so splitting on any white space would drop such
+// updates from every check. A line that does not parse is an error (the
+// valid ones are still returned).
 func readUpdates(r io.Reader) ([]RefUpdate, error) {
 	var out []RefUpdate
+	var bad error
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64*1024), 1<<20)
 	for sc.Scan() {
-		f := strings.Fields(sc.Text())
-		if len(f) != 3 {
+		line := sc.Text()
+		if line == "" {
+			continue
+		}
+		f := strings.SplitN(line, " ", 3)
+		if len(f) != 3 || !isObjectID(f[0]) || !isObjectID(f[1]) || f[2] == "" {
+			if bad == nil {
+				bad = fmt.Errorf("unexpected ref update line %q", line)
+			}
 			continue
 		}
 		out = append(out, RefUpdate{Old: f[0], New: f[1], Ref: f[2]})
 	}
-	return out, sc.Err()
+	if err := sc.Err(); err != nil {
+		return out, err
+	}
+	return out, bad
+}
+
+func isObjectID(s string) bool {
+	if len(s) != 40 && len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func say(w io.Writer, format string, args ...any) {
@@ -357,8 +385,13 @@ func humanSize(n int64) string {
 //	git push -o gitrepo.wait=0      return immediately
 //	git push -o gitrepo.wait=2m     wait longer
 func PostReceive(stdin io.Reader, stderr io.Writer) int {
+	// The refs are already updated: report what cannot be parsed (which
+	// pre-receive refused anyway) and handle the rest.
 	updates, err := readUpdates(stdin)
-	if err != nil || len(updates) == 0 {
+	if err != nil {
+		say(stderr, "warning: %v", err)
+	}
+	if len(updates) == 0 {
 		return 0
 	}
 	wait, _ := strconv.ParseInt(os.Getenv(EnvWait), 10, 64)

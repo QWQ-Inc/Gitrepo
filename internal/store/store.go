@@ -319,6 +319,12 @@ CREATE TABLE protections (
   UNIQUE (repos, ref)
 );
 `,
+	// 13: a remote's location generation, bumped whenever it is pointed at
+	// another repository; work started for an older generation (a release
+	// publication) must not record its result.
+	`
+ALTER TABLE remotes ADD COLUMN location_gen INTEGER NOT NULL DEFAULT 0;
+`,
 }
 
 func (s *Store) migrate(ctx context.Context) error {

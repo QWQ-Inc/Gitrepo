@@ -159,6 +159,7 @@ func (m *Manager) RestoreBackup(ctx context.Context, repo *store.Repo, backupRef
 	if err := m.git.UpdateRefs(ctx, repoPath, []string{"create " + target + " " + sha}); err != nil {
 		return "", fmt.Errorf("create branch %s: %w", branch, err)
 	}
+	release() // before the sync, which needs the lease
 	m.Enqueue(repo.ID, Request{Trigger: TriggerManual})
 	return sha, nil
 }
@@ -322,27 +323,31 @@ func (m *Manager) holdLease(ctx context.Context, repoID int64, what string) (fun
 	}
 }
 
-// Relocate is for remotes pointed at another location (a new URL, or a
-// target namespace change): under the repository's sync lease it forgets
-// what was learnt about the old location (Store.ForgetRemoteState: pushed
-// refs, divergences, release copies, adoption), then runs apply (which
-// stores the change; may be nil). The caller then syncs them. Without this the
-// new repository would be treated as one Gitrepo had already written to:
-// no adoption check, and leases and divergence handling based on another
-// repository's refs.
-func (m *Manager) Relocate(ctx context.Context, repoID int64, remoteIDs []int64, apply func() error) error {
-	release, err := m.holdLease(ctx, repoID, "relocate")
-	if err != nil {
-		return err
-	}
-	for _, id := range remoteIDs {
-		if err = m.store.ForgetRemoteState(ctx, id); err != nil {
-			break
+// HoldLeases takes the sync leases of the repositories (in ID order) and
+// returns a function that releases them; each is renewed while held. It
+// waits for running syncs (up to holdLease's limit) and fails if one does
+// not finish, releasing what it took. Used to change where remotes point
+// (Store.RelocateRemote, Store.UpdateTargetChecked) while no sync of those
+// repositories can learn anything about the old location.
+func (m *Manager) HoldLeases(ctx context.Context, repoIDs []int64, what string) (func(), error) {
+	ids := append([]int64(nil), repoIDs...)
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	var releases []func()
+	releaseAll := func() {
+		for _, r := range releases {
+			r()
 		}
 	}
-	if err == nil && apply != nil {
-		err = apply()
+	for i, id := range ids {
+		if i > 0 && id == ids[i-1] {
+			continue
+		}
+		r, err := m.holdLease(ctx, id, what)
+		if err != nil {
+			releaseAll()
+			return nil, err
+		}
+		releases = append(releases, r)
 	}
-	release()
-	return err
+	return releaseAll, nil
 }

@@ -141,10 +141,23 @@ func ParseRepoPatterns(s string) ([]string, error) {
 		if part == "" {
 			continue
 		}
-		if _, err := path.Match(part, "x/y"); err != nil {
-			return nil, fmt.Errorf("invalid repo pattern %q", part)
+		if err := ValidateRepoPattern(part); err != nil {
+			return nil, err
 		}
 		out = append(out, part)
 	}
 	return out, nil
+}
+
+// ValidateRepoPattern checks one repository pattern: "*", or ORG/NAME where
+// either part may be a glob. A pattern without "/" (e.g. "acme") would never
+// match a repository and silently cover nothing.
+func ValidateRepoPattern(p string) error {
+	if p == "*" {
+		return nil
+	}
+	if _, err := path.Match(p, "x/y"); err != nil || strings.Count(p, "/") != 1 || strings.HasPrefix(p, "/") || strings.HasSuffix(p, "/") || strings.ContainsAny(p, " \t\n") {
+		return fmt.Errorf("invalid repository pattern %q: use ORG/NAME, ORG/* or *", p)
+	}
+	return nil
 }

@@ -120,6 +120,9 @@ type Remote struct {
 	LastSyncAt          int64
 	LastSuccessAt       int64
 	CreatedAt           int64
+	// LocationGen changes whenever the remote is pointed at another
+	// repository (see RelocateRemote, UpdateTargetChecked).
+	LocationGen int64
 }
 
 // EffectiveNamespace is the remote's namespace, falling back to the target's.
@@ -209,15 +212,40 @@ VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 	return nil
 }
 
-func (s *Store) UpdateTarget(ctx context.Context, t *Target) error {
-	t.UpdatedAt = Now()
-	_, err := s.db.ExecContext(ctx, `UPDATE targets SET provider=?, base_url=?, api_url=?, namespace=?, url_template=?, visibility=?,
+// UpdateTargetChecked stores t if the target was not changed since it was
+// read (its updated_at is still prevUpdatedAt; ErrConflict otherwise), and
+// forgets the state of the relocated remotes (whose location this change
+// moves) in the same transaction. The caller holds the sync leases of the
+// relocated remotes' repositories.
+func (s *Store) UpdateTargetChecked(ctx context.Context, t *Target, prevUpdatedAt int64, relocated []int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	updated := max(Now(), prevUpdatedAt+1)
+	res, err := tx.ExecContext(ctx, `UPDATE targets SET provider=?, base_url=?, api_url=?, namespace=?, url_template=?, visibility=?,
 auto_create=?, max_file_size=?, max_lfs_object_size=?, cred_kind=?, cred_username=?, cred_secret=?, ssh_known_hosts=?, expires_at=?, updated_at=?,
-cred_app_id=?, cred_installation_id=?, expires_auto=? WHERE id=?`,
+cred_app_id=?, cred_installation_id=?, expires_auto=? WHERE id=? AND updated_at=?`,
 		t.Provider, t.BaseURL, t.APIURL, t.Namespace, t.URLTemplate, t.Visibility,
-		b2i(t.AutoCreate), t.MaxFileSize, t.MaxLFSObjectSize, t.CredKind, t.CredUsername, t.CredSecret, t.SSHKnownHosts, t.ExpiresAt, t.UpdatedAt,
-		t.AppID, t.InstallationID, b2i(t.ExpiresAuto), t.ID)
-	return wrapErr(err)
+		b2i(t.AutoCreate), t.MaxFileSize, t.MaxLFSObjectSize, t.CredKind, t.CredUsername, t.CredSecret, t.SSHKnownHosts, t.ExpiresAt, updated,
+		t.AppID, t.InstallationID, b2i(t.ExpiresAuto), t.ID, prevUpdatedAt)
+	if err != nil {
+		return wrapErr(err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrConflict
+	}
+	for _, id := range relocated {
+		if err := forgetRemote(ctx, tx, id); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	t.UpdatedAt = updated
+	return nil
 }
 
 // SetDetectedExpiry stores a credential expiry read from the platform (0:
@@ -410,7 +438,7 @@ func (s *Store) DeleteRepo(ctx context.Context, id int64) error {
 
 const remoteCols = `r.id, r.repo_id, r.target_id, t.name, t.namespace, t.provider, r.namespace, r.name, r.url, r.on_divergence, r.enabled,
 r.provisioned, r.atomic_unsupported, r.adopt, r.state, r.last_error, r.consecutive_failures, r.next_retry_at, r.last_sync_at,
-r.last_success_at, r.created_at`
+r.last_success_at, r.created_at, r.location_gen`
 
 const remoteFrom = ` FROM remotes r JOIN targets t ON t.id = r.target_id`
 
@@ -419,7 +447,7 @@ func scanRemote(sc interface{ Scan(...any) error }) (*Remote, error) {
 	var enabled, prov, atomic, adopt int
 	err := sc.Scan(&r.ID, &r.RepoID, &r.TargetID, &r.TargetName, &r.TargetNamespace, &r.Provider, &r.Namespace, &r.Name, &r.URL, &r.OnDivergence, &enabled,
 		&prov, &atomic, &adopt, &r.State, &r.LastError, &r.ConsecutiveFailures, &r.NextRetryAt, &r.LastSyncAt,
-		&r.LastSuccessAt, &r.CreatedAt)
+		&r.LastSuccessAt, &r.CreatedAt, &r.LocationGen)
 	if err != nil {
 		return nil, wrapErr(err)
 	}
@@ -510,17 +538,12 @@ func (s *Store) ListRemotesByTarget(ctx context.Context, targetID int64) ([]*Rem
 	return s.queryRemotes(ctx, `SELECT `+remoteCols+remoteFrom+` WHERE r.target_id=? ORDER BY r.repo_id`, targetID)
 }
 
-// ForgetRemoteState drops everything learnt about a remote's repository -
-// refs seen and pushed, divergences, release copies, provisioning and
-// adoption - after the remote was pointed at another location, so the new
-// repository is treated like a newly added mirror (adoption check included)
-// rather than with the old one's history.
-func (s *Store) ForgetRemoteState(ctx context.Context, id int64) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
+// forgetRemote drops everything learnt about a remote's repository - refs
+// seen and pushed, divergences, release copies, provisioning and adoption -
+// when the remote is pointed at another location, so the new repository is
+// treated like a newly added mirror (adoption check included) rather than
+// with the old one's history. It bumps the location generation.
+func forgetRemote(ctx context.Context, tx *sql.Tx, id int64) error {
 	for _, q := range []string{
 		`DELETE FROM ref_state WHERE remote_id=?`,
 		`DELETE FROM pushed_state WHERE remote_id=?`,
@@ -528,11 +551,30 @@ func (s *Store) ForgetRemoteState(ctx context.Context, id int64) error {
 		`DELETE FROM release_mirrors WHERE remote_id=?`,
 		// The failure count stays: an alert already sent still gets its
 		// recovery notice.
-		`UPDATE remotes SET provisioned=0, adopt=0 WHERE id=?`,
+		`UPDATE remotes SET provisioned=0, adopt=0, location_gen=location_gen+1 WHERE id=?`,
 	} {
 		if _, err := tx.ExecContext(ctx, q, id); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// RelocateRemote stores a remote's new location (URL) and its settings and
+// forgets what was learnt about the old location, in one transaction. The
+// caller holds the repository's sync lease. r.Adopt is stored as given.
+func (s *Store) RelocateRemote(ctx context.Context, r *Remote) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := forgetRemote(ctx, tx, r.ID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE remotes SET url=?, on_divergence=?, enabled=?, adopt=? WHERE id=?`,
+		r.URL, r.OnDivergence, b2i(r.Enabled), b2i(r.Adopt), r.ID); err != nil {
+		return wrapErr(err)
 	}
 	return tx.Commit()
 }
