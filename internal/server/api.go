@@ -38,6 +38,7 @@ func (s *Server) registerAPI(mux *http.ServeMux) {
 	h("POST /api/repos", s.apiCreateRepo)
 	h("GET /api/repos/{org}/{name}", s.apiGetRepo)
 	h("DELETE /api/repos/{org}/{name}", s.apiDeleteRepo)
+	h("PATCH /api/repos/{org}/{name}", s.apiUpdateRepo)
 	h("POST /api/repos/{org}/{name}/remotes", s.apiAddRemote)
 	h("PATCH /api/repos/{org}/{name}/remotes/{id}", s.apiUpdateRemote)
 	h("DELETE /api/repos/{org}/{name}/remotes/{id}", s.apiDeleteRemote)

@@ -333,6 +333,11 @@ JSON 投递带以下请求头：`X-Gitrepo-Event`、`X-Gitrepo-Delivery`；配�
 
 `gr token create ci --scopes read --repos 'acme/*'` 可以把 token 限制在部分仓库。token 只存 SHA-256 哈希。`--public` 仓库允许匿名读。
 
+修改可见性：`gr repo set acme/demo --visibility private`（控制台仓库页也可以改）。
+- Hub 先改，限制立即生效；
+- 然后通过平台 API 修改各镜像，逐个报告结果。凭据上固定了可见性（`--visibility`）的镜像保持不变，没有 API 的镜像需要到平台上手动修改。
+- 从公开改为私有时注意：如果源码包曾经通过 CDN 缓存，缓存里可能还有，需要另行清除。
+
 名为 `admin` 的 token 不能创建：这个名字留给启动时配置的管理员 token，审计日志里才不会混淆。
 
 注意：备份（`refs/backup/*`）不会出现在 clone、ls-remote、源码包和 bundle 里，但它们引用的对象仍在 Hub 仓库中。有读权限、又知道 SHA 的人可以通过协议 v2 按 SHA 取回这些对象，这和 GitHub 上悬空提交的情况一样。敏感内容请用 `gr backup purge` 彻底清除，见[备份与清除](#备份与清除)。
@@ -361,7 +366,7 @@ Gitrepo 在反向代理后面时，把代理地址写进 `trusted_proxies`，来
 gr target  add|update|list|rm|check      平台账号
 gr bind    ORG|'*' TARGET                新仓库的默认镜像
 gr binding list|rm
-gr repo    add|list|rm|import            （push 新地址也会自动建仓；import 从已有镜像导入或恢复）
+gr repo    add|list|rm|import|set        （push 新地址也会自动建仓；import 从已有镜像导入或恢复；set 修改可见性）
 gr remote  add|list|adopt|pause|resume|set|rm  单个仓库的镜像
 gr sync    ORG/NAME [--overwrite] [--remote ID]
 gr status  [ORG/NAME]
@@ -390,6 +395,7 @@ gr doctor                                部署自检：工具、public_url、�
 | GET/POST | `/api/bindings`，DELETE `/api/bindings/{id}` | 组织 → target 的默认规则 |
 | GET/POST | `/api/repos` | 列出 / 登记仓库 |
 | GET/DELETE | `/api/repos/{org}/{name}` | 状态详情 / 注销（数据移入 trash） |
+| PATCH | `/api/repos/{org}/{name}` | 修改可见性 `{"visibility":"private"}`，同时修改跟随仓库的镜像，返回各镜像的结果 |
 | POST | `/api/repos/{org}/{name}/remotes` | 添加镜像 |
 | PATCH/DELETE | `/api/repos/{org}/{name}/remotes/{id}` | 暂停、恢复、改分叉策略或 URL / 移除 |
 | POST | `/api/repos/{org}/{name}/sync` | 立即同步，`{"wait":true,"overwrite":false}` |

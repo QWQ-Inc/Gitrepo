@@ -346,7 +346,17 @@ async function viewRepo(org, name) {
     h('div', { class: 'panel' }, h('dl', { class: 'kv' },
       h('dt', {}, 'Push / Clone'), h('dd', {}, copyable(repo.clone_url)),
       repo.ssh_url ? [h('dt', {}, 'SSH'), h('dd', {}, copyable(repo.ssh_url))] : null,
-      h('dt', {}, '可见性'), h('dd', {}, repo.visibility === 'public' ? '公开' : '私有'),
+      h('dt', {}, '可见性'), h('dd', {}, { public: '公开', internal: '内部', private: '私有' }[repo.visibility] || repo.visibility, ' ',
+        h('button', { class: 'secondary small', onclick: action(async () => {
+          const next = repo.visibility === 'public' ? 'private' : 'public';
+          const label = next === 'public' ? '公开' : '私有';
+          if (!confirm(`把 ${slug} 改为${label}？\n跟随仓库可见性的镜像也会通过平台 API 一起修改。`)) return false;
+          const res = await api('PATCH', base, { visibility: next });
+          rerender();
+          const bad = res.mirrors.filter((m) => m.state === 'failed' || m.state === 'unsupported');
+          if (bad.length) throw new Error(`已改为${label}，但这些镜像没有改：` + bad.map((m) => `${m.mirror}（${m.detail}）`).join('；'));
+          return `已改为${label}` + (res.mirrors.length ? `，${res.mirrors.filter((m) => m.state === 'changed').length} 个镜像已同步修改` : '');
+        }) }, repo.visibility === 'public' ? '改为私有' : '改为公开')),
       h('dt', {}, '默认分支'), h('dd', {}, repo.default_branch || '（空仓库）'),
       h('dt', {}, '添加远端'), h('dd', {}, h('code', {}, `git remote add hub ${repo.clone_url}`)))),
     h('h2', {}, '镜像'),

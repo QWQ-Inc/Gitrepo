@@ -168,7 +168,11 @@ func (f *fakePlatforms) github(w http.ResponseWriter, r *http.Request, p string)
 		f.initRepo("gh", org+"/"+name)
 		writeJSONResp(w, 201, map[string]any{})
 	case r.Method == "PATCH" && strings.HasPrefix(p, "/repos/"):
-		f.record("gh default_branch " + strings.TrimPrefix(p, "/repos/") + "=" + jsonStr(body["default_branch"]))
+		if _, ok := body["private"]; ok {
+			f.record("gh private " + strings.TrimPrefix(p, "/repos/") + "=" + jsonStr(body["private"]))
+		} else {
+			f.record("gh default_branch " + strings.TrimPrefix(p, "/repos/") + "=" + jsonStr(body["default_branch"]))
+		}
 		writeJSONResp(w, 200, map[string]any{})
 	default:
 		writeJSONResp(w, 404, map[string]string{"message": "Not Found: " + r.Method + " " + p})
@@ -208,6 +212,9 @@ func (f *fakePlatforms) gitlab(w http.ResponseWriter, r *http.Request, p string)
 		repoDir := filepath.Join(f.dir, "gl", project+".git")
 		switch {
 		case r.Method == "GET" && len(seg) == 2:
+			writeJSONResp(w, 200, map[string]any{})
+		case r.Method == "PUT" && len(seg) == 2 && body["visibility"] != nil:
+			f.record("gl visibility " + project + "=" + jsonStr(body["visibility"]))
 			writeJSONResp(w, 200, map[string]any{})
 		case r.Method == "PUT" && len(seg) == 2:
 			f.record("gl default_branch " + project + "=" + jsonStr(body["default_branch"]))
@@ -249,6 +256,9 @@ func (f *fakePlatforms) gitea(w http.ResponseWriter, r *http.Request, p string) 
 		switch {
 		case r.Method == "GET" && len(seg) == 3:
 			writeJSONResp(w, 200, map[string]any{})
+		case r.Method == "PATCH" && len(seg) == 3 && body["private"] != nil:
+			f.record("gt private " + project + "=" + jsonStr(body["private"]))
+			writeJSONResp(w, 200, map[string]any{})
 		case r.Method == "PATCH" && len(seg) == 3:
 			f.record("gt default_branch " + project + "=" + jsonStr(body["default_branch"]))
 			writeJSONResp(w, 200, map[string]any{})
@@ -289,6 +299,9 @@ func (f *fakePlatforms) gitee(w http.ResponseWriter, r *http.Request, p string) 
 		_, unprotected := os.Stat(filepath.Join(repoDir, "allow_force"))
 		switch {
 		case r.Method == "GET" && len(seg) == 3:
+			writeJSONResp(w, 200, map[string]any{})
+		case r.Method == "PATCH" && len(seg) == 3 && body["private"] != nil:
+			f.record("ge private " + project + "=" + jsonStr(body["private"]) + " name=" + jsonStr(body["name"]))
 			writeJSONResp(w, 200, map[string]any{})
 		case r.Method == "PATCH" && len(seg) == 3:
 			f.record("ge default_branch " + project + "=" + jsonStr(body["default_branch"]) + " name=" + jsonStr(body["name"]))

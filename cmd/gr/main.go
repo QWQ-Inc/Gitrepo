@@ -584,7 +584,54 @@ under refs/backup/ on the hub.`,
 	imp.Flags().BoolVar(&force, "force", false, "replace existing hub refs (they are backed up)")
 	imp.Flags().BoolVar(&impPublic, "public", false, "create the hub repository as public")
 	imp.MarkFlagRequired("from")
-	cmd.AddCommand(add, list, rm, imp)
+	var setVis string
+	set := &cobra.Command{
+		Use:   "set ORG/NAME --visibility private|internal|public",
+		Short: "Change a repository's visibility, on the hub and its mirrors",
+		Long: `Change a repository's visibility. The hub changes first; then every
+mirror whose target follows the repository is changed through the platform's
+API (targets with a fixed --visibility keep theirs). The result is shown per
+mirror: check any mirror that could not be changed.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			p, err := repoPath(args[0])
+			if err != nil {
+				return err
+			}
+			if setVis == "" {
+				return fmt.Errorf("--visibility is required")
+			}
+			var res struct {
+				Mirrors []struct {
+					Mirror string `json:"mirror"`
+					State  string `json:"state"`
+					Detail string `json:"detail"`
+				} `json:"mirrors"`
+			}
+			if err := call(http.MethodPatch, p, map[string]any{"visibility": setVis}, &res); err != nil {
+				return err
+			}
+			if flagJSON {
+				return printJSON(res)
+			}
+			fmt.Printf("%s is now %s\n", args[0], setVis)
+			w := table()
+			bad := 0
+			for _, m := range res.Mirrors {
+				fmt.Fprintf(w, "  %s\t%s\t%s\n", m.Mirror, m.State, oneLine(m.Detail))
+				if m.State == "failed" || m.State == "unsupported" {
+					bad++
+				}
+			}
+			w.Flush()
+			if bad > 0 {
+				return fmt.Errorf("%d mirror(s) were not changed; change them on the platform", bad)
+			}
+			return nil
+		},
+	}
+	set.Flags().StringVar(&setVis, "visibility", "", "private, internal or public")
+	cmd.AddCommand(add, list, rm, imp, set)
 	return cmd
 }
 
