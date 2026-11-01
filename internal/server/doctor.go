@@ -164,15 +164,18 @@ func humanBytes(n uint64) string {
 
 func (s *Server) checkTarget(ctx context.Context, t *store.Target, add func(string, string, string, ...any)) {
 	name := "target " + t.Name
-	if t.ExpiresAt > 0 {
-		exp := store.ToTime(t.ExpiresAt)
-		switch left := time.Until(exp); {
-		case left < 0:
-			add(name+" expiry", "fail", "credential expired on %s", exp.Format("2006-01-02"))
-		case left < s.cfg.Alerts.CredentialExpiryWarning.D():
-			add(name+" expiry", "warn", "credential expires on %s", exp.Format("2006-01-02"))
+	// Reported last, after the expiry may have been read from the platform.
+	defer func() {
+		if t.ExpiresAt > 0 {
+			exp := store.ToTime(t.ExpiresAt)
+			switch left := time.Until(exp); {
+			case left < 0:
+				add(name+" expiry", "fail", "credential expired on %s", exp.Format("2006-01-02"))
+			case left < s.cfg.Alerts.CredentialExpiryWarning.D():
+				add(name+" expiry", "warn", "credential expires on %s", exp.Format("2006-01-02"))
+			}
 		}
-	}
+	}()
 	p, err := provider.Get(t.Provider)
 	if err != nil {
 		add(name, "fail", "%v", err)
@@ -195,6 +198,13 @@ func (s *Server) checkTarget(ctx context.Context, t *store.Target, add func(stri
 		return
 	}
 	add(name, "ok", "%s as %s", t.Provider, who)
+	before := t.ExpiresAt
+	s.detectExpiry(cctx, t, secret)
+	if t.ExpiresAt != before {
+		if err := s.store.SetDetectedExpiry(ctx, t.ID, t.ExpiresAt); err != nil {
+			s.log.Warn("store credential expiry", "target", t.Name, "err", err)
+		}
+	}
 }
 
 func (s *Server) checkMirrors(ctx context.Context, add func(string, string, string, ...any)) {

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/qwq-inc/gitrepo/internal/gitexec"
 	"github.com/qwq-inc/gitrepo/internal/store"
@@ -150,4 +151,28 @@ func (g *GitHub) Check(ctx context.Context, t *store.Target, secret string) (str
 		return "", err
 	}
 	return me.Login, nil
+}
+
+// TokenExpiry reads the expiry GitHub reports for personal access tokens
+// (classic and fine-grained) in the GitHub-Authentication-Token-Expiration
+// header; a token without it does not expire. App installation tokens are
+// renewed automatically, so there is nothing to report for them.
+func (g *GitHub) TokenExpiry(ctx context.Context, t *store.Target, secret string) (time.Time, bool, error) {
+	if t.CredKind == CredGitHubApp || secret == "" {
+		return time.Time{}, false, nil
+	}
+	_, h, err := doJSONHeader(ctx, http.MethodGet, g.api(t)+"/user", g.headers(secret), nil, nil)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	v := strings.TrimSpace(h.Get("GitHub-Authentication-Token-Expiration"))
+	if v == "" {
+		return time.Time{}, true, nil
+	}
+	for _, layout := range []string{"2006-01-02 15:04:05 MST", "2006-01-02 15:04:05 -0700", time.RFC3339} {
+		if exp, err := time.Parse(layout, v); err == nil {
+			return exp.UTC(), true, nil
+		}
+	}
+	return time.Time{}, false, fmt.Errorf("unexpected token expiration header %q", v)
 }

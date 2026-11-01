@@ -215,8 +215,10 @@ type targetOut struct {
 	AppID        string     `json:"app_id,omitempty"`
 	Installation string     `json:"installation_id,omitempty"`
 	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
-	CreatedAt    *time.Time `json:"created_at"`
-	UpdatedAt    *time.Time `json:"updated_at"`
+	// ExpiresAuto: the expiry was read from the platform.
+	ExpiresAuto bool       `json:"expires_detected,omitempty"`
+	CreatedAt   *time.Time `json:"created_at"`
+	UpdatedAt   *time.Time `json:"updated_at"`
 }
 
 func toTargetOut(t *store.Target) targetOut {
@@ -225,7 +227,7 @@ func toTargetOut(t *store.Target) targetOut {
 		Namespace: t.Namespace, URLTemplate: t.URLTemplate, Visibility: t.Visibility, AutoCreate: t.AutoCreate,
 		MaxFileSize: t.MaxFileSize, MaxLFSSize: t.MaxLFSObjectSize, CredKind: t.CredKind, CredUsername: t.CredUsername, HasSecret: len(t.CredSecret) > 0,
 		AppID: t.AppID, Installation: t.InstallationID,
-		ExpiresAt: ts(t.ExpiresAt), CreatedAt: ts(t.CreatedAt), UpdatedAt: ts(t.UpdatedAt),
+		ExpiresAt: ts(t.ExpiresAt), ExpiresAuto: t.ExpiresAuto, CreatedAt: ts(t.CreatedAt), UpdatedAt: ts(t.UpdatedAt),
 	}
 }
 
@@ -262,6 +264,8 @@ func (s *Server) applyTargetIn(t *store.Target, in *targetIn) error {
 			}
 			t.ExpiresAt = store.FromTime(et)
 		}
+		// Set by hand; cleared means "read it from the platform".
+		t.ExpiresAuto = false
 	}
 	if c := in.Credential; c != nil {
 		kind := c.Kind
@@ -315,6 +319,10 @@ func (s *Server) applyTargetIn(t *store.Target, in *targetIn) error {
 				return err
 			}
 			t.CredSecret = sealed
+			if in.ExpiresAt == nil {
+				// The expiry belonged to the old secret.
+				t.ExpiresAt, t.ExpiresAuto = 0, false
+			}
 		} else if len(t.CredSecret) == 0 {
 			return badRequest("credential secret is required for kind %s", kind)
 		}
@@ -382,6 +390,9 @@ func (s *Server) apiCreateTarget(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	if in.Credential != nil {
+		s.detectExpiry(r.Context(), t, in.Credential.Secret)
+	}
 	if err := s.store.CreateTarget(r.Context(), t); err != nil {
 		s.fail(w, err)
 		return
@@ -438,6 +449,13 @@ func (s *Server) apiUpdateTarget(w http.ResponseWriter, r *http.Request) {
 	if err := s.fillAppInstallation(r.Context(), t, &in); err != nil {
 		s.fail(w, err)
 		return
+	}
+	if in.Credential != nil && in.Credential.Secret != "" {
+		s.detectExpiry(r.Context(), t, in.Credential.Secret)
+	} else if in.ExpiresAt != nil && *in.ExpiresAt == "" {
+		if secret, err := s.targetSecret(r.Context(), t); err == nil {
+			s.detectExpiry(r.Context(), t, secret)
+		}
 	}
 	// Mirrors that now point elsewhere (namespace, URL template, server
 	// changed) forget what was learnt about their old repositories first.
@@ -564,7 +582,86 @@ func (s *Server) apiCheckTarget(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "identity": who})
+	out := map[string]any{"ok": true, "identity": who}
+	before := t.ExpiresAt
+	s.detectExpiry(ctx, t, secret)
+	if t.ExpiresAt != before {
+		if err := s.store.SetDetectedExpiry(ctx, t.ID, t.ExpiresAt); err != nil {
+			s.log.Warn("store credential expiry", "target", t.Name, "err", err)
+		}
+	}
+	if t.ExpiresAt != 0 {
+		out["expires_at"] = ts(t.ExpiresAt)
+		out["expires_detected"] = t.ExpiresAuto
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// detectExpiry reads the credential's expiry from the platform (see
+// provider.ExpiryReporter) into t, unless an administrator set one. secret
+// is the plain credential. When the platform cannot tell, t is unchanged.
+func (s *Server) detectExpiry(ctx context.Context, t *store.Target, secret string) {
+	if (t.ExpiresAt != 0 && !t.ExpiresAuto) || (t.CredKind != "token" && t.CredKind != "basic") || secret == "" {
+		return
+	}
+	p, err := provider.Get(t.Provider)
+	if err != nil {
+		return
+	}
+	er, ok := p.(provider.ExpiryReporter)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	exp, known, err := er.TokenExpiry(ctx, t, secret)
+	if err != nil {
+		s.log.Debug("read credential expiry", "target", t.Name, "err", err)
+		return
+	}
+	if !known {
+		return
+	}
+	var at int64
+	if !exp.IsZero() {
+		at = store.FromTime(exp)
+	}
+	t.ExpiresAt, t.ExpiresAuto = at, at != 0
+}
+
+// refreshDetectedExpiry reads detected expiries again once a day (a token
+// may have been extended or regenerated on the platform), and for targets
+// stored before detection existed.
+func (s *Server) refreshDetectedExpiry(ctx context.Context) {
+	targets, err := s.store.ListTargets(ctx)
+	if err != nil {
+		return
+	}
+	for _, t := range targets {
+		if (t.ExpiresAt != 0 && !t.ExpiresAuto) || (t.CredKind != "token" && t.CredKind != "basic") {
+			continue
+		}
+		s.expiryMu.Lock()
+		last, ok := s.expiryRead[t.ID]
+		s.expiryMu.Unlock()
+		if ok && time.Since(last) < 24*time.Hour {
+			continue
+		}
+		secret, err := s.targetSecret(ctx, t)
+		if err != nil {
+			continue
+		}
+		before := t.ExpiresAt
+		s.detectExpiry(ctx, t, secret)
+		s.expiryMu.Lock()
+		s.expiryRead[t.ID] = time.Now()
+		s.expiryMu.Unlock()
+		if t.ExpiresAt != before {
+			if err := s.store.SetDetectedExpiry(ctx, t.ID, t.ExpiresAt); err != nil {
+				s.log.Warn("store credential expiry", "target", t.Name, "err", err)
+			}
+		}
+	}
 }
 
 // fillLoginUsername asks the platform for the token owner's login when the

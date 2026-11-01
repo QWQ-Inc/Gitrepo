@@ -422,7 +422,7 @@ async function viewTargets() {
     h('td', { class: 'mono' }, t.url_template || t.base_url || '（默认）'),
     h('td', {}, t.credential_kind === 'github-app' ? `GitHub App ${t.app_id}（安装 ${t.installation_id}）` : t.credential_kind,
       t.credential_username ? ` (${t.credential_username})` : ''),
-    h('td', {}, t.expires_at ? fmtDay(t.expires_at) : '—'),
+    h('td', {}, t.expires_at ? fmtDay(t.expires_at) : '—', t.expires_detected ? h('span', { class: 'muted' }, '（自动识别）') : ''),
     h('td', { class: 'actions' },
       t.provider !== 'generic' ? h('button', { class: 'secondary small', onclick: action(async () => {
         const res = await api('POST', '/api/targets/' + enc(t.name) + '/check');
@@ -496,7 +496,7 @@ function targetForm() {
     } else if (k !== 'none') {
       nodes.push(field(k === 'basic' ? '密码' : '访问令牌', h('input', { name: 'secret', type: 'password', required: true, autocomplete: 'off' })));
     }
-    nodes.push(field('凭据过期日（可选，用于提醒）', h('input', { name: 'expires_at', type: 'date' })));
+    nodes.push(field('凭据过期日（可选，用于提醒；GitHub、GitLab 令牌会自动识别）', h('input', { name: 'expires_at', type: 'date' })));
     dyn.replaceChildren(...nodes);
   }
   provider.addEventListener('change', update);
@@ -534,7 +534,9 @@ function editTarget(t, container) {
   const isSSH = t.credential_kind === 'ssh' || t.credential_kind === 'github-app';
   const form = h('form', { class: 'grid', onsubmit: action(async (ev) => {
     const d = formData(ev.target);
-    const body = { namespace: d.namespace, expires_at: d.expires_at || '' };
+    const body = { namespace: d.namespace };
+    // Only a changed date is sent: an untouched detected date stays detected.
+    if ((d.expires_at || '') !== (t.expires_at ? t.expires_at.slice(0, 10) : '')) body.expires_at = d.expires_at || '';
     if (t.provider === 'generic') body.url_template = d.url_template;
     else body.base_url = d.base_url;
     if (d.max_file_size !== '') body.max_file_size = Number(d.max_file_size) * 1024 * 1024;
@@ -552,7 +554,7 @@ function editTarget(t, container) {
     : field('站点地址', h('input', { name: 'base_url', value: t.base_url || '' })),
   field('单文件上限 MiB（0 = 平台默认）', h('input', { name: 'max_file_size', type: 'number', min: '0', value: t.max_file_size ? Math.round(t.max_file_size / 1048576) : '' })),
   field('LFS 对象上限 MiB（0 = 平台默认）', h('input', { name: 'max_lfs_object_size', type: 'number', min: '0', value: t.max_lfs_object_size ? Math.round(t.max_lfs_object_size / 1048576) : '' })),
-  field('凭据过期日', h('input', { name: 'expires_at', type: 'date', value: t.expires_at ? t.expires_at.slice(0, 10) : '' })),
+  field(t.expires_detected ? '凭据过期日（从平台读取）' : '凭据过期日（清空则从平台读取）', h('input', { name: 'expires_at', type: 'date', value: t.expires_at ? t.expires_at.slice(0, 10) : '' })),
   t.credential_kind === 'none' ? null : field(t.credential_kind === 'github-app' ? '新 App 私钥（留空不变）' : (isSSH ? '新 SSH 私钥（留空不变）' : '新令牌 / 密码（留空不变）'),
     isSSH ? h('textarea', { name: 'secret' }) : h('input', { name: 'secret', type: 'password', autocomplete: 'off' }), isSSH ? 'wide' : ''),
   h('div', { class: 'row wide' }, h('button', { type: 'submit' }, '保存'), h('button', { type: 'button', class: 'secondary', onclick: close }, '取消')));

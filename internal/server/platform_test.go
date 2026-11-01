@@ -25,6 +25,21 @@ type fakePlatforms struct {
 	calls    []string
 	releases *fakeReleaseStore
 	app      *fakeApp
+	// tokenExpiry: what GitHub and GitLab report as the token's expiry
+	// ("" = none).
+	tokenExpiry string
+}
+
+func (f *fakePlatforms) setTokenExpiry(v string) {
+	f.mu.Lock()
+	f.tokenExpiry = v
+	f.mu.Unlock()
+}
+
+func (f *fakePlatforms) getTokenExpiry() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.tokenExpiry
 }
 
 const (
@@ -154,6 +169,9 @@ func (f *fakePlatforms) github(w http.ResponseWriter, r *http.Request, p string)
 	json.NewDecoder(r.Body).Decode(&body)
 	switch {
 	case r.Method == "GET" && p == "/user":
+		if v := f.getTokenExpiry(); v != "" {
+			w.Header().Set("GitHub-Authentication-Token-Expiration", v+" 00:00:00 UTC")
+		}
 		writeJSONResp(w, 200, map[string]string{"login": "octo"})
 	case r.Method == "GET" && strings.HasPrefix(p, "/repos/"):
 		if f.exists("gh", strings.TrimPrefix(p, "/repos/")) {
@@ -192,6 +210,12 @@ func (f *fakePlatforms) gitlab(w http.ResponseWriter, r *http.Request, p string)
 	switch {
 	case r.Method == "GET" && p == "/user":
 		writeJSONResp(w, 200, map[string]string{"username": "tanuki"})
+	case r.Method == "GET" && p == "/personal_access_tokens/self":
+		var exp any
+		if v := f.getTokenExpiry(); v != "" {
+			exp = v
+		}
+		writeJSONResp(w, 200, map[string]any{"id": 1, "name": "mirror", "expires_at": exp})
 	case r.Method == "GET" && len(seg) == 2 && seg[0] == "namespaces":
 		if unesc(seg[1]) == "acme-group" {
 			writeJSONResp(w, 200, map[string]any{"id": 7})

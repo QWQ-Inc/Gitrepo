@@ -128,6 +128,8 @@ type Target struct {
 	CredUsername string     `json:"credential_username,omitempty"`
 	HasSecret    bool       `json:"has_secret"`
 	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
+	// ExpiresAuto: the expiry was read from the platform.
+	ExpiresAuto bool `json:"expires_detected,omitempty"`
 }
 
 type Binding struct {

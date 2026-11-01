@@ -303,6 +303,10 @@ CREATE TABLE edge_meta (
   value TEXT NOT NULL
 );
 `,
+	// 11: credential expiry read from the platform rather than set by hand.
+	`
+ALTER TABLE targets ADD COLUMN expires_auto INTEGER NOT NULL DEFAULT 0;
+`,
 }
 
 func (s *Store) migrate(ctx context.Context) error {

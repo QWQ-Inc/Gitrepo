@@ -270,7 +270,7 @@ Hub 自己实现了 LFS 服务端（`internal/lfs`）：
 - **取令牌：** `provider.ResolveSecret` 是唯一的入口，同步、Release、导入和凭据检查都经过它。
   - 对 token 等凭据，原样返回解密后的值。
   - 对 App：用私钥签 RS256 JWT（`iat` 往前拨 1 分钟以容忍时钟偏差，有效期 9 分钟），调用 `POST /app/installations/{id}/access_tokens` 换取安装令牌。
-  - 令牌按（API 地址、App ID、安装 ID、私钥哈希）缓存。剩余有效期不足 20 分钟就换新，这个阈值大于一次推送的超时，推送不会用到中途过期的令牌。
+  - 令牌按（API 地址、App ID、安装 ID、私钥哈希）缓存。剩余有效期不足 40 分钟就换新（最初是 20 分钟，第七次评审后调整），这个阈值大于最长的操作（30 分钟的 Release 发布），操作不会用到中途过期的令牌。
   - 换私钥后缓存自然失效。每个缓存项有自己的锁，并发同步时只换一次。
 - **下游不变：** 换来的令牌和个人令牌用法一样，API 请求带 `Authorization: Bearer`，git 用 `x-access-token`，所以 provider 的其它代码不用区分两种凭据。
   - 唯一的例外是 `Check`：App 没有 `/user`，改为调用 `/installation/repositories`，报告安装 ID 和可访问的仓库数。
@@ -410,3 +410,15 @@ Hub 自己实现了 LFS 服务端（`internal/lfs`）：
   - `credential.expiring` 不属于任何仓库，原来会投递给只关心部分仓库的 webhook。现在只投递给没有仓库过滤（或过滤为全部仓库）的 webhook。
   - **镜像换了位置：** 修改镜像的 URL，或者修改 target 的命名空间、URL 模板之后，原来记录的"推送过的 ref"仍然有效，于是新位置被当作 Gitrepo 写过的仓库：跳过了接管检查，租约和分叉判断都基于另一个仓库。现在会在同步租约下清掉这些记录（ref 状态、推送记录、分叉、Release 副本、接管状态），新位置按新加的镜像处理；target 的修改要先把受影响的镜像都处理完，才会保存。
   - README 说明了：清除之后，CDN 上缓存的公开源码包和 bundle 要自行清除。
+
+## 自动读取凭据过期时间
+
+- 原来过期提醒要靠管理员手工填日期，大多数人不会填，于是令牌过期那天镜像才断。
+- GitHub 在每个 API 回答里用 `GitHub-Authentication-Token-Expiration` 头报告个人令牌（classic 和 fine-grained）的过期时间，没有这个头就是不过期。GitLab 15.5 起有 `GET /personal_access_tokens/self`，个人、群组、项目令牌都适用，旧版本回答 404，过期时间保持未知。Gitea/Forgejo 和 Gitee 的令牌不过期，也没有接口。
+- GitLab 只给日期，按当天 0 点（UTC）算，这是令牌最早可能失效的时刻。
+- `targets.expires_auto` 区分读到的值和手工设置的值：
+  - 手工设置的日期永远不会被读到的值覆盖。后台写入用条件更新（`WHERE expires_at=0 OR expires_auto=1`），即使管理员恰好同时设置，也不会被覆盖。
+  - 清空日期表示恢复自动读取。
+  - 换新令牌而没有同时给日期时，旧日期（包括手工设置的）作废，因为它属于旧令牌。
+- 读取时机：添加或更新凭据、`gr target check`、`gr doctor`，以及巡检时每个 target 每天一次（新启动后的第一次巡检就会读，已有的 target 因此也会补上）。读取失败不影响任何操作，只是保持原值。
+- 控制台修改 target 时，只有日期确实被改动才会提交，避免保存其它设置时把读到的日期变成手工设置。

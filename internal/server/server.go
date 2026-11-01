@@ -85,6 +85,7 @@ type Server struct {
 
 	expiryMu       sync.Mutex
 	expiryNotified map[int64]time.Time
+	expiryRead     map[int64]time.Time // when each credential's expiry was last read from its platform
 
 	bundleBusy atomic.Bool
 	bundleWG   sync.WaitGroup
@@ -132,6 +133,7 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*Server, error) {
 		done:       make(chan struct{}),
 
 		expiryNotified: map[int64]time.Time{},
+		expiryRead:     map[int64]time.Time{},
 		clock:          newStateClock(),
 		stopping:       make(chan struct{}),
 	}
@@ -539,6 +541,7 @@ func (s *Server) RefreshBundles(ctx context.Context, force bool) {
 // checkCredentialExpiry emits credential.expiring at most once a day per
 // target whose credential expires within the warning window.
 func (s *Server) checkCredentialExpiry(ctx context.Context) {
+	s.refreshDetectedExpiry(ctx)
 	targets, err := s.store.ListTargets(ctx)
 	if err != nil {
 		return

@@ -321,6 +321,9 @@ func targetCmd() *cobra.Command {
 				exp := "-"
 				if t.ExpiresAt != nil {
 					exp = t.ExpiresAt.Format("2006-01-02")
+					if t.ExpiresAuto {
+						exp += " (detected)"
+					}
 				}
 				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%v\t%s\n", t.Name, t.Provider, t.Namespace, u, t.CredKind, t.AutoCreate, exp)
 			}
@@ -341,9 +344,11 @@ func targetCmd() *cobra.Command {
 		Use: "check NAME", Short: "Verify a target's credential against the platform API", Args: cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			var res struct {
-				OK       bool   `json:"ok"`
-				Identity string `json:"identity"`
-				Error    string `json:"error"`
+				OK              bool       `json:"ok"`
+				Identity        string     `json:"identity"`
+				Error           string     `json:"error"`
+				ExpiresAt       *time.Time `json:"expires_at,omitempty"`
+				ExpiresDetected bool       `json:"expires_detected,omitempty"`
 			}
 			if err := call(http.MethodPost, "/api/targets/"+url.PathEscape(args[0])+"/check", nil, &res); err != nil {
 				return err
@@ -355,6 +360,13 @@ func targetCmd() *cobra.Command {
 				return fmt.Errorf("check failed: %s", res.Error)
 			}
 			fmt.Printf("ok: authenticated as %s\n", res.Identity)
+			if res.ExpiresAt != nil {
+				how := "set by hand"
+				if res.ExpiresDetected {
+					how = "reported by the platform"
+				}
+				fmt.Printf("credential expires %s (%s, in %d days)\n", res.ExpiresAt.Format("2006-01-02"), how, int(time.Until(*res.ExpiresAt).Hours()/24))
+			}
 			return nil
 		},
 	}

@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/qwq-inc/gitrepo/internal/gitexec"
 	"github.com/qwq-inc/gitrepo/internal/store"
@@ -210,4 +211,32 @@ func (g *GitLab) Check(ctx context.Context, t *store.Target, secret string) (str
 		return "", err
 	}
 	return me.Username, nil
+}
+
+// TokenExpiry reads the expiry of a personal, group or project access token
+// (GitLab 15.5 and later; older servers answer 404 and the expiry stays
+// unknown). The date is taken as the start of that day in UTC, the earliest
+// moment the token can stop working.
+func (g *GitLab) TokenExpiry(ctx context.Context, t *store.Target, secret string) (time.Time, bool, error) {
+	if secret == "" {
+		return time.Time{}, false, nil
+	}
+	var tok struct {
+		ExpiresAt *string `json:"expires_at"`
+	}
+	status, err := doJSON(ctx, http.MethodGet, g.api(t)+"/personal_access_tokens/self", g.headers(secret), nil, &tok)
+	if status == http.StatusNotFound {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	if tok.ExpiresAt == nil || *tok.ExpiresAt == "" {
+		return time.Time{}, true, nil
+	}
+	d, err := time.Parse("2006-01-02", *tok.ExpiresAt)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("unexpected token expiry %q", *tok.ExpiresAt)
+	}
+	return d.UTC(), true, nil
 }

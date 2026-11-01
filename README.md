@@ -81,9 +81,11 @@ gr target check github     # 用平台 API 验证凭据
 
 凭据类型：访问令牌（各平台）、GitHub App（GitHub / GitHub Enterprise Server）、用户名加密码和 SSH 私钥（generic）。
 
+**过期提醒**：GitHub 和 GitLab（15.5 及以上）的访问令牌会自动从平台读取过期时间。读取时机包括添加或更新凭据、`gr target check`、`gr doctor`，此外每天读取一次，所以在平台上延长了令牌也会跟着更新。临近过期时发出 `credential.expiring` 通知（见[通知](#通知)）。其它平台用 `--expires 2027-01-31` 手工设置；手工设置的日期优先，不会被读到的值覆盖，设为空（`--expires ''`）则恢复自动读取。换了新令牌而没有同时给日期时，旧的日期作废，重新读取。
+
 #### 用 GitHub App 代替个人令牌
 
-个人令牌属于某个人：人离职、令牌过期，镜像就断了，而且令牌的权限往往比需要的大。GitHub App 属于组织，Gitrepo 只保存 App 的私钥，每次需要时用它签一个 JWT，换取有效期一小时的安装令牌，缓存起来供 API 和 git 使用；剩余有效期不足 20 分钟时自动换新。
+个人令牌属于某个人：人离职、令牌过期，镜像就断了，而且令牌的权限往往比需要的大。GitHub App 属于组织，Gitrepo 只保存 App 的私钥，每次需要时用它签一个 JWT，换取有效期一小时的安装令牌，缓存起来供 API 和 git 使用；剩余有效期不足 40 分钟时自动换新（比最长的操作，即 30 分钟的 Release 发布，更长）。
 
 1. 在组织的 Settings → Developer settings → GitHub Apps 新建一个 App。
    - Webhook 不需要，可以关闭。
@@ -308,7 +310,7 @@ gr webhook test 2
 | `remote.diverged` | 镜像进入分叉状态（只在状态变化时触发一次） |
 | `remote.failed` | 镜像连续失败达到 `alerts.failure_threshold` 次（默认 3） |
 | `remote.recovered` | 告警过的镜像恢复同步 |
-| `credential.expiring` | target 凭据在 `alerts.credential_expiry_warning`（默认 14 天）内过期，每天最多一次；过期时间用 `gr target update NAME --expires 2027-01-31` 设置 |
+| `credential.expiring` | target 凭据在 `alerts.credential_expiry_warning`（默认 14 天）内过期，每天最多一次；GitHub、GitLab 令牌的过期时间自动读取，其它的用 `gr target update NAME --expires 2027-01-31` 设置 |
 
 `--format` 支持 `json`（默认，完整载荷）、`slack`、`wecom`、`feishu`、`dingtalk`。
 

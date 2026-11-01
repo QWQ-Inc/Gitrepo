@@ -68,6 +68,14 @@ type LFSLimiter interface {
 	MaxLFSObjectSize() int64
 }
 
+// ExpiryReporter is implemented by providers whose API tells when a token
+// expires, so expiry warnings work without the administrator typing in a
+// date. known=false: the platform did not say (an old server, another
+// kind of credential); known with a zero time: the token does not expire.
+type ExpiryReporter interface {
+	TokenExpiry(ctx context.Context, t *store.Target, secret string) (exp time.Time, known bool, err error)
+}
+
 // LoginUsername is implemented by providers whose Git-over-HTTPS username
 // must be the token owner's login. When a target has no username, the API
 // fills it in from Check.
@@ -143,17 +151,23 @@ func redactURL(u string) string {
 // doJSON performs an API call. in (if non-nil) is JSON-encoded; out (if
 // non-nil) receives the decoded 2xx response body.
 func doJSON(ctx context.Context, method, u string, headers map[string]string, in, out any) (int, error) {
+	status, _, err := doJSONHeader(ctx, method, u, headers, in, out)
+	return status, err
+}
+
+// doJSONHeader is doJSON that also returns the response headers.
+func doJSONHeader(ctx context.Context, method, u string, headers map[string]string, in, out any) (int, http.Header, error) {
 	var body io.Reader
 	if in != nil {
 		b, err := json.Marshal(in)
 		if err != nil {
-			return 0, err
+			return 0, nil, err
 		}
 		body = bytes.NewReader(b)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, u, body)
 	if err != nil {
-		return 0, fmt.Errorf("%s %s: invalid request URL", method, redactURL(u))
+		return 0, nil, fmt.Errorf("%s %s: invalid request URL", method, redactURL(u))
 	}
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -169,19 +183,19 @@ func doJSON(ctx context.Context, method, u string, headers map[string]string, in
 		if errors.As(err, &ue) {
 			err = ue.Err
 		}
-		return 0, fmt.Errorf("%s %s: %w", method, redactURL(u), err)
+		return 0, nil, fmt.Errorf("%s %s: %w", method, redactURL(u), err)
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return resp.StatusCode, &APIError{Method: method, URL: u, Status: resp.StatusCode, Body: string(raw)}
+		return resp.StatusCode, resp.Header, &APIError{Method: method, URL: u, Status: resp.StatusCode, Body: string(raw)}
 	}
 	if out != nil && len(raw) > 0 {
 		if err := json.Unmarshal(raw, out); err != nil {
-			return resp.StatusCode, fmt.Errorf("%s %s: decode response: %w", method, redactURL(u), err)
+			return resp.StatusCode, resp.Header, fmt.Errorf("%s %s: decode response: %w", method, redactURL(u), err)
 		}
 	}
-	return resp.StatusCode, nil
+	return resp.StatusCode, resp.Header, nil
 }
 
 func statusOf(err error) int {

@@ -48,8 +48,11 @@ type Target struct {
 	InstallationID string
 	SSHKnownHosts  string
 	ExpiresAt      int64
-	CreatedAt      int64
-	UpdatedAt      int64
+	// ExpiresAuto: ExpiresAt was read from the platform (a value set by an
+	// administrator is never replaced by a detected one).
+	ExpiresAuto bool
+	CreatedAt   int64
+	UpdatedAt   int64
 }
 
 // CredentialAAD binds a target's ciphertext to the target.
@@ -173,18 +176,19 @@ type Token struct {
 
 const targetCols = `id, name, provider, base_url, api_url, namespace, url_template, visibility,
 auto_create, max_file_size, max_lfs_object_size, cred_kind, cred_username, cred_secret, ssh_known_hosts, expires_at, created_at, updated_at,
-cred_app_id, cred_installation_id`
+cred_app_id, cred_installation_id, expires_auto`
 
 func scanTarget(sc interface{ Scan(...any) error }) (*Target, error) {
 	var t Target
-	var auto int
+	var auto, expAuto int
 	err := sc.Scan(&t.ID, &t.Name, &t.Provider, &t.BaseURL, &t.APIURL, &t.Namespace, &t.URLTemplate, &t.Visibility,
 		&auto, &t.MaxFileSize, &t.MaxLFSObjectSize, &t.CredKind, &t.CredUsername, &t.CredSecret, &t.SSHKnownHosts, &t.ExpiresAt, &t.CreatedAt, &t.UpdatedAt,
-		&t.AppID, &t.InstallationID)
+		&t.AppID, &t.InstallationID, &expAuto)
 	if err != nil {
 		return nil, wrapErr(err)
 	}
 	t.AutoCreate = auto != 0
+	t.ExpiresAuto = expAuto != 0
 	return &t, nil
 }
 
@@ -193,11 +197,11 @@ func (s *Store) CreateTarget(ctx context.Context, t *Target) error {
 	t.CreatedAt, t.UpdatedAt = now, now
 	res, err := s.db.ExecContext(ctx, `INSERT INTO targets (name, provider, base_url, api_url, namespace, url_template, visibility,
 auto_create, max_file_size, max_lfs_object_size, cred_kind, cred_username, cred_secret, ssh_known_hosts, expires_at, created_at, updated_at,
-cred_app_id, cred_installation_id)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+cred_app_id, cred_installation_id, expires_auto)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		t.Name, t.Provider, t.BaseURL, t.APIURL, t.Namespace, t.URLTemplate, t.Visibility,
 		b2i(t.AutoCreate), t.MaxFileSize, t.MaxLFSObjectSize, t.CredKind, t.CredUsername, t.CredSecret, t.SSHKnownHosts, t.ExpiresAt, t.CreatedAt, t.UpdatedAt,
-		t.AppID, t.InstallationID)
+		t.AppID, t.InstallationID, b2i(t.ExpiresAuto))
 	if err != nil {
 		return wrapErr(err)
 	}
@@ -209,11 +213,19 @@ func (s *Store) UpdateTarget(ctx context.Context, t *Target) error {
 	t.UpdatedAt = Now()
 	_, err := s.db.ExecContext(ctx, `UPDATE targets SET provider=?, base_url=?, api_url=?, namespace=?, url_template=?, visibility=?,
 auto_create=?, max_file_size=?, max_lfs_object_size=?, cred_kind=?, cred_username=?, cred_secret=?, ssh_known_hosts=?, expires_at=?, updated_at=?,
-cred_app_id=?, cred_installation_id=? WHERE id=?`,
+cred_app_id=?, cred_installation_id=?, expires_auto=? WHERE id=?`,
 		t.Provider, t.BaseURL, t.APIURL, t.Namespace, t.URLTemplate, t.Visibility,
 		b2i(t.AutoCreate), t.MaxFileSize, t.MaxLFSObjectSize, t.CredKind, t.CredUsername, t.CredSecret, t.SSHKnownHosts, t.ExpiresAt, t.UpdatedAt,
-		t.AppID, t.InstallationID, t.ID)
+		t.AppID, t.InstallationID, b2i(t.ExpiresAuto), t.ID)
 	return wrapErr(err)
+}
+
+// SetDetectedExpiry stores a credential expiry read from the platform (0:
+// it does not expire), unless an administrator has set one meanwhile.
+func (s *Store) SetDetectedExpiry(ctx context.Context, id, expiresAt int64) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE targets SET expires_at=?, expires_auto=? WHERE id=? AND (expires_at=0 OR expires_auto=1)`,
+		expiresAt, b2i(expiresAt != 0), id)
+	return err
 }
 
 func (s *Store) GetTarget(ctx context.Context, id int64) (*Target, error) {
