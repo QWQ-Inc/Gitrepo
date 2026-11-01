@@ -67,4 +67,6 @@ jobs:
           docker run --privileged --rm tonistiigi/binfmt --install arm64
           docker buildx build --platform linux/amd64,linux/arm64 \
             --build-arg VERSION="$GITHUB_REF_NAME" \
+            --label org.opencontainers.image.source="https://github.com/$GITHUB_REPOSITORY" \
+            --label org.opencontainers.image.version="$GITHUB_REF_NAME" \
             -t "$image:$GITHUB_REF_NAME" -t "$image:latest" --push .

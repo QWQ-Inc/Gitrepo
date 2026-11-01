@@ -29,6 +29,8 @@
 
 ### 1. 启动
 
+安装：从 [GitHub Releases](https://github.com/QWQ-Inc/Gitrepo/releases) 下载对应平台的压缩包（含服务端 `gitrepo` 和命令行 `gr`，Linux / macOS，amd64 / arm64；Windows 只有 `gr.exe`），用 `SHA256SUMS` 校验；或者使用 Docker 镜像 `ghcr.io/qwq-inc/gitrepo`。
+
 ```bash
 export GITREPO_SECRET_KEY=$(gitrepo keygen)      # 加密平台凭据的主密钥，务必备份
 export GITREPO_ADMIN_TOKEN=$(openssl rand -hex 24)
@@ -36,12 +38,17 @@ export GITREPO_PUBLIC_URL=https://git.example.com
 gitrepo serve                                     # 默认监听 :8080，数据在 ./data
 ```
 
-Docker（发布后可直接使用 `ghcr.io/qwq-inc/gitrepo:<版本>`，也可以本地构建）：
+Docker：
 
 ```bash
-docker build -t gitrepo:local .
-GITREPO_SECRET_KEY=... GITREPO_ADMIN_TOKEN=... docker compose -f deploy/docker-compose.yml up -d
+docker run -d --name gitrepo -p 8080:8080 -p 2222:2222 -v gitrepo-data:/data \
+  -e GITREPO_SECRET_KEY="$(docker run --rm ghcr.io/qwq-inc/gitrepo:v0.1.0 keygen)" \
+  -e GITREPO_ADMIN_TOKEN="$(openssl rand -hex 24)" \
+  -e GITREPO_PUBLIC_URL=https://git.example.com -e GITREPO_SSH_LISTEN=:2222 \
+  ghcr.io/qwq-inc/gitrepo:v0.1.0
 ```
+
+`GITREPO_SECRET_KEY` 请另外保存一份（丢了就解不开已存的凭据）。也可以用 [`deploy/docker-compose.yml`](deploy/docker-compose.yml) 从源码构建：`docker compose -f deploy/docker-compose.yml up -d`。
 
 镜像内置健康检查（`gitrepo healthcheck`）。
 
@@ -535,8 +542,8 @@ docker run --rm -v gitrepo-data-new:/data -v /backups/2026-11-01:/snapshot:ro gi
 
 ## 发布
 
-1. 把 [`CHANGELOG.md`](CHANGELOG.md) 里的 `## Unreleased` 改成版本号（例如 `## v0.1.0`）并提交；
-2. 推送同名标签：`git tag v0.1.0 && git push origin v0.1.0`。
+1. 把 [`CHANGELOG.md`](CHANGELOG.md) 里 `## Unreleased` 下的内容移到新版本号的标题下（例如 `## v0.2.0`）并提交；
+2. 推送同名标签：`git tag -a v0.2.0 -m v0.2.0 && git push origin v0.2.0`。
 
 `.github/workflows/release.yml` 随后会：
 
