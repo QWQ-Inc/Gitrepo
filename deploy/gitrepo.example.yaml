@@ -57,3 +57,6 @@ alerts:
 
 audit:
   retention: 365d            # audit log entries older than this are pruned; 0 = keep forever
+
+releases:
+  max_asset_size: 2GiB       # largest release file accepted (GitHub's limit is 2 GiB); 0 = unlimited

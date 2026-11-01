@@ -239,3 +239,26 @@ Hub 自己实现了 LFS 服务端（`internal/lfs`）：
   - 恢复后清空旧实例遗留的 lease。
   - 名为 `admin` 的 token 不区分大小写地拒绝。
   - `gr audit` 的翻页提示保留筛选条件。
+
+## Release 同步
+
+- **以 Hub 为准：** 和代码一样，Release 在 Gitrepo 上创建，再发布到各镜像。另一种做法是以某个平台（例如 GitHub）为源，把它的 Release 复制到其他平台，但那样 Gitrepo 就不再是唯一入口，冲突和删除也说不清以谁为准。
+- **先有标签：** 只有当镜像的 `ref_state` 里这个标签和 Hub 完全一致（同一个标签对象），才会在该镜像上创建 Release。
+  - 否则各平台会从默认分支自己创建一个标签，和 Hub 的不一致，之后同步时还会被当成分叉。
+  - 等待中的 Release 在每次同步结束（`syncer.Options.AfterRun`）和每次巡检时重新检查。
+- **不覆盖别人的东西：** 判断依据是记录下来的平台 Release ID（`release_mirrors.remote_release`）。
+  - 镜像上已有同名 Release、但 ID 不是我们记录的，标为 `conflict`，原样保留，除非这个 Release 设置了 adopt。
+  - 接管之后只管理自己上传的附件（`release_mirrors.assets` 记录了名字、平台 ID 和 SHA-256），别人的附件保留。只有同名附件会被替换，因为平台不允许重名。
+- **增量：** 用标签、标题、说明、预发布标记和附件哈希算出一个摘要，和上次发布的一样就不调用任何 API。附件按 SHA-256 判断是否需要重新上传。中途失败时，已经完成的部分（Release ID、已上传的附件）也会保存，重试不会产生重复。
+- **附件存储：** 和 LFS 对象一样，按 SHA-256 存放在 Hub 仓库目录下的 `releases/objects/`。
+  - 注销仓库时一起移进 trash，`gitrepo backup` 会一起备份。
+  - 恢复时逐个校验哈希。
+  - 同一个仓库里内容相同的附件只存一份，最后一个引用删除时文件才删除。
+- **上传：**
+  - 用独立的、没有总超时的 HTTP 客户端，由 context 控制时长（单个镜像单个 Release 30 分钟）。
+  - multipart 请求体流式发送，但预先算出精确的 Content-Length，因为有些反向代理不接受分块上传。
+  - GitHub 的 `upload_url` 来自 API 响应，发送 token 之前要校验它的主机：必须是 API 的主机，或者 github.com 对应的 uploads.github.com。
+- **授权：** 让 CI 拿 admin token 发布 Release 风险太大，所以这组接口按仓库授权，复用 git 的访问规则：修改需要 write，读取与 clone 相同。修改操作照样记入审计日志。
+- **平台差异：**
+  - GitLab 的 Release ID 就是标签名。附件是"项目上传文件 + Release 链接"，删除附件只删链接，GitLab API 不提供删除已上传文件的通用方法。GitLab 没有预发布标记。
+  - Gitee 的 token 放在查询参数里，错误信息里出现时会被替换掉。查询不存在的 Release 时，Gitee 返回 `{}` 而不是 404。创建时必须提供 `target_commitish`、名称和说明。

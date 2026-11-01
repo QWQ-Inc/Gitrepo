@@ -47,14 +47,47 @@ func (c *Client) Do(ctx context.Context, method, path string, in, out any) error
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	return c.send(c.HTTP, req, out)
+}
+
+// Upload sends body (size bytes) as the raw request body, e.g. a release
+// file, without the client's overall timeout; ctx bounds it.
+func (c *Client) Upload(ctx context.Context, method, path, contentType string, body io.Reader, size int64, out any) error {
+	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, body)
+	if err != nil {
+		return err
+	}
+	req.ContentLength = size
+	req.Header.Set("Content-Type", contentType)
+	hc := *c.HTTP
+	hc.Timeout = 0
+	return c.send(&hc, req, out)
+}
+
+// Download streams a GET response body into w.
+func (c *Client) Download(ctx context.Context, path string, w io.Writer) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+path, nil)
+	if err != nil {
+		return err
+	}
+	hc := *c.HTTP
+	hc.Timeout = 0
+	return c.send(&hc, req, w)
+}
+
+func (c *Client) send(hc *http.Client, req *http.Request, out any) error {
 	if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
 	}
-	resp, err := c.HTTP.Do(req)
+	resp, err := hc.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+	if w, ok := out.(io.Writer); ok && resp.StatusCode >= 200 && resp.StatusCode <= 299 {
+		_, err := io.Copy(w, resp.Body)
+		return err
+	}
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err

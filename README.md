@@ -22,6 +22,7 @@
 - **谁做了什么都有记录**：审计日志记下每一次凭据改动、token 签发、清除备份和每一次 push（含强推），包括操作者和来源地址。
 - **在入口挡住注定失败的 push**：单文件大小上限取所有镜像中最严的（GitHub 是 100 MiB），超限的 push 在 Hub 就被拒绝，不会在某个镜像上一直失败。
 - **出事会通知**：分叉、连续失败、恢复、凭据即将过期、同步完成（带 ref 和 SHA，可用来触发下游构建）都可以推送到带签名的 webhook，或直接推到 Slack、企业微信、飞书、钉钉。
+- **Release 也只发一次**：说明和附件在 Gitrepo 上发布，自动同步到 GitHub、GitLab、Gitea/Forgejo、Gitee 的 Release，CI 用仓库级的 write token 即可。
 - **常用的都支持**：HTTPS 和 SSH、Git LFS、Web 控制台、从已有镜像一键导入或恢复、整实例在线快照与恢复、源码包下载、bundle-uri 首次克隆加速。支持的平台有 GitHub、GitLab、Gitea/Forgejo、Gitee，以及任意 Git 服务器。
 
 ## 快速开始
@@ -228,6 +229,27 @@ curl -fL -u x:$TOKEN https://git.example.com/archive/acme/demo/release/1.2.zip -
 - 按完整 SHA 下载时内容不可变：公开仓库返回 `Cache-Control: public, immutable`，可以放在 CDN 上永久缓存；按分支或标签名下载不缓存。
 - LFS 文件在源码包里是指针文件。
 
+## Release
+
+Release（说明和附件）在 Gitrepo 上发布一次，就会同步到这个仓库所有支持 Release 的镜像：GitHub、GitLab、Gitea/Forgejo、Gitee。
+
+```bash
+git push hub v1.2.0
+gr release create acme/demo v1.2.0 --title "1.2.0" --notes-file CHANGELOG.md dist/*.tar.gz dist/SHA256SUMS
+#   github:acme/demo        synced
+#   gitlab:acme-group/demo  synced
+#   gitee:acme/demo         waiting   ← 标签还没同步到这个镜像，同步完成后自动发布
+```
+
+- **先有标签，再有 Release**：标签同步到某个镜像（并且和 Hub 上的完全一致）之后，Release 才会在那里创建，平台不会自己从某个分支建出一个标签。在此之前状态为 `waiting`，每次同步结束后会自动重试。
+- **改动会跟上**：改说明（`gr release edit`）、追加或替换附件（`gr release upload`）、删除附件（`gr release remove-file`）都会同步到各镜像。没有变化的附件不会重复上传。删除 Release（`gr release rm`）会删除各镜像上由 Gitrepo 创建的 Release，标签保留。
+- **不覆盖别人的 Release**：镜像上已有同名 Release、但不是 Gitrepo 创建的，显示为 `conflict`，原样保留；确认后可以用 `gr release publish … --adopt` 接管，此时会更新它的标题和说明并补上附件，它原有的附件保留。
+- **草稿**：`--draft` 只保存在 Hub 上，之后用 `gr release publish` 发布。
+- **CI 不需要 admin token**：Release 相关接口的权限按仓库计算，对仓库有 `write` 权限的 token 就能发布，例如 `gr token create ci --scopes write --repos 'acme/*'`。读取 Release 和下载附件与 clone 的权限相同。
+- **附件**：附件也保存在 Hub 上（`gr release download`），单个文件默认最大 2 GiB（`releases.max_asset_size`），会随 `gitrepo backup` 一起备份。
+- **各平台的差异**：GitLab 没有"预发布"标记；GitLab 的附件以项目上传文件加 Release 链接的形式出现，删除附件只删除链接。Gitee 要求 Release 有说明，没有填写时使用标题。纯 Git 服务器（generic）没有 Release，显示为 `unsupported`。
+- 失败的镜像按 30s、1m、2m… 退避重试，上限 1 小时。控制台的仓库页可以创建、发布和删除 Release。
+
 ## 首次克隆加速（bundle-uri）
 
 大仓库的首次克隆（比如 CI 冷启动）可以先下载一个预先打好的 bundle 文件，再只拉取之后的增量：
@@ -286,6 +308,8 @@ JSON 投递带以下请求头：`X-Gitrepo-Event`、`X-Gitrepo-Delivery`；配�
 | `create` | 另外可以通过 push 新地址来建仓 |
 | `admin` | 另外可以使用管理 API 和 `gr` |
 
+例外：Release 接口按仓库授权，`write` 权限就能发布 Release，见 [Release](#release)。
+
 `gr token create ci --scopes read --repos 'acme/*'` 可以把 token 限制在部分仓库。token 只存 SHA-256 哈希。`--public` 仓库允许匿名读。
 
 名为 `admin` 的 token 不能创建：这个名字留给启动时配置的管理员 token，审计日志里才不会混淆。
@@ -327,13 +351,14 @@ gr ssh                                   SSH 地址与主机指纹
 gr webhook add|list|test|enable|disable|rm
 gr backup  list|restore|purge            被覆盖历史的隐藏备份
 gr audit   [--repo] [--actor] [--action] 审计日志
+gr release create|edit|upload|remove-file|publish|list|show|download|rm  发布到所有镜像的 Release
 ```
 
 所有命令都支持 `--json`。`gr` 读取 `GITREPO_URL` 和 `GITREPO_TOKEN`。
 
 ## HTTP API
 
-所有 `/api/*` 和 `/metrics` 都需要 admin token（`Authorization: Bearer …`）。
+`/api/*` 和 `/metrics` 都需要 admin token（`Authorization: Bearer …`），只有 `/api/repos/{org}/{name}/releases…` 例外：它按仓库授权，修改需要 write 权限，读取与 clone 相同。
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
@@ -352,6 +377,10 @@ gr audit   [--repo] [--actor] [--action] 审计日志
 | POST | `/api/repos/{org}/{name}/backups/purge` | 彻底清除，`{"backups":[…]}` 或 `{"all":true}`，`"lfs":true` 同时清理无引用的 LFS 对象 |
 | GET | `/api/repos/{org}/{name}/runs` | 同步历史 |
 | GET | `/api/audit` | 审计日志，新的在前；`?repo=&actor=&action=&limit=&before=`，返回 `next` 用于翻页 |
+| GET/POST | `/api/repos/{org}/{name}/releases` | 列出 / 新建 Release，`{"tag":"v1.0","name":"…","body":"…","prerelease":false,"publish":true,"wait":true}`（需仓库 write 权限，下同） |
+| GET/PATCH/DELETE | `/api/repos/{org}/{name}/releases/{tag}` | 查看（含各镜像状态）/ 修改 / 删除（`?hub_only=true` 只删 Hub 上的）。标签含 `/` 时写成 `%2F` |
+| POST | `/api/repos/{org}/{name}/releases/{tag}/publish` | 发布或重新发布，`{"wait":true,"adopt":false,"force":false}` |
+| PUT/GET/DELETE | `/api/repos/{org}/{name}/releases/{tag}/assets/{file}` | 上传（请求体即文件内容）/ 下载 / 删除附件 |
 | GET/POST | `/api/tokens`，DELETE `/api/tokens/{id}` | 客户端 token |
 | GET/POST | `/api/webhooks`，PATCH/DELETE `/api/webhooks/{id}` | 出站通知 |
 | GET/POST | `/api/ssh-keys`，DELETE `/api/ssh-keys/{id}` | SSH 公钥 |
@@ -404,7 +433,7 @@ docker run --rm -v gitrepo-data-new:/data -v /backups/2026-11-01:/snapshot:ro gi
 - **M1（已完成）**：target / binding / token，push 自动建仓，pre/post-receive，force-with-lease 同步，分叉检测与备份，巡检与重试，`gr status`。
 - **M2**：~~出站 webhook 与告警~~、~~Web 控制台~~（已完成）。
 - **M3**：~~源码包~~、~~bundle-uri~~（已完成）、只读边缘节点、按区域读取路由。
-- **M4**：~~Gitea / Forgejo 适配器~~、~~Git LFS~~、~~Gitee 适配器~~（已完成）、按需同步 Release。
+- **M4**：~~Gitea / Forgejo 适配器~~、~~Git LFS~~、~~Gitee 适配器~~、~~同步 Release~~（已完成）。
 
 ## 发布
 

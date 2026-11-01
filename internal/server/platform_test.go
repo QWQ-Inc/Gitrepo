@@ -21,8 +21,9 @@ type fakePlatforms struct {
 	dir string
 	srv *httptest.Server
 
-	mu    sync.Mutex
-	calls []string
+	mu       sync.Mutex
+	calls    []string
+	releases *fakeReleaseStore
 }
 
 const (
@@ -93,6 +94,9 @@ func writeJSONResp(w http.ResponseWriter, status int, v any) {
 }
 
 func (f *fakePlatforms) serve(w http.ResponseWriter, r *http.Request) {
+	if f.serveRelease(w, r) {
+		return
+	}
 	p := r.URL.EscapedPath()
 	switch {
 	case strings.HasPrefix(p, "/gh/api/v3/"):

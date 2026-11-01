@@ -68,6 +68,7 @@ function fmtDay(iso) { return iso ? new Date(iso).toLocaleDateString() : '—'; 
 const STATE_LABEL = {
   synced: '已同步', syncing: '同步中', pending: '等待中', behind: '落后',
   diverged: '分叉', failed: '失败', paused: '暂停', 'no-remotes': '无镜像',
+  waiting: '等待标签', conflict: '冲突', draft: '草稿', unsupported: '不支持',
 };
 function badge(state) { return h('span', { class: 'badge ' + state }, STATE_LABEL[state] || state); }
 
@@ -267,8 +268,8 @@ function quickStart(targets, bindings) {
 async function viewRepo(org, name) {
   const slug = org + '/' + name;
   const base = '/api/repos/' + enc(org) + '/' + enc(name);
-  const [repo, runs, targets, backups, audit] = await Promise.all([api('GET', base), api('GET', base + '/runs?limit=30'), api('GET', '/api/targets'), api('GET', base + '/backups'),
-    api('GET', '/api/audit?limit=10&repo=' + enc(slug))]);
+  const [repo, runs, targets, backups, audit, releases] = await Promise.all([api('GET', base), api('GET', base + '/runs?limit=30'), api('GET', '/api/targets'), api('GET', base + '/backups'),
+    api('GET', '/api/audit?limit=10&repo=' + enc(slug)), api('GET', base + '/releases')]);
 
   const syncNow = (overwrite) => action(async () => {
     if (overwrite && !confirm('以 Hub 为准覆盖所有分叉的镜像 ref？\n被覆盖的镜像内容会先备份到 Hub 的 refs/backup/ 下。')) return false;
@@ -352,6 +353,10 @@ async function viewRepo(org, name) {
     table(['镜像', '状态', '上次成功', '分叉时', 'URL', ''], remoteRows, '还没有镜像。'),
     h('h2', {}, '添加镜像'),
     h('div', { class: 'panel' }, targets.length ? addForm : h('p', {}, '请先', h('a', { href: '#/targets' }, '添加平台凭据'), '。')),
+    h('h2', {}, 'Release'),
+    h('p', { class: 'hint' }, '在这里发布一次，Gitrepo 会把说明和附件发布到所有 GitHub、GitLab、Gitea/Forgejo、Gitee 镜像；标签同步到某个镜像后才会在那里创建。平台上已有的、不是 Gitrepo 建的同名 Release 不会被覆盖（显示"冲突"）。'),
+    releaseTable(base, releases),
+    h('details', { class: 'panel' }, h('summary', {}, '新建 Release'), releaseForm(base, repo)),
     h('h2', {}, '备份'),
     h('p', { class: 'hint' }, '被强推覆盖、删除或导入替换的历史会在 Hub 上隐藏保留一段时间（默认 30 天），clone 看不到。泄露了密钥时，请轮换密钥并清除备份。'),
     table(['时间', '来源', '原 ref', '提交', '说明', '到期', ''], backups.map((b) => h('tr', {},
@@ -757,4 +762,78 @@ async function viewAudit() {
     h('div', { class: 'panel' }, form),
     wrap,
     h('div', { class: 'row' }, more));
+}
+
+// ----------------------------------------------------------------- releases
+
+function releaseTable(base, releases) {
+  const path = (r) => base + '/releases/' + enc(r.tag);
+  return table(['标签', '标题', '附件', '镜像', '创建', ''], releases.map((r) => h('tr', {},
+    h('td', { class: 'mono' }, r.tag),
+    h('td', {}, r.name, r.prerelease ? h('span', { class: 'muted' }, '（预发布）') : null),
+    h('td', {}, r.assets.map((a) => h('div', {}, h('a', { href: a.url, download: a.name, onclick: action(async (ev) => {
+      // The API needs the token, so fetch the file instead of following the link.
+      ev.preventDefault();
+      const res = await fetch(a.url.replace(/^https?:\/\/[^/]+/, ''), { headers: { Authorization: 'Bearer ' + token } });
+      if (!res.ok) throw new Error('下载失败：' + res.status);
+      const blob = await res.blob();
+      const link = h('a', { href: URL.createObjectURL(blob), download: a.name });
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(link.href), 10000);
+      return false;
+    }) }, a.name), h('span', { class: 'muted' }, ' ' + fmtSize(a.size))))),
+    h('td', {}, r.mirrors.map((m) => h('div', { title: m.error || '' }, h('span', { class: 'badge ' + m.state }, STATE_LABEL[m.state] || m.state), ' ', h('span', { class: 'muted' }, m.mirror)))),
+    h('td', { class: 'nowrap' }, ago(r.created_at)),
+    h('td', { class: 'actions' },
+      h('button', { class: 'secondary small', onclick: action(async () => {
+        const adopt = r.mirrors.some((m) => m.state === 'conflict') && confirm('有镜像上已存在同名 Release（不是 Gitrepo 建的）。要接管并覆盖它的标题和说明吗？它原有的附件会保留。');
+        const res = await api('POST', path(r) + '/publish', { wait: true, adopt });
+        rerender();
+        const bad = res.mirrors.filter((m) => m.state === 'failed' || m.state === 'conflict');
+        return bad.length ? `${bad.length} 个镜像未发布，失败的会自动重试` : (res.mirrors.some((m) => m.state === 'waiting') ? '已发布；部分镜像等标签同步后再创建' : '已发布到所有镜像');
+      }) }, r.published ? '重新发布' : '发布'), ' ',
+      h('button', { class: 'danger small', onclick: action(async () => {
+        if (!confirm(`删除 Release ${r.tag}？各镜像上由 Gitrepo 创建的 Release 也会被删除（标签保留）。`)) return false;
+        await api('DELETE', path(r));
+        rerender();
+      }, '已删除') }, '删除')))), '还没有 Release。');
+}
+
+function fmtSize(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return (n / 1024).toFixed(1) + ' KiB';
+  if (n < 1073741824) return (n / 1048576).toFixed(1) + ' MiB';
+  return (n / 1073741824).toFixed(2) + ' GiB';
+}
+
+function releaseForm(base, repo) {
+  const files = h('input', { type: 'file', name: 'files', multiple: true });
+  return h('form', { class: 'grid', onsubmit: action(async (ev) => {
+    const d = formData(ev.target);
+    if (!d.tag) throw new Error('请填写标签');
+    await api('POST', base + '/releases', { tag: d.tag, name: d.name || d.tag, body: d.body, prerelease: d.prerelease, publish: false });
+    const path = base + '/releases/' + enc(d.tag);
+    for (const f of files.files) {
+      toast(`正在上传 ${f.name}…`);
+      const res = await fetch(path + '/assets/' + enc(f.name), {
+        method: 'PUT', body: f, headers: { Authorization: 'Bearer ' + token, 'Content-Type': f.type || 'application/octet-stream' },
+      });
+      if (!res.ok) {
+        let msg = res.statusText;
+        try { msg = (await res.json()).error || msg; } catch (_) { /* not JSON */ }
+        throw new Error(`${f.name}：${msg}`);
+      }
+    }
+    if (!d.draft) await api('POST', path + '/publish', { wait: true });
+    rerender();
+    return d.draft ? '已保存为草稿' : '已发布';
+  }) },
+  field('标签（需已推到 Hub）', h('input', { name: 'tag', required: true, placeholder: 'v1.2.0' })),
+  field('标题', h('input', { name: 'name', placeholder: '默认与标签相同' })),
+  field('说明', h('textarea', { name: 'body', placeholder: '更新内容…' }), 'wide'),
+  field('附件', files, 'wide'),
+  h('div', { class: 'wide row' },
+    h('label', { class: 'check' }, h('input', { type: 'checkbox', name: 'prerelease' }), '预发布'),
+    h('label', { class: 'check' }, h('input', { type: 'checkbox', name: 'draft' }), '只保存为草稿，暂不发布')),
+  h('div', {}, h('button', { type: 'submit' }, '创建')));
 }

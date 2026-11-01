@@ -12,6 +12,7 @@ import (
 	"github.com/qwq-inc/gitrepo/internal/client"
 	"github.com/qwq-inc/gitrepo/internal/gitexec"
 	"github.com/qwq-inc/gitrepo/internal/lfs"
+	"github.com/qwq-inc/gitrepo/internal/releases"
 	"github.com/qwq-inc/gitrepo/internal/snapshot"
 )
 
@@ -47,6 +48,13 @@ func TestSnapshotRoundTrip(t *testing.T) {
 	oid := lfsOID(blob)
 	putLFS(t, hubDir, oid, blob)
 	e.do(http.MethodPost, "/api/repos", map[string]any{"slug": "acme/empty"}, nil)
+	e.do(http.MethodPost, "/api/repos/acme/app/releases", map[string]any{"tag": "v1"}, nil)
+	relFile := []byte("release binary\n")
+	req, _ := http.NewRequest(http.MethodPut, "http://"+e.hubAddr+"/api/repos/acme/app/releases/v1/assets/app.bin", bytes.NewReader(relFile))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	if resp, err := http.DefaultClient.Do(req); err != nil || resp.StatusCode != 201 {
+		t.Fatalf("upload release file: %v %v", err, resp)
+	}
 
 	g := &gitexec.Git{Bin: "git", Env: clientEnv()}
 	snap := filepath.Join(t.TempDir(), "snap")
@@ -62,7 +70,7 @@ func TestSnapshotRoundTrip(t *testing.T) {
 	for _, r := range m.Repos {
 		switch r.Slug {
 		case "acme/app":
-			if r.Refs != len(orig) || r.LFSObjects != 1 || r.Head != "refs/heads/dev" || r.Bundle == "" {
+			if r.Refs != len(orig) || r.LFSObjects != 1 || r.ReleaseFiles != 1 || r.Head != "refs/heads/dev" || r.Bundle == "" {
 				t.Fatalf("manifest entry: %+v", r)
 			}
 		case "acme/empty":
@@ -98,6 +106,9 @@ func TestSnapshotRoundTrip(t *testing.T) {
 		}
 		if _, err := os.Stat(filepath.Join(cfg2.ReposDir(), "acme", "empty.git", "HEAD")); err != nil {
 			t.Fatal("empty repository not restored")
+		}
+		if got, err := os.ReadFile(releases.BlobPath(restoredApp, lfsOID(relFile))); err != nil || !bytes.Equal(got, relFile) {
+			t.Fatalf("release file: %v %q", err, got)
 		}
 	})
 

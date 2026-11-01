@@ -84,12 +84,12 @@ func TestRestoreRejectsUnsafeLFSEntries(t *testing.T) {
 	os.MkdirAll(lfsDir, 0o755)
 
 	os.Symlink(secret, filepath.Join(lfsDir, oid))
-	if _, _, err := copyLFSBack(filepath.Join(dir, "snap.lfs"), filepath.Join(dir, "r1.git")); err == nil {
+	if _, _, err := copyObjectsBack(filepath.Join(dir, "snap.lfs"), filepath.Join(dir, "r1.git", "lfs", "objects")); err == nil {
 		t.Fatal("a symlinked LFS object was restored")
 	}
 	os.Remove(filepath.Join(lfsDir, oid))
 	os.WriteFile(filepath.Join(lfsDir, oid), []byte("not the content for this oid"), 0o644)
-	if _, _, err := copyLFSBack(filepath.Join(dir, "snap.lfs"), filepath.Join(dir, "r2.git")); err == nil || !strings.Contains(err.Error(), "does not match") {
+	if _, _, err := copyObjectsBack(filepath.Join(dir, "snap.lfs"), filepath.Join(dir, "r2.git", "lfs", "objects")); err == nil || !strings.Contains(err.Error(), "does not match") {
 		t.Fatalf("a corrupted LFS object was restored: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "r2.git", "lfs", "objects", oid[0:2], oid[2:4], oid)); err == nil {

@@ -13,9 +13,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -47,7 +49,7 @@ func main() {
 	root.PersistentFlags().StringVar(&flagToken, "token", os.Getenv("GITREPO_TOKEN"), "admin token (env GITREPO_TOKEN)")
 	root.PersistentFlags().BoolVar(&flagJSON, "json", false, "print raw JSON")
 
-	root.AddCommand(targetCmd(), bindCmd(), bindingCmd(), repoCmd(), remoteCmd(), syncCmd(), statusCmd(), runsCmd(), tokenCmd(), keyCmd(), sshInfoCmd(), webhookCmd(), backupCmd(), auditCmd())
+	root.AddCommand(targetCmd(), bindCmd(), bindingCmd(), repoCmd(), remoteCmd(), syncCmd(), statusCmd(), runsCmd(), tokenCmd(), keyCmd(), sshInfoCmd(), webhookCmd(), backupCmd(), auditCmd(), releaseCmd())
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
@@ -1430,4 +1432,381 @@ func orDash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// ----------------------------------------------------------------- release
+
+type releaseView struct {
+	Tag        string `json:"tag"`
+	Name       string `json:"name"`
+	Body       string `json:"body"`
+	Prerelease bool   `json:"prerelease"`
+	Published  bool   `json:"published"`
+	Assets     []struct {
+		Name   string `json:"name"`
+		Size   int64  `json:"size"`
+		SHA256 string `json:"sha256"`
+		URL    string `json:"url"`
+	} `json:"assets"`
+	Mirrors []struct {
+		Mirror string `json:"mirror"`
+		State  string `json:"state"`
+		Error  string `json:"error"`
+	} `json:"mirrors"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func releasePath(slug, tag string) (string, error) {
+	p, err := repoPath(slug)
+	if err != nil {
+		return "", err
+	}
+	if tag == "" {
+		return p + "/releases", nil
+	}
+	return p + "/releases/" + url.PathEscape(tag), nil
+}
+
+func printRelease(r *releaseView) error {
+	if flagJSON {
+		return printJSON(r)
+	}
+	kind := ""
+	if r.Prerelease {
+		kind = " (pre-release)"
+	}
+	if !r.Published {
+		kind += " (draft: not published to mirrors)"
+	}
+	fmt.Printf("%s  %s%s\n", r.Tag, r.Name, kind)
+	for _, a := range r.Assets {
+		fmt.Printf("  file  %-32s %10d  sha256:%s\n", a.Name, a.Size, a.SHA256[:16])
+	}
+	w := table()
+	for _, m := range r.Mirrors {
+		fmt.Fprintf(w, "  %s\t%s\t%s\n", m.Mirror, m.State, oneLine(m.Error))
+	}
+	return w.Flush()
+}
+
+func readNotes(notes, file string) (*string, error) {
+	switch {
+	case file == "-":
+		b, err := io.ReadAll(os.Stdin)
+		s := string(b)
+		return &s, err
+	case file != "":
+		b, err := os.ReadFile(file)
+		s := string(b)
+		return &s, err
+	case notes != "":
+		return &notes, nil
+	}
+	return nil, nil
+}
+
+func uploadFiles(path string, files []string) error {
+	for _, f := range files {
+		fh, err := os.Open(f)
+		if err != nil {
+			return err
+		}
+		info, err := fh.Stat()
+		if err != nil {
+			fh.Close()
+			return err
+		}
+		ct := mime.TypeByExtension(filepath.Ext(f))
+		if ct == "" {
+			ct = "application/octet-stream"
+		}
+		fmt.Fprintf(os.Stderr, "uploading %s (%d bytes)…\n", filepath.Base(f), info.Size())
+		err = api().Upload(context.Background(), http.MethodPut, path+"/assets/"+url.PathEscape(filepath.Base(f)), ct, fh, info.Size(), nil)
+		fh.Close()
+		if err != nil {
+			return fmt.Errorf("%s: %w", f, err)
+		}
+	}
+	return nil
+}
+
+func publishAndReport(path string, adopt, force bool) error {
+	body := map[string]any{"wait": true, "force": force}
+	if adopt {
+		body["adopt"] = true
+	}
+	var r releaseView
+	if err := call(http.MethodPost, path+"/publish", body, &r); err != nil {
+		return err
+	}
+	if err := printRelease(&r); err != nil {
+		return err
+	}
+	for _, m := range r.Mirrors {
+		if m.State == "failed" || m.State == "conflict" {
+			return fmt.Errorf("not published to every mirror; failed mirrors are retried automatically")
+		}
+	}
+	return nil
+}
+
+func releaseCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "release",
+		Short: "Releases kept on the hub and published to every mirror",
+		Long: `Releases kept on the hub and published to every mirror.
+
+A release (notes and files) is created once on Gitrepo and published to the
+GitHub, GitLab, Gitea/Forgejo and Gitee mirrors of the repository. It reaches
+a mirror once the tag has been synced there. Releases that already exist on
+a platform and were not made by Gitrepo are left alone unless --adopt.
+
+These commands need a token with write access to the repository (not admin),
+so CI can publish releases:
+
+  gr release create acme/app v1.2.0 --notes-file CHANGELOG.md dist/*`,
+	}
+
+	var title, notes, notesFile string
+	var pre, draft, adopt bool
+	create := &cobra.Command{
+		Use: "create ORG/NAME TAG [FILE...]", Short: "Create a release, attach files and publish it", Args: cobra.MinimumNArgs(2),
+		RunE: func(c *cobra.Command, args []string) error {
+			base, _ := releasePath(args[0], "")
+			path, err := releasePath(args[0], args[1])
+			if err != nil {
+				return err
+			}
+			body := map[string]any{"tag": args[1], "prerelease": pre, "publish": false}
+			if title != "" {
+				body["name"] = title
+			}
+			n, err := readNotes(notes, notesFile)
+			if err != nil {
+				return err
+			}
+			if n != nil {
+				body["body"] = *n
+			}
+			if err := call(http.MethodPost, base, body, nil); err != nil {
+				return err
+			}
+			if err := uploadFiles(path, args[2:]); err != nil {
+				return err
+			}
+			if draft {
+				var r releaseView
+				if err := call(http.MethodGet, path, nil, &r); err != nil {
+					return err
+				}
+				return printRelease(&r)
+			}
+			return publishAndReport(path, adopt, false)
+		},
+	}
+	create.Flags().StringVarP(&title, "title", "t", "", "release title (default: the tag)")
+	create.Flags().StringVarP(&notes, "notes", "n", "", "release notes")
+	create.Flags().StringVarP(&notesFile, "notes-file", "F", "", "read the notes from a file (- for stdin)")
+	create.Flags().BoolVar(&pre, "prerelease", false, "mark as a pre-release")
+	create.Flags().BoolVar(&draft, "draft", false, "keep it on the hub only; publish later with gr release publish")
+	create.Flags().BoolVar(&adopt, "adopt", false, "take over releases that already exist on mirrors for this tag")
+
+	var eTitle, eNotes, eNotesFile, ePre string
+	edit := &cobra.Command{
+		Use: "edit ORG/NAME TAG", Short: "Change title, notes or pre-release flag", Args: cobra.ExactArgs(2),
+		RunE: func(c *cobra.Command, args []string) error {
+			path, err := releasePath(args[0], args[1])
+			if err != nil {
+				return err
+			}
+			body := map[string]any{"wait": true}
+			if c.Flags().Changed("title") {
+				body["name"] = eTitle
+			}
+			n, err := readNotes(eNotes, eNotesFile)
+			if err != nil {
+				return err
+			}
+			if n != nil {
+				body["body"] = *n
+			}
+			if ePre != "" {
+				v, err := strconv.ParseBool(ePre)
+				if err != nil {
+					return fmt.Errorf("--prerelease: %w", err)
+				}
+				body["prerelease"] = v
+			}
+			var r releaseView
+			if err := call(http.MethodPatch, path, body, &r); err != nil {
+				return err
+			}
+			return printRelease(&r)
+		},
+	}
+	edit.Flags().StringVarP(&eTitle, "title", "t", "", "new title")
+	edit.Flags().StringVarP(&eNotes, "notes", "n", "", "new notes")
+	edit.Flags().StringVarP(&eNotesFile, "notes-file", "F", "", "read the new notes from a file (- for stdin)")
+	edit.Flags().StringVar(&ePre, "prerelease", "", "true or false")
+
+	upload := &cobra.Command{
+		Use: "upload ORG/NAME TAG FILE...", Short: "Attach (or replace) files", Args: cobra.MinimumNArgs(3),
+		RunE: func(c *cobra.Command, args []string) error {
+			path, err := releasePath(args[0], args[1])
+			if err != nil {
+				return err
+			}
+			if err := uploadFiles(path, args[2:]); err != nil {
+				return err
+			}
+			var r releaseView
+			if err := call(http.MethodGet, path, nil, &r); err != nil {
+				return err
+			}
+			if r.Published {
+				return publishAndReport(path, false, false)
+			}
+			return printRelease(&r)
+		},
+	}
+	removeFile := &cobra.Command{
+		Use: "remove-file ORG/NAME TAG NAME", Short: "Remove an attached file", Args: cobra.ExactArgs(3),
+		RunE: func(c *cobra.Command, args []string) error {
+			path, err := releasePath(args[0], args[1])
+			if err != nil {
+				return err
+			}
+			if err := call(http.MethodDelete, path+"/assets/"+url.PathEscape(args[2]), nil, nil); err != nil {
+				return err
+			}
+			var r releaseView
+			if err := call(http.MethodGet, path, nil, &r); err != nil {
+				return err
+			}
+			if r.Published {
+				return publishAndReport(path, false, false)
+			}
+			return printRelease(&r)
+		},
+	}
+	var pAdopt, pForce bool
+	publish := &cobra.Command{
+		Use: "publish ORG/NAME TAG", Short: "Publish (or re-publish) to every mirror", Args: cobra.ExactArgs(2),
+		RunE: func(c *cobra.Command, args []string) error {
+			path, err := releasePath(args[0], args[1])
+			if err != nil {
+				return err
+			}
+			return publishAndReport(path, pAdopt, pForce)
+		},
+	}
+	publish.Flags().BoolVar(&pAdopt, "adopt", false, "take over releases that already exist on mirrors for this tag")
+	publish.Flags().BoolVar(&pForce, "force", false, "send it again even to mirrors that are up to date (e.g. deleted there by hand)")
+
+	list := &cobra.Command{
+		Use: "list ORG/NAME", Aliases: []string{"ls"}, Short: "List releases", Args: cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			path, err := releasePath(args[0], "")
+			if err != nil {
+				return err
+			}
+			var rs []releaseView
+			if err := call(http.MethodGet, path, nil, &rs); err != nil {
+				return err
+			}
+			if flagJSON {
+				return printJSON(rs)
+			}
+			if len(rs) == 0 {
+				fmt.Println("no releases")
+				return nil
+			}
+			w := table()
+			fmt.Fprintln(w, "TAG\tTITLE\tFILES\tMIRRORS\tCREATED")
+			for _, r := range rs {
+				counts := map[string]int{}
+				for _, m := range r.Mirrors {
+					counts[m.State]++
+				}
+				var parts []string
+				for _, st := range []string{"synced", "waiting", "pending", "draft", "failed", "conflict", "unsupported", "paused"} {
+					if counts[st] > 0 {
+						parts = append(parts, fmt.Sprintf("%d %s", counts[st], st))
+					}
+				}
+				fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\n", oneLine(r.Tag), oneLine(r.Name), len(r.Assets), strings.Join(parts, ", "), ago(&r.CreatedAt))
+			}
+			return w.Flush()
+		},
+	}
+	show := &cobra.Command{
+		Use: "show ORG/NAME TAG", Short: "Show a release and its state on each mirror", Args: cobra.ExactArgs(2),
+		RunE: func(c *cobra.Command, args []string) error {
+			path, err := releasePath(args[0], args[1])
+			if err != nil {
+				return err
+			}
+			var r releaseView
+			if err := call(http.MethodGet, path, nil, &r); err != nil {
+				return err
+			}
+			return printRelease(&r)
+		},
+	}
+	var output string
+	download := &cobra.Command{
+		Use: "download ORG/NAME TAG NAME", Short: "Download an attached file from the hub", Args: cobra.ExactArgs(3),
+		RunE: func(c *cobra.Command, args []string) error {
+			path, err := releasePath(args[0], args[1])
+			if err != nil {
+				return err
+			}
+			if output == "" {
+				output = filepath.Base(args[2])
+			}
+			out := os.Stdout
+			if output != "-" {
+				if out, err = os.OpenFile(output, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644); err != nil {
+					return err
+				}
+				defer out.Close()
+			}
+			if err := api().Download(context.Background(), path+"/assets/"+url.PathEscape(args[2]), out); err != nil {
+				if output != "-" {
+					os.Remove(output)
+				}
+				return err
+			}
+			return nil
+		},
+	}
+	download.Flags().StringVarP(&output, "output", "o", "", "output file (- for stdout; default: the file name)")
+	var hubOnly bool
+	rm := &cobra.Command{
+		Use: "rm ORG/NAME TAG", Short: "Delete a release from the mirrors and the hub", Args: cobra.ExactArgs(2),
+		RunE: func(c *cobra.Command, args []string) error {
+			path, err := releasePath(args[0], args[1])
+			if err != nil {
+				return err
+			}
+			if hubOnly {
+				path += "?hub_only=true"
+			}
+			var res struct {
+				Results []struct {
+					Mirror string `json:"mirror"`
+					State  string `json:"state"`
+					Error  string `json:"error"`
+				} `json:"results"`
+			}
+			err = call(http.MethodDelete, path, nil, &res)
+			for _, r := range res.Results {
+				fmt.Printf("  %s: %s %s\n", r.Mirror, r.State, oneLine(r.Error))
+			}
+			return err
+		},
+	}
+	rm.Flags().BoolVar(&hubOnly, "hub-only", false, "delete only on the hub; leave the platforms' releases alone")
+	cmd.AddCommand(create, edit, upload, removeFile, publish, list, show, download, rm)
+	return cmd
 }

@@ -10,6 +10,7 @@
 //	ssh/                      host key and learned mirror host keys
 //	repos/<org>/<name>.bundle git bundle --all (absent for empty repositories)
 //	repos/<org>/<name>.lfs/   Git LFS objects
+//	repos/<org>/<name>.releases/ release files
 //
 // Credentials stay encrypted with the instance's secret key, which is not
 // part of the snapshot: keep GITREPO_SECRET_KEY separately.
@@ -56,6 +57,8 @@ type Repo struct {
 	Bundle     string `json:"bundle,omitempty"`
 	LFSObjects int    `json:"lfs_objects"`
 	LFSBytes   int64  `json:"lfs_bytes"`
+	// ReleaseFiles counts stored release assets (content-addressed).
+	ReleaseFiles int `json:"release_files,omitempty"`
 	// Missing is set when the database lists the repository but its
 	// directory did not exist.
 	Missing bool `json:"missing,omitempty"`
@@ -151,11 +154,14 @@ func backupRepo(ctx context.Context, g *gitexec.Git, repoPath, dest, slug string
 	// LFS objects are copied after the bundle: the hub only accepts a push
 	// once its LFS objects are stored, so everything the bundle references
 	// is already on disk.
-	n, size, err := copyLFS(repoPath, base+".lfs")
+	n, size, err := copyObjects(filepath.Join(repoPath, "lfs", "objects"), base+".lfs")
 	if err != nil {
 		return nil, fmt.Errorf("copy LFS objects: %w", err)
 	}
 	e.LFSObjects, e.LFSBytes = n, size
+	if e.ReleaseFiles, _, err = copyObjects(filepath.Join(repoPath, "releases", "objects"), base+".releases"); err != nil {
+		return nil, fmt.Errorf("copy release files: %w", err)
+	}
 	return e, nil
 }
 
@@ -299,12 +305,18 @@ func restoreRepo(ctx context.Context, g *gitexec.Git, src, repoPath string, r Re
 	if r.Bundle == "" {
 		base = filepath.Join(src, "repos", filepath.FromSlash(r.Slug))
 	}
-	n, _, err := copyLFSBack(base+".lfs", repoPath)
+	n, _, err := copyObjectsBack(base+".lfs", filepath.Join(repoPath, "lfs", "objects"))
 	if err != nil {
 		return fmt.Errorf("restore LFS objects: %w", err)
 	}
 	if n != r.LFSObjects {
 		return fmt.Errorf("restored %d LFS objects, the snapshot lists %d", n, r.LFSObjects)
+	}
+	if n, _, err = copyObjectsBack(base+".releases", filepath.Join(repoPath, "releases", "objects")); err != nil {
+		return fmt.Errorf("restore release files: %w", err)
+	}
+	if n != r.ReleaseFiles {
+		return fmt.Errorf("restored %d release files, the snapshot lists %d", n, r.ReleaseFiles)
 	}
 	return nil
 }
@@ -354,10 +366,10 @@ func emptyDir(dir string) error {
 	return nil
 }
 
-// copyLFS copies (hard-links where possible) a repository's LFS objects.
+// copyObjects copies (hard-links where possible) a content-addressed store
+// laid out as <root>/aa/bb/<sha256>: Git LFS objects and release files.
 // Objects are immutable once stored, so sharing the inode is safe.
-func copyLFS(repoPath, dest string) (int, int64, error) {
-	root := filepath.Join(repoPath, "lfs", "objects")
+func copyObjects(root, dest string) (int, int64, error) {
 	n, size := 0, int64(0)
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -390,7 +402,9 @@ func copyLFS(repoPath, dest string) (int, int64, error) {
 	return n, size, err
 }
 
-func copyLFSBack(src, repoPath string) (int, int64, error) {
+// copyObjectsBack restores a content-addressed store into root, verifying
+// every object against its name.
+func copyObjectsBack(src, root string) (int, int64, error) {
 	if _, err := os.Stat(src); errors.Is(err, fs.ErrNotExist) {
 		return 0, 0, nil
 	}
@@ -408,7 +422,8 @@ func copyLFSBack(src, repoPath string) (int, int64, error) {
 		if !d.Type().IsRegular() {
 			return fmt.Errorf("%s is not a regular file", path)
 		}
-		written, err := copyVerified(path, lfs.ObjectPath(repoPath, d.Name()), d.Name())
+		oid := d.Name()
+		written, err := copyVerified(path, filepath.Join(root, oid[0:2], oid[2:4], oid), oid)
 		if err != nil {
 			return err
 		}

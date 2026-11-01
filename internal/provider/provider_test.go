@@ -96,3 +96,27 @@ func TestLFSLimits(t *testing.T) {
 		t.Fatal("GitLab's LFS limit depends on the instance and must not be assumed")
 	}
 }
+
+func TestGitHubUploadTarget(t *testing.T) {
+	g := &GitHub{}
+	dotcom := &store.Target{}
+	ghes := &store.Target{BaseURL: "https://git.corp.example"}
+	for _, c := range []struct {
+		t    *store.Target
+		raw  string
+		want string
+	}{
+		{dotcom, "https://uploads.github.com/repos/a/b/releases/1/assets{?name,label}", "https://uploads.github.com/repos/a/b/releases/1/assets"},
+		{dotcom, "https://api.github.com/repos/a/b/releases/1/assets", "https://api.github.com/repos/a/b/releases/1/assets"},
+		{dotcom, "https://evil.example/repos/a/b/releases/1/assets{?name}", ""},
+		{dotcom, "http://uploads.github.com/x", ""},
+		{ghes, "https://git.corp.example/api/uploads/repos/a/b/releases/1/assets{?name,label}", "https://git.corp.example/api/uploads/repos/a/b/releases/1/assets"},
+		{ghes, "https://uploads.github.com/repos/a/b/releases/1/assets", ""},
+		{ghes, "", ""},
+	} {
+		got, err := g.uploadTarget(c.t, c.raw)
+		if c.want == "" && err == nil || c.want != "" && got != c.want {
+			t.Errorf("uploadTarget(%q) = %q, %v; want %q", c.raw, got, err, c.want)
+		}
+	}
+}

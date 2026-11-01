@@ -40,13 +40,21 @@ type Config struct {
 	// X-Forwarded-For header is believed when recording client addresses.
 	TrustedProxies []string `yaml:"trusted_proxies"`
 
-	Git     GitConfig     `yaml:"git"`
-	Sync    SyncConfig    `yaml:"sync"`
-	Policy  PolicyConfig  `yaml:"policy"`
-	Alerts  AlertsConfig  `yaml:"alerts"`
-	SSH     SSHConfig     `yaml:"ssh"`
-	Bundles BundlesConfig `yaml:"bundles"`
-	Audit   AuditConfig   `yaml:"audit"`
+	Git      GitConfig      `yaml:"git"`
+	Sync     SyncConfig     `yaml:"sync"`
+	Policy   PolicyConfig   `yaml:"policy"`
+	Alerts   AlertsConfig   `yaml:"alerts"`
+	SSH      SSHConfig      `yaml:"ssh"`
+	Bundles  BundlesConfig  `yaml:"bundles"`
+	Audit    AuditConfig    `yaml:"audit"`
+	Releases ReleasesConfig `yaml:"releases"`
+}
+
+// ReleasesConfig controls releases kept on the hub and published to mirrors.
+type ReleasesConfig struct {
+	// MaxAssetSize rejects larger release files (0 = unlimited). GitHub
+	// accepts up to 2 GiB per file.
+	MaxAssetSize ByteSize `yaml:"max_asset_size"`
 }
 
 // AuditConfig controls the audit log of administrative changes and pushes.
@@ -158,7 +166,8 @@ func Default() *Config {
 			FailureThreshold:        3,
 			CredentialExpiryWarning: Duration(14 * 24 * time.Hour),
 		},
-		Audit: AuditConfig{Retention: Duration(365 * 24 * time.Hour)},
+		Audit:    AuditConfig{Retention: Duration(365 * 24 * time.Hour)},
+		Releases: ReleasesConfig{MaxAssetSize: ByteSize(2 << 30)},
 	}
 }
 

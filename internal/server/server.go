@@ -29,6 +29,7 @@ import (
 	"github.com/qwq-inc/gitrepo/internal/lfs"
 	"github.com/qwq-inc/gitrepo/internal/notify"
 	"github.com/qwq-inc/gitrepo/internal/registry"
+	"github.com/qwq-inc/gitrepo/internal/releases"
 	"github.com/qwq-inc/gitrepo/internal/secrets"
 	"github.com/qwq-inc/gitrepo/internal/sshserve"
 	"github.com/qwq-inc/gitrepo/internal/store"
@@ -56,9 +57,11 @@ type Server struct {
 	notify  *notify.Notifier
 	ssh     *sshserve.Server // nil when SSH is disabled
 	bundles *bundles.Manager // nil when bundles are disabled
-	sshLn   net.Listener
-	auth    *auth.Authenticator
-	gitsrv  *gitserve.Server
+	// releases keeps releases and publishes them to mirrors.
+	releases *releases.Manager
+	sshLn    net.Listener
+	auth     *auth.Authenticator
+	gitsrv   *gitserve.Server
 
 	tickets    *gitexec.Tickets
 	hookToken  string
@@ -143,8 +146,13 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*Server, error) {
 	s.reg = &registry.Registry{Store: st, Git: s.git, ReposDir: cfg.ReposDir(), TrashDir: cfg.TrashDir()}
 	s.notify = notify.New(st, box, log)
 	gate := &gitserve.Gate{}
+	s.releases = &releases.Manager{
+		Store: st, Git: s.git, Box: box, Registry: s.reg, Log: log,
+		MaxAssetSize: int64(cfg.Releases.MaxAssetSize), Timeout: 30 * time.Minute,
+	}
 	s.mgr = syncer.New(st, s.git, box, s.reg, log, syncer.Options{
 		Quiesce:            gate.Maintain,
+		AfterRun:           func(repoID int64) { s.releases.EnqueueRepo(context.Background(), repoID) },
 		Workers:            cfg.Sync.Workers,
 		PushTimeout:        cfg.Sync.PushTimeout.D(),
 		RetryBase:          cfg.Sync.RetryBase.D(),
@@ -304,6 +312,7 @@ func (s *Server) writeShims() error {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.registerAPI(mux)
+	s.registerReleaseAPI(mux)
 	mux.Handle("GET /ui/", webui.Handler("/ui/"))
 	mux.Handle("GET /ui", http.RedirectHandler("/ui/", http.StatusFound))
 	mux.Handle("GET /{$}", http.RedirectHandler("/ui/", http.StatusFound))
@@ -357,6 +366,7 @@ func (s *Server) Start(ln net.Listener) error {
 		s.log.Info("ssh enabled", "listen", sshLn.Addr().String(), "host_key", s.ssh.Fingerprint())
 	}
 	s.notify.Start(2)
+	s.releases.Start()
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
 	if s.opts.NoBackground {
@@ -381,6 +391,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 	s.bundleWG.Wait()
 	s.mgr.Shutdown()
+	s.releases.Stop()
 	s.notify.Stop()
 	if s.sockSrv != nil {
 		errs = append(errs, s.sockSrv.Shutdown(ctx))
@@ -440,6 +451,7 @@ func (s *Server) patrol(ctx context.Context) {
 	}
 	s.pruneAudit(ctx)
 	s.checkCredentialExpiry(ctx)
+	s.releases.RetryDue(ctx)
 	// Bundle builds can take long for big repositories; they must not hold
 	// up patrols and retries, and only one refresh runs at a time.
 	if s.bundles != nil && s.bundleBusy.CompareAndSwap(false, true) {

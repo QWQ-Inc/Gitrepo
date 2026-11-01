@@ -73,6 +73,9 @@ type Options struct {
 	// Quiesce, when set, refuses new pushes to a repository and waits for
 	// running ones; a backup purge holds it around git gc and LFS cleanup.
 	Quiesce func(ctx context.Context, repoID int64) (release func(), err error)
+	// AfterRun is called when a sync run of a repository has finished (its
+	// mirrors may now have new tags).
+	AfterRun func(repoID int64)
 }
 
 type Manager struct {
@@ -352,6 +355,9 @@ func (m *Manager) runRepo(repoID int64, p *pendingRun) {
 	}
 	wg.Wait()
 	m.notifyCompleted(repo, p.trigger, outcomes)
+	if m.opts.AfterRun != nil {
+		m.opts.AfterRun(repo.ID)
+	}
 	emit(Event{Type: "done"})
 }
 

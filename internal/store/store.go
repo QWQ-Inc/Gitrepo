@@ -240,6 +240,45 @@ CREATE TABLE audit_log (
 CREATE INDEX audit_log_repo ON audit_log (repo, id);
 CREATE INDEX audit_log_at ON audit_log (at);
 `,
+	// 7: releases kept on the hub and published to mirrors.
+	`
+CREATE TABLE releases (
+  id          INTEGER PRIMARY KEY,
+  repo_id     INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+  tag         TEXT    NOT NULL,
+  name        TEXT    NOT NULL DEFAULT '',
+  body        TEXT    NOT NULL DEFAULT '',
+  prerelease  INTEGER NOT NULL DEFAULT 0,
+  published   INTEGER NOT NULL DEFAULT 0,
+  adopt       INTEGER NOT NULL DEFAULT 0,
+  created_at  INTEGER NOT NULL,
+  updated_at  INTEGER NOT NULL,
+  UNIQUE (repo_id, tag)
+);
+CREATE TABLE release_assets (
+  id           INTEGER PRIMARY KEY,
+  release_id   INTEGER NOT NULL REFERENCES releases(id) ON DELETE CASCADE,
+  name         TEXT    NOT NULL,
+  size         INTEGER NOT NULL,
+  sha256       TEXT    NOT NULL,
+  content_type TEXT    NOT NULL DEFAULT 'application/octet-stream',
+  created_at   INTEGER NOT NULL,
+  UNIQUE (release_id, name)
+);
+CREATE TABLE release_mirrors (
+  release_id     INTEGER NOT NULL REFERENCES releases(id) ON DELETE CASCADE,
+  remote_id      INTEGER NOT NULL REFERENCES remotes(id) ON DELETE CASCADE,
+  remote_release TEXT    NOT NULL DEFAULT '',
+  state          TEXT    NOT NULL DEFAULT 'pending',
+  synced_hash    TEXT    NOT NULL DEFAULT '',
+  assets         TEXT    NOT NULL DEFAULT '{}',
+  last_error     TEXT    NOT NULL DEFAULT '',
+  failures       INTEGER NOT NULL DEFAULT 0,
+  next_retry_at  INTEGER NOT NULL DEFAULT 0,
+  updated_at     INTEGER NOT NULL,
+  PRIMARY KEY (release_id, remote_id)
+);
+`,
 }
 
 func (s *Store) migrate(ctx context.Context) error {
