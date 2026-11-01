@@ -307,6 +307,18 @@ CREATE TABLE edge_meta (
 	`
 ALTER TABLE targets ADD COLUMN expires_auto INTEGER NOT NULL DEFAULT 0;
 `,
+	// 12: branch protection on the hub.
+	`
+CREATE TABLE protections (
+  id          INTEGER PRIMARY KEY,
+  repos       TEXT    NOT NULL,
+  ref         TEXT    NOT NULL,
+  deny_force  INTEGER NOT NULL DEFAULT 1,
+  deny_delete INTEGER NOT NULL DEFAULT 1,
+  created_at  INTEGER NOT NULL,
+  UNIQUE (repos, ref)
+);
+`,
 }
 
 func (s *Store) migrate(ctx context.Context) error {

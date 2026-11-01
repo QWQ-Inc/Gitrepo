@@ -182,6 +182,11 @@ type Repo struct {
 	Busy          bool       `json:"busy"`
 	CreatedAt     *time.Time `json:"created_at"`
 	Remotes       []Remote   `json:"remotes"`
+	Protected     []struct {
+		Ref        string `json:"ref"`
+		DenyForce  bool   `json:"deny_force"`
+		DenyDelete bool   `json:"deny_delete"`
+	} `json:"protected,omitempty"`
 }
 
 type Event struct {

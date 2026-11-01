@@ -371,8 +371,28 @@ func (s *Server) GitEnv(ctx context.Context, repo *store.Repo, p *auth.Principal
 	}
 	if write {
 		env = append(env, githooks.EnvMaxFileSize+"="+strconv.FormatInt(s.maxFileSize(ctx, repo), 10))
+		env = append(env, githooks.EnvProtected+"="+s.protectionRules(ctx, repo.Slug))
 	}
 	return env
+}
+
+// protectionRules is the JSON list of protection rules that apply to slug,
+// for the pre-receive hook. If they cannot be loaded the value is invalid,
+// so the hook refuses the push rather than letting it bypass them.
+func (s *Server) protectionRules(ctx context.Context, slug string) string {
+	all, err := s.Store.ListProtections(ctx)
+	if err != nil {
+		s.Log.Error("load protection rules", "repo", slug, "err", err)
+		return "unavailable"
+	}
+	rules := []githooks.ProtectRule{}
+	for _, p := range all {
+		if auth.MatchRepo([]string{p.Repos}, slug) {
+			rules = append(rules, githooks.ProtectRule{Ref: p.Ref, DenyForce: p.DenyForce, DenyDelete: p.DenyDelete})
+		}
+	}
+	b, _ := json.Marshal(rules)
+	return string(b)
 }
 
 // bundleConfig advertises the repository's current bundle to readers.

@@ -175,7 +175,7 @@ gr backup restore acme/demo refs/backup/<时间>/refs/heads/main  # 恢复成新
 gr backup purge acme/demo --all --lfs --yes                     # 彻底清除
 ```
 
-**推送了密钥怎么办**：先强推去掉它，再执行 `gr backup purge … --lfs`。清除会删除备份，并把只被备份引用的提交和 LFS 文件从 Hub 上彻底删掉（`git gc`），此后按 SHA 也取不回来。几点注意：
+**推送了密钥怎么办**：先强推去掉它（分支受保护时，先用 `gr protect rm` 临时取消保护），再执行 `gr backup purge … --lfs`。清除会删除备份，并把只被备份引用的提交和 LFS 文件从 Hub 上彻底删掉（`git gc`），此后按 SHA 也取不回来。几点注意：
 - 清除期间这个仓库的 push 会被拒绝，提示稍后重试：push 可能让一个正要被删除的旧对象重新被引用。清除会先等正在进行的 push 结束，大仓库的 gc 可能需要几分钟；
 - 最近 5 分钟内写入的内容会被保留，例如为下一次 push 刚上传的 LFS 文件；
 - 镜像平台上的副本要在各平台上自行处理；
@@ -183,6 +183,24 @@ gr backup purge acme/demo --all --lfs --yes                     # 彻底清除
 - 无论如何都要轮换泄露的密钥。
 
 控制台仓库页的"备份"一节也可以恢复和清除。
+
+## 分支保护
+
+```bash
+gr protect add '*' main                    # 所有仓库的 main：禁止强推和删除
+gr protect add 'acme/*' 'release/*'        # acme 下所有仓库的 release/ 分支
+gr protect add acme/app 'refs/tags/v*'     # 版本标签不能被移动或删除
+gr protect add acme/app develop --allow-delete   # 只禁止强推
+gr protect list
+gr protect rm 3
+```
+
+受保护的分支在 Hub 上不能被强推（改写历史）或删除，HTTPS 和 SSH 都一样。镜像只接收 Hub 上有的内容，所以镜像上的历史也不会被改写。受保护的标签不能被移动或删除。一次 push 里只要有一个 ref 被拒绝，整个 push 都不生效。
+
+- 仓库写法与 token 的仓库范围相同（`acme/app`、`acme/*`、`*`）；分支可以写名字或模式，标签要写完整的 `refs/tags/…`。和 shell 通配一样，`*` 不跨越 `/`。
+- 没有例外：admin 也一样。确实需要改写时（例如清除误提交的密钥），先删除规则，改写完再加回来。规则的增删都记在审计日志里，被覆盖的历史照常保存在 `refs/backup/` 下。
+- 控制台的"分支保护"页面可以管理规则，仓库页面会显示适用于它的规则。
+- 规则读取失败时（例如数据库异常），push 会被拒绝，而不是绕过规则。
 
 ## 接管已有仓库
 
@@ -381,6 +399,7 @@ gr key     add|list|rm                   SSH 公钥
 gr ssh                                   SSH 地址与主机指纹
 gr webhook add|list|test|enable|disable|rm
 gr backup  list|restore|purge            被覆盖历史的隐藏备份
+gr protect add|list|rm                   分支保护：禁止强推和删除
 gr audit   [--repo] [--actor] [--action] 审计日志
 gr release create|edit|upload|remove-file|publish|list|show|download|rm  发布到所有镜像的 Release
 gr doctor                                部署自检：工具、public_url、磁盘、各平台凭据、镜像、边缘节点
@@ -398,6 +417,7 @@ gr doctor                                部署自检：工具、public_url、�
 | GET/PATCH/DELETE | `/api/targets/{name}` | 查看 / 修改（含轮换凭据）/ 删除 |
 | POST | `/api/targets/{name}/check` | 验证凭据 |
 | GET/POST | `/api/bindings`，DELETE `/api/bindings/{id}` | 组织 → target 的默认规则 |
+| GET/POST | `/api/protections`，DELETE `/api/protections/{id}` | 分支保护，`{"repos":"acme/*","ref":"main","deny_force":true,"deny_delete":true}` |
 | GET/POST | `/api/repos` | 列出 / 登记仓库 |
 | GET/DELETE | `/api/repos/{org}/{name}` | 状态详情 / 注销（数据移入 trash） |
 | PATCH | `/api/repos/{org}/{name}` | 修改可见性 `{"visibility":"private"}`，同时修改跟随仓库的镜像，返回各镜像的结果 |

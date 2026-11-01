@@ -96,7 +96,7 @@ func (s *Server) withAudit(p *auth.Principal, fn http.HandlerFunc) http.HandlerF
 // visibility, tokens, SSH keys). Others - release uploads above all - must
 // not make every edge poll again and re-fetch the repository.
 func edgeRelevant(pattern string) bool {
-	for _, p := range []string{"/releases", "/remotes", "/sync", "/api/webhooks", "/api/targets", "/api/bindings"} {
+	for _, p := range []string{"/releases", "/remotes", "/sync", "/api/webhooks", "/api/targets", "/api/bindings", "/api/protections"} {
 		if strings.Contains(pattern, p) {
 			return false
 		}

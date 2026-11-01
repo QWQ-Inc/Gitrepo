@@ -57,6 +57,7 @@ func (s *Server) registerAPI(mux *http.ServeMux) {
 	s.registerBackupAPI(h)
 	s.registerAuditAPI(h)
 	s.registerDoctorAPI(h)
+	s.registerProtectAPI(h)
 }
 
 func (s *Server) requireAdmin(fn http.HandlerFunc) http.HandlerFunc {
@@ -902,6 +903,9 @@ type repoOut struct {
 	Busy          bool        `json:"busy"`
 	CreatedAt     *time.Time  `json:"created_at"`
 	Remotes       []remoteOut `json:"remotes"`
+	// Protected lists the protection rules that apply (single repository
+	// view only).
+	Protected []protectionOut `json:"protected,omitempty"`
 }
 
 // stateRank orders remote states from best to worst for repo aggregation.
@@ -1042,6 +1046,7 @@ func (s *Server) apiGetRepo(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	ro.Protected = s.protectionsFor(r, repo.Slug)
 	writeJSON(w, http.StatusOK, ro)
 }
 

@@ -134,6 +134,7 @@ const routes = [
   [/^#\/repo\/([^/]+)\/([^/]+)$/, viewRepo],
   [/^#\/targets$/, viewTargets],
   [/^#\/bindings$/, viewBindings],
+  [/^#\/protect$/, viewProtect],
   [/^#\/tokens$/, viewTokens],
   [/^#\/webhooks$/, viewWebhooks],
   [/^#\/audit(?:\?.*)?$/, viewAudit],
@@ -358,6 +359,8 @@ async function viewRepo(org, name) {
           return `已改为${label}` + (res.mirrors.length ? `，${res.mirrors.filter((m) => m.state === 'changed').length} 个镜像已同步修改` : '');
         }) }, repo.visibility === 'public' ? '改为私有' : '改为公开')),
       h('dt', {}, '默认分支'), h('dd', {}, repo.default_branch || '（空仓库）'),
+      (repo.protected || []).length ? [h('dt', {}, '受保护'), h('dd', {}, repo.protected.map((p, i) => [i ? '；' : '', h('code', {}, p.ref), ' ', protectLabel(p)]),
+        ' ', h('a', { href: '#/protect' }, '管理'))] : null,
       h('dt', {}, '添加远端'), h('dd', {}, h('code', {}, `git remote add hub ${repo.clone_url}`)))),
     h('h2', {}, '镜像'),
     table(['镜像', '状态', '上次成功', '分叉时', 'URL', ''], remoteRows, '还没有镜像。'),
@@ -597,6 +600,43 @@ async function viewBindings() {
     table(['组织', '平台凭据', '命名空间', '镜像仓库名', '分叉时', ''], rows, '还没有规则。'),
     h('h2', {}, '添加规则'),
     h('div', { class: 'panel' }, targets.length ? form : h('p', {}, '请先', h('a', { href: '#/targets' }, '添加平台凭据'), '。')));
+}
+
+// ------------------------------------------------------------------ protect
+
+function protectLabel(p) {
+  return [p.deny_force ? '禁止强推' : '', p.deny_delete ? '禁止删除' : ''].filter(Boolean).join('、');
+}
+
+async function viewProtect() {
+  const rules = await api('GET', '/api/protections');
+  const rows = rules.map((p) => h('tr', {},
+    h('td', { class: 'mono' }, p.repos === '*' ? '所有仓库（*）' : p.repos),
+    h('td', { class: 'mono' }, p.ref),
+    h('td', {}, protectLabel(p)),
+    h('td', { class: 'actions' }, h('button', { class: 'danger small', onclick: action(async () => {
+      if (!confirm(`取消对 ${p.repos} 中 ${p.ref} 的保护？`)) return false;
+      await api('DELETE', '/api/protections/' + p.id);
+      rerender();
+    }, '已删除') }, '删除'))));
+  const form = h('form', { class: 'grid', onsubmit: action(async (ev) => {
+    const d = formData(ev.target);
+    await api('POST', '/api/protections', { repos: d.repos, ref: d.ref, deny_force: d.deny_force, deny_delete: d.deny_delete });
+    rerender();
+    return '已添加';
+  }) },
+  field('仓库（* 表示全部，也可以是 acme/*）', h('input', { name: 'repos', value: '*', required: true })),
+  field('分支（如 main、release/*；标签写 refs/tags/v*）', h('input', { name: 'ref', value: 'main', required: true })),
+  h('label', { class: 'check' }, h('input', { type: 'checkbox', name: 'deny_force', checked: true }), '禁止强推（改写历史）'),
+  h('label', { class: 'check' }, h('input', { type: 'checkbox', name: 'deny_delete', checked: true }), '禁止删除'),
+  h('div', {}, h('button', { type: 'submit' }, '添加')));
+  app.replaceChildren(
+    h('h1', {}, '分支保护'),
+    h('p', { class: 'hint' }, '受保护的分支在 Hub 上不能被强推或删除（HTTPS 和 SSH 都一样），镜像也就不会被改写。受保护的标签不能被移动或删除。* 不跨越 /。'),
+    h('p', { class: 'hint' }, '确实需要改写时（例如清除误提交的密钥），先删除对应规则，完成后再加回来；这些操作都记在审计日志里。'),
+    table(['仓库', '分支 / 标签', '规则', ''], rows, '还没有规则。'),
+    h('h2', {}, '添加规则'),
+    h('div', { class: 'panel' }, form));
 }
 
 // ------------------------------------------------------------------- tokens

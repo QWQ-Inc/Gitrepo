@@ -49,7 +49,7 @@ func main() {
 	root.PersistentFlags().StringVar(&flagToken, "token", os.Getenv("GITREPO_TOKEN"), "admin token (env GITREPO_TOKEN)")
 	root.PersistentFlags().BoolVar(&flagJSON, "json", false, "print raw JSON")
 
-	root.AddCommand(targetCmd(), bindCmd(), bindingCmd(), repoCmd(), remoteCmd(), syncCmd(), statusCmd(), runsCmd(), tokenCmd(), keyCmd(), sshInfoCmd(), webhookCmd(), backupCmd(), auditCmd(), releaseCmd(), doctorCmd())
+	root.AddCommand(targetCmd(), bindCmd(), bindingCmd(), repoCmd(), remoteCmd(), syncCmd(), statusCmd(), runsCmd(), tokenCmd(), keyCmd(), sshInfoCmd(), webhookCmd(), backupCmd(), auditCmd(), releaseCmd(), doctorCmd(), protectCmd())
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
@@ -911,6 +911,9 @@ func statusOne(slug string) error {
 	fmt.Printf("push/clone: %s\n", r.CloneURL)
 	if r.SSHURL != "" {
 		fmt.Printf("ssh:        %s\n", r.SSHURL)
+	}
+	for _, p := range r.Protected {
+		fmt.Printf("protected:  %s (%s)\n", p.Ref, protection{DenyForce: p.DenyForce, DenyDelete: p.DenyDelete}.rules())
 	}
 	fmt.Printf("state:      %s%s\n\n", r.State, busy)
 	if len(r.Remotes) == 0 {

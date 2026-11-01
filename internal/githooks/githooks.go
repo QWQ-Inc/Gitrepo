@@ -92,6 +92,7 @@ func gitBin() string {
 
 // PreReceive enforces hub policy before any ref is updated:
 //   - only refs/heads/* and refs/tags/* may be pushed;
+//   - protected refs (GITREPO_PROTECTED) are not deleted or rewritten;
 //   - no new blob may exceed GITREPO_MAX_FILE_SIZE (the strictest limit of
 //     all remotes), so a push the hub accepts will not be rejected later by
 //     e.g. GitHub's 100 MiB limit.
@@ -113,6 +114,17 @@ func PreReceive(stdin io.Reader, stderr io.Writer) int {
 		}
 		if !gitexec.IsZero(u.New) {
 			tips = append(tips, u.New)
+		}
+	}
+	if len(problems) == 0 {
+		rules, err := protectedFromEnv()
+		if err != nil {
+			say(stderr, "cannot read the protection rules: %v", err)
+			return 1
+		}
+		if p := checkProtected(rules, updates); len(p) > 0 {
+			problems = append(problems, p...)
+			problems = append(problems, "an administrator can lift the rule (gr protect rm) if this is really intended; overwritten history is kept under refs/backup/")
 		}
 	}
 	maxSize, _ := strconv.ParseInt(os.Getenv(EnvMaxFileSize), 10, 64)
