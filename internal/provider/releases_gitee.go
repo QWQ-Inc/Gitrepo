@@ -35,7 +35,7 @@ func (g *Gitee) GetRelease(ctx context.Context, t *store.Target, secret string, 
 		return nil, err
 	}
 	if r.ID == "" || r.ID == "0" {
-		return nil, nil // Gitee answers {} for a tag without a release
+		return nil, nil // Gitee answers null (200) for a tag without a release
 	}
 	rr := &RemoteRelease{ID: idString(r.ID), Key: idString(r.ID)}
 	// Attachments are paginated (at most 100 per page).

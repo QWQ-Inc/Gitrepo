@@ -360,7 +360,7 @@ func (f *fakePlatforms) serveRelease(w http.ResponseWriter, r *http.Request) boo
 		rel := st.rels[key(unesc(strings.Join(after[1:], "/")))]
 		if rel == nil {
 			if plat == "ge" {
-				writeJSONResp(w, 200, map[string]any{}) // Gitee answers {} for a tag without a release
+				writeJSONResp(w, 200, nil) // Gitee answers null (200) for a tag without a release
 				return true
 			}
 			return notFound()

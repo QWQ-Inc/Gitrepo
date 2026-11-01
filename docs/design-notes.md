@@ -357,3 +357,14 @@ Hub 自己实现了 LFS 服务端（`internal/lfs`）：
   - SSH 读取也遵守就绪判断和等待。
   - 每 6 小时全量重新拉取一次，弥补可能漏掉的变化通知。
   - 复制状态里的仓库名先经过 `ParseSlug` 规范化。
+
+## 用真实平台核对模拟 API
+
+- 端到端测试用的是模拟的平台 API，它们可能和真实平台不一样。`internal/provider/contract_test.go` 用真实平台的公开 API，以匿名、只读的方式，跑适配器的 Release 读取路径。
+  - 平台：GitLab.com（gitlab-org/gitlab-runner）、Codeberg 上的 Forgejo、Gitee（openharmony/docs）；GitHub 可选。
+  - 核对内容：ID 类型、附件字段、"没有 Release"的表示方式、含 `/` 的标签。
+  - 需要联网，设置 `GITREPO_CONTRACT=1` 才运行。
+- **核对中发现的差异：**
+  - Gitee 对没有 Release 的标签返回 `null`（状态 200），而不是原先以为的 `{}`。适配器两种都按"没有"处理；模拟 API 已改成和真实一致。
+  - Gitee 会直接断开 `access_token` 为空的请求，所以没有令牌时不再附带这个参数。
+- 写操作（建 Release、上传附件、建仓、推送）仍然只有模拟测试，需要真实平台的测试账号才能核对。

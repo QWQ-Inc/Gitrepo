@@ -506,4 +506,11 @@ make test     # go test -race ./...（端到端测试会启动真实的 git http
 make build    # bin/gitrepo, bin/gr
 ```
 
+各平台在测试里用的是模拟 API。另有一组只读的契约测试，用真实平台的公开 API 核对这些模拟是否和实际一致，包括 GitLab.com、Codeberg（Forgejo）、Gitee，GitHub 可选。它们需要联网，默认跳过：
+
+```bash
+GITREPO_CONTRACT=1 go test ./internal/provider -run Contract -v
+GITREPO_CONTRACT=1 GITREPO_CONTRACT_GITHUB=owner/repo GITHUB_TOKEN=… go test ./internal/provider -run Contract -v
+```
+
 许可证：Apache-2.0。

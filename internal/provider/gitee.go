@@ -76,13 +76,17 @@ func (g *Gitee) GitCred(t *store.Target, secret string) *gitexec.Cred {
 	return &gitexec.Cred{Kind: "token", Username: t.CredUsername, Secret: secret}
 }
 
-// call adds the access token, which Gitee expects as a parameter.
+// call adds the access token, which Gitee expects as a parameter (Gitee
+// drops requests with an empty one, so anonymous reads send none).
 func (g *Gitee) call(ctx context.Context, method, u, secret string, in, out any) (int, error) {
-	sep := "?"
-	if strings.Contains(u, "?") {
-		sep = "&"
+	if secret != "" {
+		sep := "?"
+		if strings.Contains(u, "?") {
+			sep = "&"
+		}
+		u += sep + "access_token=" + url.QueryEscape(secret)
 	}
-	status, err := doJSON(ctx, method, u+sep+"access_token="+url.QueryEscape(secret), nil, in, out)
+	status, err := doJSON(ctx, method, u, nil, in, out)
 	return status, scrub(err, secret)
 }
 
