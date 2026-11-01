@@ -49,7 +49,7 @@ func main() {
 	root.PersistentFlags().StringVar(&flagToken, "token", os.Getenv("GITREPO_TOKEN"), "admin token (env GITREPO_TOKEN)")
 	root.PersistentFlags().BoolVar(&flagJSON, "json", false, "print raw JSON")
 
-	root.AddCommand(targetCmd(), bindCmd(), bindingCmd(), repoCmd(), remoteCmd(), syncCmd(), statusCmd(), runsCmd(), tokenCmd(), keyCmd(), sshInfoCmd(), webhookCmd(), backupCmd(), auditCmd(), releaseCmd())
+	root.AddCommand(targetCmd(), bindCmd(), bindingCmd(), repoCmd(), remoteCmd(), syncCmd(), statusCmd(), runsCmd(), tokenCmd(), keyCmd(), sshInfoCmd(), webhookCmd(), backupCmd(), auditCmd(), releaseCmd(), doctorCmd())
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
@@ -1823,4 +1823,45 @@ so CI can publish releases:
 	rm.Flags().BoolVar(&hubOnly, "hub-only", false, "delete only on the hub; leave the platforms' releases alone")
 	cmd.AddCommand(create, edit, upload, removeFile, publish, list, show, download, rm)
 	return cmd
+}
+
+// ------------------------------------------------------------------ doctor
+
+func doctorCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "doctor",
+		Short: "Check the deployment: tools, public URL, disk, credentials, mirrors",
+		Long: `Ask the server to check itself: git and git-lfs, whether public_url
+reaches it, free disk space, every target's credential against its
+platform, failing mirrors and webhooks, SSH and edge nodes.
+
+Exits with status 1 when a check fails.`,
+		Args: cobra.NoArgs,
+		RunE: func(c *cobra.Command, args []string) error {
+			var res struct {
+				OK     bool `json:"ok"`
+				Checks []struct {
+					Name   string `json:"name"`
+					Status string `json:"status"`
+					Detail string `json:"detail"`
+				} `json:"checks"`
+			}
+			if err := call(http.MethodGet, "/api/doctor", nil, &res); err != nil {
+				return err
+			}
+			if flagJSON {
+				return printJSON(res)
+			}
+			w := table()
+			mark := map[string]string{"ok": "ok", "warn": "WARN", "fail": "FAIL"}
+			for _, ch := range res.Checks {
+				fmt.Fprintf(w, "%s\t%s\t%s\n", mark[ch.Status], ch.Name, oneLine(ch.Detail))
+			}
+			w.Flush()
+			if !res.OK {
+				return fmt.Errorf("some checks failed")
+			}
+			return nil
+		},
+	}
 }

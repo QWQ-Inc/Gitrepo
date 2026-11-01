@@ -373,6 +373,7 @@ gr webhook add|list|test|enable|disable|rm
 gr backup  list|restore|purge            被覆盖历史的隐藏备份
 gr audit   [--repo] [--actor] [--action] 审计日志
 gr release create|edit|upload|remove-file|publish|list|show|download|rm  发布到所有镜像的 Release
+gr doctor                                部署自检：工具、public_url、磁盘、各平台凭据、镜像、边缘节点
 ```
 
 所有命令都支持 `--json`。`gr` 读取 `GITREPO_URL` 和 `GITREPO_TOKEN`。
@@ -397,6 +398,7 @@ gr release create|edit|upload|remove-file|publish|list|show|download|rm  发布�
 | POST | `/api/repos/{org}/{name}/backups/restore` | 把备份恢复成新分支，`{"backup":"refs/backup/…","branch":"可选"}` |
 | POST | `/api/repos/{org}/{name}/backups/purge` | 彻底清除，`{"backups":[…]}` 或 `{"all":true}`，`"lfs":true` 同时清理无引用的 LFS 对象 |
 | GET | `/api/repos/{org}/{name}/runs` | 同步历史 |
+| GET | `/api/doctor` | 部署自检，返回各项检查（ok / warn / fail） |
 | GET | `/api/audit` | 审计日志，新的在前；`?repo=&actor=&action=&limit=&before=`，返回 `next` 用于翻页 |
 | GET/POST | `/api/repos/{org}/{name}/releases` | 列出 / 新建 Release，`{"tag":"v1.0","name":"…","body":"…","prerelease":false,"publish":true,"wait":true}`（需仓库 write 权限，下同） |
 | GET/PATCH/DELETE | `/api/repos/{org}/{name}/releases/{tag}` | 查看（含各镜像状态）/ 修改 / 删除（`?hub_only=true` 只删 Hub 上的）。标签含 `/` 时写成 `%2F` |
@@ -453,6 +455,13 @@ docker run -d -p 8080:8080 -v gitrepo-edge:/data \
 
 ## 运维
 
+- **自检**：部署完、或者改了配置之后，运行 `gr doctor`。它让服务端从自己的角度检查一遍，有失败项时退出码为 1，可以放进监控脚本。检查内容：
+  - git 和 git-lfs 是否可用；
+  - `public_url` 能否访问到本机，以及是不是明文 http；
+  - 数据目录的剩余空间；
+  - 每个平台凭据能否通过平台 API 验证（GitHub App 会实际换一次令牌），以及是否已过期或即将过期；
+  - 是否有失败或分叉的镜像、投递失败的通知；
+  - 各边缘节点最近一次同步的时间。
 - **审计**：见[审计日志](#审计日志)。
 - **数据目录**：`repos/`（bare 仓库，含 LFS 对象）、`gitrepo.db`（SQLite，WAL 模式）、`ssh/`（SSH 主机密钥）、`bundles/`（可随时重建）、`trash/`（注销的仓库）。服务运行时不要直接复制 `gitrepo.db`，用 `gitrepo backup`，见下文。
 - **实例备份**：见[实例备份与恢复](#实例备份与恢复)。即使没有快照，代码也可以用 `gr repo import` 从任一镜像恢复，但凭据、token 和只在 Hub 上的仓库会丢失。

@@ -54,6 +54,7 @@ func (s *Server) registerAPI(mux *http.ServeMux) {
 	s.registerSSHAPI(h)
 	s.registerBackupAPI(h)
 	s.registerAuditAPI(h)
+	s.registerDoctorAPI(h)
 }
 
 func (s *Server) requireAdmin(fn http.HandlerFunc) http.HandlerFunc {

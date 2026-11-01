@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -22,6 +23,33 @@ type stateClock struct {
 	gen   uint64
 	repos map[string]uint64
 	ch    chan struct{}
+	seen  map[string]time.Time // edge token name -> last poll
+}
+
+type edgeSeen struct {
+	name string
+	seen time.Time
+}
+
+func (c *stateClock) touch(name string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.seen == nil {
+		c.seen = map[string]time.Time{}
+	}
+	c.seen[name] = time.Now()
+}
+
+// edges lists the edge nodes that polled since this process started.
+func (c *stateClock) edges() []edgeSeen {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []edgeSeen
+	for n, t := range c.seen {
+		out = append(out, edgeSeen{n, t})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
+	return out
 }
 
 func newStateClock() *stateClock {
@@ -111,6 +139,7 @@ func (s *Server) apiEdgeState(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusForbidden, errors.New("an edge token must cover all repositories (create it without --repos)"))
 		return
 	}
+	s.clock.touch(p.Name)
 	version, changed := s.clock.version()
 	if since := r.URL.Query().Get("since"); since == version {
 		wait, _ := strconv.Atoi(r.URL.Query().Get("wait"))
