@@ -85,6 +85,11 @@ type Replica struct {
 	fills    map[string]*fill
 	fillSem  chan struct{}
 	ctx      context.Context
+
+	// Tests: replace the fetch, and observe the moment between a fetch
+	// and the decision to go idle.
+	fetchFunc      func(ctx context.Context, path, head string) error
+	testAfterFetch func()
 }
 
 // repoState tracks one repository's copy.
@@ -417,7 +422,11 @@ func (r *Replica) run(ctx context.Context, slug string) {
 		}
 		var err error
 		if !deleted {
-			err = r.fetch(ctx, path, want.head)
+			if r.fetchFunc != nil {
+				err = r.fetchFunc(ctx, path, want.head)
+			} else {
+				err = r.fetch(ctx, path, want.head)
+			}
 		}
 
 		r.mu.Lock()
@@ -434,7 +443,6 @@ func (r *Replica) run(ctx context.Context, slug string) {
 		if current {
 			rs.ready = true
 		}
-		again := rs.dirty || rs.wipe
 		r.mu.Unlock()
 
 		if current {
@@ -447,10 +455,17 @@ func (r *Replica) run(ctx context.Context, slug string) {
 				}
 			}
 		}
-		if again && ctx.Err() == nil {
+		if r.testAfterFetch != nil {
+			r.testAfterFetch()
+		}
+		// Decide whether to stop in the same critical section that marks the
+		// repository idle: a change arriving after the fetch (schedule only
+		// sets dirty while we are busy) must not be lost.
+		r.mu.Lock()
+		if (rs.dirty || rs.wipe) && ctx.Err() == nil {
+			r.mu.Unlock()
 			continue
 		}
-		r.mu.Lock()
 		rs.busy = false
 		close(rs.done)
 		r.mu.Unlock()

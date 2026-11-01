@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -222,18 +223,20 @@ func (s *Server) Serve(ln net.Listener) error {
 type idleConn struct {
 	net.Conn
 	timeout time.Duration
-	armed   bool
+	// armed is set by the connection's handler while the SSH library's
+	// reader already runs: it must be atomic.
+	armed atomic.Bool
 }
 
 func (c *idleConn) Read(b []byte) (int, error) {
-	if c.armed {
+	if c.armed.Load() {
 		c.Conn.SetDeadline(time.Now().Add(c.timeout))
 	}
 	return c.Conn.Read(b)
 }
 
 func (c *idleConn) Write(b []byte) (int, error) {
-	if c.armed {
+	if c.armed.Load() {
 		c.Conn.SetDeadline(time.Now().Add(c.timeout))
 	}
 	return c.Conn.Write(b)
@@ -265,7 +268,7 @@ func (s *Server) handleConn(raw net.Conn) {
 		return
 	}
 	defer conn.Close()
-	nc.armed = true
+	nc.armed.Store(true)
 	raw.SetDeadline(time.Now().Add(nc.timeout))
 	go ssh.DiscardRequests(reqs)
 

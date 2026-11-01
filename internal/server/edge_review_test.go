@@ -44,7 +44,7 @@ func startEdgeNode(t *testing.T, e *env, token, dataDir, upstream, gitBin string
 	}
 	cfg.Edge.TokenEnv = "RH_TEST_EDGE_TOKEN"
 	t.Setenv("RH_TEST_EDGE_TOKEN", token)
-	srv, addr := startServer(t, cfg, slog.New(slog.NewTextHandler(e.logs, nil)))
+	srv, addr := startServer(t, cfg, slog.New(slog.NewTextHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug})).With("node", "edge"))
 	return &edgeNode{addr: addr, srv: srv, cfg: cfg}
 }
 
@@ -251,7 +251,13 @@ exec git "$@"
 			}()
 		}
 		wg.Wait()
-		if n := strings.Count(e.logs.String(), "path=/acme/app.git/info/lfs/objects/"+oid+" status=200"); n != 1 {
+		n := 0
+		for _, line := range strings.Split(e.logs.String(), "\n") {
+			if strings.Contains(line, "path=/acme/app.git/info/lfs/objects/"+oid+" status=200") && !strings.Contains(line, "node=edge") {
+				n++ // served by the hub, not by the edge
+			}
+		}
+		if n != 1 {
 			t.Fatalf("the hub served the object %d times", n)
 		}
 	})
