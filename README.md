@@ -192,7 +192,7 @@ Hub 的数据丢失时，也用同一条命令从任意一个镜像恢复。如�
 - 镜像平台要开启 LFS：GitHub 默认开启，但有存储配额；GitLab 默认开启；Gitea/Forgejo 需要服务端启用 LFS。通过 SSH 访问的通用镜像，需要服务端支持 `git-lfs-authenticate`。
 - 上传到 Hub 时，按该仓库所有镜像中最严的 LFS 大小上限拒绝过大的对象。GitHub 默认 2 GB（Team 和 Enterprise 套餐更高，可用 `gr target update github --max-lfs-object-size <字节>` 覆盖）；全局上限用 `policy.max_lfs_object_size` 设置。
 - LFS 传输链接 15 分钟有效（git-lfs 会自动重新获取），所以撤销令牌后最多 15 分钟就会失效。
-- 对象存放在 Hub 仓库目录下的 `lfs/objects/`，备份数据目录时会一并备份。
+- 对象存放在 Hub 仓库目录下的 `lfs/objects/`，`gitrepo backup` 会一并备份（见[实例备份与恢复](#实例备份与恢复)）。
 - 暂不支持 LFS 文件锁：`git lfs lock` 会返回明确的错误；推送时的锁检查会通过，不会产生警告。
 
 ## SSH
@@ -208,7 +208,7 @@ git push hub main
 
 - 公钥和令牌一样带权限（read/write/create）和仓库范围。push 自动建仓、pre/post-receive、镜像同步与 HTTPS 完全一致。
 - 支持 Git 协议 v2，也支持通过 SSH 使用 git-lfs（走 `git-lfs-authenticate`，实际传输经由 HTTPS，所以 `public_url` 要配置成客户端能访问的地址）。
-- 主机密钥在首次启动时生成，保存在 `<data_dir>/ssh/host_ed25519_key`，随数据目录一起备份。
+- 主机密钥在首次启动时生成，保存在 `<data_dir>/ssh/host_ed25519_key`，`gitrepo backup` 会一并备份，恢复后客户端不会看到主机密钥变化的警告。
 - 不提供 shell：`ssh git@…` 只会回一句问候并断开。
 - 只接受 ed25519、ECDSA，以及至少 2048 位的 RSA 公钥。
 
@@ -366,11 +366,34 @@ Git 地址：`/{org}/{name}.git`（smart HTTP，协议 v2）；启用 SSH 后还
 ## 运维
 
 - **审计**：见[审计日志](#审计日志)。
-- **数据目录**：`repos/`（bare 仓库，含 LFS 对象）、`gitrepo.db`（SQLite）、`ssh/`（SSH 主机密钥）、`bundles/`（可随时重建）、`trash/`（注销的仓库）。备份这个目录和 `GITREPO_SECRET_KEY` 就够了。即使整个目录丢失，代码也可以用 `gr repo import` 从任一镜像恢复。
+- **数据目录**：`repos/`（bare 仓库，含 LFS 对象）、`gitrepo.db`（SQLite，WAL 模式）、`ssh/`（SSH 主机密钥）、`bundles/`（可随时重建）、`trash/`（注销的仓库）。服务运行时不要直接复制 `gitrepo.db`，用 `gitrepo backup`，见下文。
+- **实例备份**：见[实例备份与恢复](#实例备份与恢复)。即使没有快照，代码也可以用 `gr repo import` 从任一镜像恢复，但凭据、token 和只在 Hub 上的仓库会丢失。
 - **重试**：失败的镜像按 30s、1m、2m… 指数退避自动重试，上限 1h；巡检每 10 分钟全量检查一次，兜底 webhook 丢失和服务重启。
 - **告警**：见[通知](#通知)。
 - **监控**：`gitrepo_remote_state`、`gitrepo_remote_last_success_timestamp_seconds`、`gitrepo_remote_consecutive_failures`、`gitrepo_target_credential_expiry_timestamp_seconds`。建议对"上次成功同步距今多久"和 `state="diverged"` 设告警。
 - **单实例**：Hub 是唯一权威源，按单实例运行。Gitrepo 自己的部署源请直接指向 GitHub，不要经过 Gitrepo。
+
+### 实例备份与恢复
+
+Hub 是唯一权威源，有些仓库可能没有镜像，所以要定期给整个实例做快照：
+
+```bash
+docker compose exec gitrepo gitrepo backup /data/snapshots/$(date +%F)
+```
+
+- 服务**不用停**。数据库用 SQLite 的 `VACUUM INTO` 复制，得到一致的副本。
+- 每个仓库打成一个 `git bundle --all`，包括被覆盖历史的隐藏备份。bundle 先读 ref 再打包，期间的 push 要么完整包含，要么完全不包含。
+- LFS 对象（能硬链接就硬链接）和 SSH 主机密钥也在快照里。
+- `manifest.json` 最后写入：有它才是完整的快照。
+- 快照目录权限为 `0700`。里面的凭据仍用 `GITREPO_SECRET_KEY` 加密，**快照不含这个密钥**，请把密钥单独保存。
+
+快照目录可以直接复制到别处，例如 `rsync` 或对象存储。恢复到一个**全新的**数据目录：
+
+```bash
+docker run --rm -v gitrepo-data-new:/data -v /backups/2026-11-01:/snapshot:ro gitrepo:local restore /snapshot
+```
+
+恢复前会先校验每个 bundle，并核对 ref 和 LFS 对象的数量，然后用**原来的** `GITREPO_SECRET_KEY` 启动服务。目标数据目录里已有数据库或仓库时，恢复会拒绝执行，不会覆盖现有实例。
 
 配置文件示例见 [`deploy/gitrepo.example.yaml`](deploy/gitrepo.example.yaml)，实现上与原设计的差异见 [`docs/design-notes.md`](docs/design-notes.md)。
 

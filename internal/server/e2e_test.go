@@ -72,6 +72,7 @@ type env struct {
 	git       *gitexec.Git
 	srv       *server.Server
 	logs      *syncBuffer
+	cfg       *config.Config
 }
 
 const (
@@ -127,6 +128,18 @@ func newEnv(t *testing.T, tweaks ...func(*config.Config)) *env {
 	}
 	t.Setenv(cfg.SecretKeyEnv, secrets.GenerateKey())
 	t.Setenv(cfg.AdminTokenEnv, adminToken)
+	srv, addr := startServer(t, cfg, log)
+	return &env{
+		t: t, hubAddr: addr, reposDir: cfg.ReposDir(),
+		remoteURL: remote.URL, remoteDir: remoteDir,
+		api: client.New(cfg.PublicURL, adminToken), git: g, srv: srv, logs: logs, cfg: cfg,
+	}
+}
+
+// startServer runs a server for cfg on a free local port (setting
+// cfg.PublicURL) until the test ends.
+func startServer(t *testing.T, cfg *config.Config, log *slog.Logger) (*server.Server, string) {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -144,11 +157,7 @@ func newEnv(t *testing.T, tweaks ...func(*config.Config)) *env {
 		defer cancel()
 		srv.Shutdown(ctx)
 	})
-	return &env{
-		t: t, hubAddr: ln.Addr().String(), reposDir: cfg.ReposDir(),
-		remoteURL: remote.URL, remoteDir: remoteDir,
-		api: client.New(cfg.PublicURL, adminToken), git: g, srv: srv, logs: logs,
-	}
+	return srv, ln.Addr().String()
 }
 
 func clientEnv() []string {

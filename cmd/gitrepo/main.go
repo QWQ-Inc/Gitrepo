@@ -2,6 +2,7 @@
 // GIT_ASKPASS helper, invoked by git through small shim scripts.
 //
 //	gitrepo serve [--config gitrepo.yaml]
+//	gitrepo backup DEST | gitrepo restore SRC
 //	gitrepo keygen
 //	gitrepo version
 package main
@@ -20,9 +21,11 @@ import (
 	"time"
 
 	"github.com/qwq-inc/gitrepo/internal/config"
+	"github.com/qwq-inc/gitrepo/internal/gitexec"
 	"github.com/qwq-inc/gitrepo/internal/githooks"
 	"github.com/qwq-inc/gitrepo/internal/secrets"
 	"github.com/qwq-inc/gitrepo/internal/server"
+	"github.com/qwq-inc/gitrepo/internal/snapshot"
 )
 
 // version is set at build time with -ldflags "-X main.version=…".
@@ -55,6 +58,10 @@ func main() {
 		os.Exit(githooks.Askpass(prompt, os.Stdout, os.Stderr))
 	case "keygen":
 		fmt.Println(secrets.GenerateKey())
+	case "backup":
+		os.Exit(backup(os.Args[2:]))
+	case "restore":
+		os.Exit(restore(os.Args[2:]))
 	case "healthcheck":
 		os.Exit(healthcheck())
 	case "version", "--version", "-v":
@@ -74,6 +81,11 @@ func usage() {
 Usage:
   gitrepo serve [--config FILE] [--log-level info|debug]
   gitrepo keygen            print a new secret key for GITREPO_SECRET_KEY
+  gitrepo backup [--config FILE] DEST
+                            snapshot the instance (database, repositories, LFS, SSH host key)
+                            into the new directory DEST; safe while the server runs
+  gitrepo restore [--config FILE] SRC
+                            recreate an instance from a snapshot in an empty data directory
   gitrepo healthcheck       exit 0 if the local server answers /healthz (for container health checks)
   gitrepo version
 
@@ -156,5 +168,62 @@ func serve(args []string) int {
 		log.Error("shutdown", "err", err)
 		return 1
 	}
+	return 0
+}
+
+// snapshotArgs parses [--config FILE] DIR for backup and restore.
+func snapshotArgs(name string, args []string) (*config.Config, *gitexec.Git, string, bool) {
+	fs := flag.NewFlagSet(name, flag.ExitOnError)
+	cfgPath := fs.String("config", os.Getenv("GITREPO_CONFIG"), "path to gitrepo.yaml (optional)")
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, "usage: gitrepo %s [--config FILE] DIR\n", name)
+		fs.PrintDefaults()
+	}
+	fs.Parse(args)
+	if fs.NArg() != 1 {
+		fs.Usage()
+		return nil, nil, "", false
+	}
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "load config:", err)
+		return nil, nil, "", false
+	}
+	g := &gitexec.Git{Bin: cfg.Git.Binary, Env: []string{"HOME=" + cfg.HomeDir(), "XDG_CONFIG_HOME=" + cfg.HomeDir()}, TmpDir: cfg.TmpDir()}
+	return cfg, g, fs.Arg(0), true
+}
+
+func backup(args []string) int {
+	cfg, g, dest, ok := snapshotArgs("backup", args)
+	if !ok {
+		return 2
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	m, err := snapshot.Create(ctx, cfg, g, dest, version, os.Stderr)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "backup failed:", err)
+		fmt.Fprintln(os.Stderr, "the incomplete snapshot has no manifest.json; delete", dest, "and try again")
+		return 1
+	}
+	fmt.Fprintf(os.Stderr, "snapshot of %d repo(s) written to %s\n", len(m.Repos), dest)
+	fmt.Fprintf(os.Stderr, "credentials in it are encrypted with %s: keep that key separately\n", cfg.SecretKeyEnv)
+	return 0
+}
+
+func restore(args []string) int {
+	cfg, g, src, ok := snapshotArgs("restore", args)
+	if !ok {
+		return 2
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	m, err := snapshot.Restore(ctx, cfg, g, src, os.Stderr)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "restore failed:", err)
+		return 1
+	}
+	fmt.Fprintf(os.Stderr, "restored %d repo(s) into %s (snapshot from %s)\n", len(m.Repos), cfg.DataDir, m.CreatedAt.Format(time.RFC3339))
+	fmt.Fprintf(os.Stderr, "start the server with the same %s as the original instance\n", cfg.SecretKeyEnv)
 	return 0
 }

@@ -47,5 +47,11 @@ jobs:
           ssh-keyscan -p 2222 127.0.0.1 | grep -q ssh-ed25519
           for i in $(seq 1 30); do [ "$(docker inspect -f '{{.State.Health.Status}}' gitrepo)" = healthy ] && break; sleep 2; done
           docker inspect -f '{{.State.Health.Status}}' gitrepo | grep -qx healthy
+          # push, snapshot the running instance, restore it elsewhere
+          git init -q -b main /tmp/w && git -C /tmp/w -c user.name=ci -c user.email=ci@example.com commit -q --allow-empty -m ci
+          git -C /tmp/w push -q http://x:ci-admin@127.0.0.1:8080/acme/ci.git main
+          docker exec gitrepo gitrepo backup /data/snapshots/ci
+          docker exec -e GITREPO_DATA_DIR=/data/restored gitrepo gitrepo restore /data/snapshots/ci
+          test "$(docker exec gitrepo git --git-dir=/data/restored/repos/acme/ci.git rev-parse main)" = "$(git -C /tmp/w rev-parse HEAD)"
           docker logs gitrepo
           docker rm -f gitrepo
