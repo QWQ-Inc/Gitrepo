@@ -24,6 +24,7 @@ type fakePlatforms struct {
 	mu       sync.Mutex
 	calls    []string
 	releases *fakeReleaseStore
+	app      *fakeApp
 }
 
 const (
@@ -94,13 +95,13 @@ func writeJSONResp(w http.ResponseWriter, status int, v any) {
 }
 
 func (f *fakePlatforms) serve(w http.ResponseWriter, r *http.Request) {
-	if f.serveRelease(w, r) {
+	if f.serveApp(w, r) || f.serveRelease(w, r) {
 		return
 	}
 	p := r.URL.EscapedPath()
 	switch {
 	case strings.HasPrefix(p, "/gh/api/v3/"):
-		if r.Header.Get("Authorization") != "Bearer "+ghToken {
+		if !f.ghTokenOK(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")) {
 			writeJSONResp(w, 401, map[string]string{"message": "Bad credentials"})
 			return
 		}
@@ -135,6 +136,9 @@ func (f *fakePlatforms) serve(w http.ResponseWriter, r *http.Request) {
 			wantUser, wantPass = "gitee-user", geToken // Gitee needs the real login
 		}
 		u, pw, ok := r.BasicAuth()
+		if platform == "gh" && ok && u == wantUser && f.ghTokenOK(pw) {
+			wantPass = pw // a GitHub App installation token
+		}
 		if !ok || u != wantUser || pw != wantPass {
 			w.Header().Set("WWW-Authenticate", `Basic realm="fake"`)
 			http.Error(w, "unauthorized", 401)

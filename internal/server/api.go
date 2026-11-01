@@ -140,6 +140,9 @@ type credIn struct {
 	Username      string `json:"username"`
 	Secret        string `json:"secret"`
 	SSHKnownHosts string `json:"ssh_known_hosts"`
+	// GitHub App: Secret is the App's private key (PEM).
+	AppID          string `json:"app_id"`
+	InstallationID string `json:"installation_id"`
 }
 
 type targetIn struct {
@@ -205,6 +208,8 @@ type targetOut struct {
 	CredKind     string     `json:"credential_kind"`
 	CredUsername string     `json:"credential_username,omitempty"`
 	HasSecret    bool       `json:"has_secret"`
+	AppID        string     `json:"app_id,omitempty"`
+	Installation string     `json:"installation_id,omitempty"`
 	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
 	CreatedAt    *time.Time `json:"created_at"`
 	UpdatedAt    *time.Time `json:"updated_at"`
@@ -215,6 +220,7 @@ func toTargetOut(t *store.Target) targetOut {
 		ID: t.ID, Name: t.Name, Provider: t.Provider, BaseURL: t.BaseURL, APIURL: t.APIURL,
 		Namespace: t.Namespace, URLTemplate: t.URLTemplate, Visibility: t.Visibility, AutoCreate: t.AutoCreate,
 		MaxFileSize: t.MaxFileSize, MaxLFSSize: t.MaxLFSObjectSize, CredKind: t.CredKind, CredUsername: t.CredUsername, HasSecret: len(t.CredSecret) > 0,
+		AppID: t.AppID, Installation: t.InstallationID,
 		ExpiresAt: ts(t.ExpiresAt), CreatedAt: ts(t.CreatedAt), UpdatedAt: ts(t.UpdatedAt),
 	}
 }
@@ -260,8 +266,34 @@ func (s *Server) applyTargetIn(t *store.Target, in *targetIn) error {
 		}
 		switch kind {
 		case "none", "token", "basic", "ssh":
+			t.AppID, t.InstallationID = "", ""
+		case provider.CredGitHubApp:
+			if t.Provider != "github" {
+				return badRequest("github-app credentials are for github targets")
+			}
+			if c.AppID != "" {
+				if _, err := strconv.ParseInt(c.AppID, 10, 64); err != nil {
+					return badRequest("app_id must be the App's numeric ID")
+				}
+				t.AppID = c.AppID
+			}
+			if c.InstallationID != "" {
+				if _, err := strconv.ParseInt(c.InstallationID, 10, 64); err != nil {
+					return badRequest("installation_id must be numeric")
+				}
+				t.InstallationID = c.InstallationID
+			} else if c.AppID != "" || c.Secret != "" || t.CredKind != kind {
+				t.InstallationID = "" // looked up again for the new App or key
+			}
+			if c.Secret != "" {
+				if _, err := provider.ParseAppKey(c.Secret); err != nil {
+					return badRequest("%v", err)
+				}
+			} else if t.CredKind != kind {
+				return badRequest("a github-app credential needs the App's private key (secret)")
+			}
 		default:
-			return badRequest("credential kind must be none, token, basic or ssh")
+			return badRequest("credential kind must be none, token, basic, ssh or github-app")
 		}
 		// An omitted username keeps the stored one (unless the kind changes).
 		if c.Username != "" || kind != t.CredKind {
@@ -342,6 +374,10 @@ func (s *Server) apiCreateTarget(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	if err := s.fillAppInstallation(r.Context(), t, &in); err != nil {
+		s.fail(w, err)
+		return
+	}
 	if err := s.store.CreateTarget(r.Context(), t); err != nil {
 		s.fail(w, err)
 		return
@@ -394,6 +430,10 @@ func (s *Server) apiUpdateTarget(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	if err := s.fillAppInstallation(r.Context(), t, &in); err != nil {
+		s.fail(w, err)
+		return
+	}
 	if err := s.store.UpdateTarget(r.Context(), t); err != nil {
 		s.fail(w, err)
 		return
@@ -429,13 +469,13 @@ func (s *Server) apiCheckTarget(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	secret, err := s.targetSecret(t)
-	if err != nil {
-		s.fail(w, err)
-		return
-	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
+	secret, err := s.targetSecret(ctx, t)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
 	who, err := p.Check(ctx, t, secret)
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
@@ -465,12 +505,52 @@ func (s *Server) fillLoginUsername(ctx context.Context, t *store.Target, in *tar
 	return nil
 }
 
-func (s *Server) targetSecret(t *store.Target) (string, error) {
+// fillAppInstallation looks up a GitHub App's installation on the target's
+// namespace when none was given. It also proves that the App ID and key
+// work before the target is stored.
+func (s *Server) fillAppInstallation(ctx context.Context, t *store.Target, in *targetIn) error {
+	if t.CredKind != provider.CredGitHubApp {
+		return nil
+	}
+	key := ""
+	if in.Credential != nil && in.Credential.Secret != "" {
+		key = in.Credential.Secret
+	} else if len(t.CredSecret) > 0 {
+		b, err := s.box.Open(t.CredSecret, t.CredentialAAD())
+		if err != nil {
+			return err
+		}
+		key = string(b)
+	}
+	if t.AppID == "" || key == "" {
+		return badRequest("a github-app credential needs app_id and the App's private key")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if t.InstallationID == "" {
+		id, err := provider.FindAppInstallation(ctx, t, key)
+		if err != nil {
+			return badRequest("%v", err)
+		}
+		t.InstallationID = id
+	}
+	if _, err := provider.ResolveSecret(ctx, t, key); err != nil {
+		return badRequest("%v", err)
+	}
+	return nil
+}
+
+// targetSecret is the secret for API calls and git (for GitHub Apps a
+// fresh installation token).
+func (s *Server) targetSecret(ctx context.Context, t *store.Target) (string, error) {
 	if len(t.CredSecret) == 0 {
 		return "", nil
 	}
 	b, err := s.box.Open(t.CredSecret, t.CredentialAAD())
-	return string(b), err
+	if err != nil {
+		return "", err
+	}
+	return provider.ResolveSecret(ctx, t, string(b))
 }
 
 // ----------------------------------------------------------------- bindings

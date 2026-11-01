@@ -56,6 +56,8 @@ export GITREPO_URL=https://git.example.com GITREPO_TOKEN=$GITREPO_ADMIN_TOKEN
 
 # GitHub：fine-grained token，需要 Contents 写权限，自动建仓还需要 Administration 写权限
 gr target add github --provider github --namespace acme --token-env GITHUB_TOKEN
+# 或者用 GitHub App（推荐给组织，见下文）：不绑定个人，令牌每小时自动换新
+gr target add github --provider github --namespace acme --app-id 123456 --private-key-file gitrepo.private-key.pem
 
 # GitLab（gitlab.com 或自建）：access token，scope 为 api + write_repository
 gr target add gitlab --provider gitlab --namespace acme-group --token-env GITLAB_TOKEN
@@ -76,6 +78,23 @@ gr target check github     # 用平台 API 验证凭据
 ```
 
 凭据用 AES-256-GCM 加密后入库，不会出现在命令行参数、URL 或日志里。
+
+凭据类型：访问令牌（各平台）、GitHub App（GitHub / GitHub Enterprise Server）、用户名加密码和 SSH 私钥（generic）。
+
+#### 用 GitHub App 代替个人令牌
+
+个人令牌属于某个人：人离职、令牌过期，镜像就断了，而且令牌的权限往往比需要的大。GitHub App 属于组织，Gitrepo 只保存 App 的私钥，每次需要时用它签一个 JWT，换取有效期一小时的安装令牌，缓存起来供 API 和 git 使用；剩余有效期不足 20 分钟时自动换新。
+
+1. 在组织的 Settings → Developer settings → GitHub Apps 新建一个 App。
+   - Webhook 不需要，可以关闭。
+   - 仓库权限：Contents 读写、Metadata 只读。自动建仓还需要 Administration 读写。推送 `.github/workflows/` 下的文件需要 Workflows 读写。
+2. 生成并下载私钥（`.pem`），记下 App ID。
+3. 把 App 安装到组织上，选择 **All repositories**，之后新建的镜像才在它的范围内。
+4. 添加 target：`gr target add github --provider github --namespace acme --app-id 123456 --private-key-file key.pem`。
+   - 安装 ID 会按 `--namespace` 自动查找，也可以用 `--installation-id` 指定。
+   - 保存时会实际换一次令牌，App ID、私钥或安装不对会当场报错。
+
+限制：安装令牌不能在个人账号下建仓，所以 App 只能在组织下自动建仓；个人账号下的镜像仓库需要事先建好，并在 App 的安装范围内。
 
 ### 3. 声明备份规则（binding）
 

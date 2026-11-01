@@ -54,7 +54,9 @@ func (m *Manager) resolveRemote(ctx context.Context, repo *store.Repo, rem *stor
 		if err != nil {
 			return nil, fmt.Errorf("target %s: %w", t.Name, err)
 		}
-		rc.secret = string(pt)
+		if rc.secret, err = provider.ResolveSecret(ctx, t, string(pt)); err != nil {
+			return nil, fmt.Errorf("target %s: %w", t.Name, err)
+		}
 	}
 	rc.cred = prov.GitCred(t, rc.secret)
 	rc.url = rem.URL

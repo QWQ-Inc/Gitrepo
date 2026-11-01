@@ -279,6 +279,11 @@ CREATE TABLE release_mirrors (
   PRIMARY KEY (release_id, remote_id)
 );
 `,
+	// 8: GitHub App credentials (the private key is the sealed secret).
+	`
+ALTER TABLE targets ADD COLUMN cred_app_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE targets ADD COLUMN cred_installation_id TEXT NOT NULL DEFAULT '';
+`,
 }
 
 func (s *Store) migrate(ctx context.Context) error {

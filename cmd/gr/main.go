@@ -123,6 +123,7 @@ type targetFlags struct {
 	maxFileSize, maxLFSSize                                       int64
 	username, tokenEnv, sshKeyFile, knownHostsFile, expires       string
 	tokenStdin, passwordStdin, noCredential                       bool
+	appID, appKeyFile, installationID                             string
 }
 
 func (f *targetFlags) register(c *cobra.Command, create bool) {
@@ -144,6 +145,9 @@ func (f *targetFlags) register(c *cobra.Command, create bool) {
 	fl.StringVar(&f.knownHostsFile, "known-hosts-file", "", "generic: pin SSH host keys with this known_hosts file")
 	fl.StringVar(&f.expires, "expires", "", "credential expiry (YYYY-MM-DD) for alerting")
 	fl.BoolVar(&f.noCredential, "no-credential", false, "generic: anonymous access")
+	fl.StringVar(&f.appID, "app-id", "", "github: authenticate as this GitHub App (with --private-key-file)")
+	fl.StringVar(&f.appKeyFile, "private-key-file", "", "github: the GitHub App's private key (.pem)")
+	fl.StringVar(&f.installationID, "installation-id", "", "github: the App's installation ID (default: looked up for --namespace)")
 	if create {
 		c.MarkFlagRequired("provider")
 	}
@@ -178,6 +182,15 @@ func (f *targetFlags) body(c *cobra.Command) (map[string]any, error) {
 		return strings.TrimSpace(string(raw)), err
 	}
 	switch {
+	case f.appID != "" || f.appKeyFile != "" || f.installationID != "":
+		cred = map[string]any{"kind": "github-app", "app_id": f.appID, "installation_id": f.installationID}
+		if f.appKeyFile != "" {
+			key, err := os.ReadFile(f.appKeyFile)
+			if err != nil {
+				return nil, err
+			}
+			cred["secret"] = string(key)
+		}
 	case f.noCredential:
 		cred = map[string]any{"kind": "none"}
 	case f.tokenStdin || f.tokenEnv != "":
@@ -232,6 +245,7 @@ func targetCmd() *cobra.Command {
 		Use:   "add NAME",
 		Short: "Add a target",
 		Example: `  gr target add github --provider github --namespace acme --token-env GITHUB_TOKEN
+  gr target add github --provider github --namespace acme --app-id 123456 --private-key-file gitrepo.private-key.pem
   gr target add gitlab --provider gitlab --namespace acme-group --token-stdin < token.txt
   gr target add internal --provider generic --url-template 'ssh://git@git.example.com/{namespace}/{name}.git' --ssh-key-file ~/.ssh/mirror`,
 		Args: cobra.ExactArgs(1),

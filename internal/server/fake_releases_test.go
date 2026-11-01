@@ -134,7 +134,7 @@ func (f *fakePlatforms) serveRelease(w http.ResponseWriter, r *http.Request) boo
 	}
 	switch platform {
 	case "gh", "gh-upload":
-		if r.Header.Get("Authorization") != "Bearer "+ghToken {
+		if !f.ghTokenOK(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")) {
 			writeJSONResp(w, 401, map[string]string{"message": "Bad credentials"})
 			return true
 		}

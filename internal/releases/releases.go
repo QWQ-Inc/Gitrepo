@@ -438,7 +438,9 @@ func (m *Manager) publishTo(parent context.Context, repo *store.Repo, rel *store
 		if err != nil {
 			return save(store.RelFailed, fmt.Sprintf("target %s: %v", t.Name, err))
 		}
-		secret = string(pt)
+		if secret, err = provider.ResolveSecret(ctx, t, string(pt)); err != nil {
+			return save(store.RelFailed, fmt.Sprintf("target %s: %v", t.Name, err))
+		}
 	}
 	spec := provider.RepoSpec{Namespace: rem.Namespace, Name: rem.Name, Visibility: repo.Visibility}
 	want := provider.Release{Tag: rel.Tag, Name: rel.Name, Body: rel.Body, Prerelease: rel.Prerelease, Commit: commit}
@@ -598,7 +600,9 @@ func (m *Manager) deleteOn(parent context.Context, repo *store.Repo, rem *store.
 		if err != nil {
 			return err
 		}
-		secret = string(pt)
+		if secret, err = provider.ResolveSecret(ctx, t, string(pt)); err != nil {
+			return err
+		}
 	}
 	spec := provider.RepoSpec{Namespace: rem.Namespace, Name: rem.Name, Visibility: repo.Visibility}
 	return rp.DeleteRelease(ctx, t, secret, spec, &provider.RemoteRelease{ID: st.RemoteRelease})

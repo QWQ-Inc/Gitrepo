@@ -410,7 +410,8 @@ async function viewTargets() {
     h('td', {}, t.provider),
     h('td', {}, t.namespace || '—'),
     h('td', { class: 'mono' }, t.url_template || t.base_url || '（默认）'),
-    h('td', {}, t.credential_kind, t.credential_username ? ` (${t.credential_username})` : ''),
+    h('td', {}, t.credential_kind === 'github-app' ? `GitHub App ${t.app_id}（安装 ${t.installation_id}）` : t.credential_kind,
+      t.credential_username ? ` (${t.credential_username})` : ''),
     h('td', {}, t.expires_at ? fmtDay(t.expires_at) : '—'),
     h('td', { class: 'actions' },
       t.provider !== 'generic' ? h('button', { class: 'secondary small', onclick: action(async () => {
@@ -436,12 +437,13 @@ async function viewTargets() {
 
 function targetForm() {
   const provider = select('provider', PROVIDERS, 'github');
-  const kind = select('kind', [['token', '访问令牌'], ['basic', '用户名 + 密码'], ['ssh', 'SSH 私钥'], ['none', '无（匿名）']], 'token');
+  const KINDS = [['token', '访问令牌'], ['github-app', 'GitHub App（推荐给组织）'], ['basic', '用户名 + 密码'], ['ssh', 'SSH 私钥'], ['none', '无（匿名）']];
+  const kind = select('kind', KINDS, 'token');
   const dyn = h('div', { class: 'contents' });
   const help = h('p', { class: 'hint wide' });
 
   const HELP = {
-    github: 'Fine-grained token：Contents 读写；自动建仓还需 Administration 读写。命名空间填拥有镜像的用户或组织。',
+    github: 'Fine-grained token：Contents 读写；自动建仓还需 Administration 读写。也可以用 GitHub App：不绑定个人，令牌每小时自动换新。命名空间填拥有镜像的用户或组织。',
     gitlab: 'Access token：api + write_repository。命名空间填用户或 group 路径（可含子 group）。自建实例填写站点地址。',
     gitea: 'Access token：repository 读写；在组织下建仓需 organization 写权限。站点地址必填。',
     gitee: '私人令牌：勾选 projects 权限。命名空间填个人空间或组织路径；git 用户名会自动从令牌查出。',
@@ -459,10 +461,24 @@ function targetForm() {
     } else {
       const site = { github: 'https://github.com', gitlab: 'https://gitlab.com', gitee: 'https://gitee.com', gitea: 'https://git.example.com' };
       nodes.push(field('站点地址' + (p === 'gitea' ? '' : '（自建时填写）'), h('input', { name: 'base_url', required: p === 'gitea', placeholder: site[p] })));
-      kind.value = 'token';
-      kind.disabled = true;
+      if (p !== 'github' || (kind.value !== 'token' && kind.value !== 'github-app')) kind.value = 'token';
+      kind.disabled = p !== 'github';
     }
+    for (const o of kind.options) o.hidden = p === 'generic' ? o.value === 'github-app' : (p === 'github' ? !['token', 'github-app'].includes(o.value) : o.value !== 'token');
     const k = kind.value;
+    if (k === 'github-app') {
+      const keyArea = h('textarea', { name: 'secret', required: true, placeholder: '-----BEGIN RSA PRIVATE KEY-----' });
+      nodes.push(field('App ID', h('input', { name: 'app_id', required: true, inputmode: 'numeric', pattern: '[0-9]+', placeholder: '123456' })));
+      nodes.push(field('安装 ID（可选，默认按命名空间查找）', h('input', { name: 'installation_id', inputmode: 'numeric', pattern: '[0-9]*' })));
+      nodes.push(field('私钥（App 设置页生成的 .pem）', keyArea, 'wide'));
+      nodes.push(field('或选择 .pem 文件', h('input', { type: 'file', accept: '.pem', onchange: async (ev) => {
+        const f = ev.target.files[0];
+        if (f) keyArea.value = await f.text();
+      } })));
+      nodes.push(h('p', { class: 'hint wide' }, 'App 需要的仓库权限：Contents 读写、Metadata 只读；自动建仓还需 Administration 读写；同步 Release 需 Contents 读写；推送 .github/workflows 需 Workflows 读写。安装时选 All repositories，新建的镜像才在 App 的范围内。只能在组织下自动建仓。'));
+      dyn.replaceChildren(...nodes);
+      return;
+    }
     if (k === 'basic' || (k === 'token' && p === 'generic')) nodes.push(field('用户名' + (k === 'token' ? '（可选）' : ''), h('input', { name: 'username', required: k === 'basic' })));
     if (k === 'ssh') {
       nodes.push(field('SSH 私钥', h('textarea', { name: 'secret', required: true, placeholder: '-----BEGIN OPENSSH PRIVATE KEY-----' }), 'wide'));
@@ -482,7 +498,9 @@ function targetForm() {
       name: d.name, provider: provider.value, namespace: d.namespace || '',
       base_url: d.base_url || '', url_template: d.url_template || '',
       auto_create: d.auto_create, visibility: d.visibility,
-      credential: { kind: kind.value, username: d.username || '', secret: d.secret || '', ssh_known_hosts: d.ssh_known_hosts || '' },
+      credential: kind.value === 'github-app'
+        ? { kind: 'github-app', app_id: d.app_id, installation_id: d.installation_id || '', secret: d.secret }
+        : { kind: kind.value, username: d.username || '', secret: d.secret || '', ssh_known_hosts: d.ssh_known_hosts || '' },
     };
     if (d.expires_at) body.expires_at = d.expires_at;
     await api('POST', '/api/targets', body);
@@ -503,7 +521,7 @@ function targetForm() {
 
 function editTarget(t, container) {
   const close = () => container.replaceChildren();
-  const isSSH = t.credential_kind === 'ssh';
+  const isSSH = t.credential_kind === 'ssh' || t.credential_kind === 'github-app';
   const form = h('form', { class: 'grid', onsubmit: action(async (ev) => {
     const d = formData(ev.target);
     const body = { namespace: d.namespace, expires_at: d.expires_at || '' };
@@ -525,7 +543,7 @@ function editTarget(t, container) {
   field('单文件上限 MiB（0 = 平台默认）', h('input', { name: 'max_file_size', type: 'number', min: '0', value: t.max_file_size ? Math.round(t.max_file_size / 1048576) : '' })),
   field('LFS 对象上限 MiB（0 = 平台默认）', h('input', { name: 'max_lfs_object_size', type: 'number', min: '0', value: t.max_lfs_object_size ? Math.round(t.max_lfs_object_size / 1048576) : '' })),
   field('凭据过期日', h('input', { name: 'expires_at', type: 'date', value: t.expires_at ? t.expires_at.slice(0, 10) : '' })),
-  t.credential_kind === 'none' ? null : field(isSSH ? '新 SSH 私钥（留空不变）' : '新令牌 / 密码（留空不变）',
+  t.credential_kind === 'none' ? null : field(t.credential_kind === 'github-app' ? '新 App 私钥（留空不变）' : (isSSH ? '新 SSH 私钥（留空不变）' : '新令牌 / 密码（留空不变）'),
     isSSH ? h('textarea', { name: 'secret' }) : h('input', { name: 'secret', type: 'password', autocomplete: 'off' }), isSSH ? 'wide' : ''),
   h('div', { class: 'row wide' }, h('button', { type: 'submit' }, '保存'), h('button', { type: 'button', class: 'secondary', onclick: close }, '取消')));
   return h('div', {}, h('h2', {}, '修改 ', t.name), h('div', { class: 'panel' }, form));

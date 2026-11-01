@@ -262,3 +262,18 @@ Hub 自己实现了 LFS 服务端（`internal/lfs`）：
 - **平台差异：**
   - GitLab 的 Release ID 就是标签名。附件是"项目上传文件 + Release 链接"，删除附件只删链接，GitLab API 不提供删除已上传文件的通用方法。GitLab 没有预发布标记。
   - Gitee 的 token 放在查询参数里，错误信息里出现时会被替换掉。查询不存在的 Release 时，Gitee 返回 `{}` 而不是 404。创建时必须提供 `target_commitish`、名称和说明。
+
+## GitHub App 凭据
+
+- **为什么：** 个人令牌绑定在一个人身上，权限通常偏大，人一离职或令牌过期，镜像就断了。GitHub App 属于组织，权限可以细到 Contents/Administration，安装令牌只有一小时有效期，API 限额也更高。
+- **存储：** App 的私钥作为 target 的密文保存（和其它凭据一样用 AES-GCM 加密，AAD 为 target 名）。App ID 和安装 ID 不是秘密，存放在明文列里，界面上可以显示。
+- **取令牌：** `provider.ResolveSecret` 是唯一的入口，同步、Release、导入和凭据检查都经过它。
+  - 对 token 等凭据，原样返回解密后的值。
+  - 对 App：用私钥签 RS256 JWT（`iat` 往前拨 1 分钟以容忍时钟偏差，有效期 9 分钟），调用 `POST /app/installations/{id}/access_tokens` 换取安装令牌。
+  - 令牌按（API 地址、App ID、安装 ID、私钥哈希）缓存。剩余有效期不足 20 分钟就换新，这个阈值大于一次推送的超时，推送不会用到中途过期的令牌。
+  - 换私钥后缓存自然失效。每个缓存项有自己的锁，并发同步时只换一次。
+- **下游不变：** 换来的令牌和个人令牌用法一样，API 请求带 `Authorization: Bearer`，git 用 `x-access-token`，所以 provider 的其它代码不用区分两种凭据。
+  - 唯一的例外是 `Check`：App 没有 `/user`，改为调用 `/installation/repositories`，报告安装 ID 和可访问的仓库数。
+  - 建仓时探测"个人还是组织"会因为没有 `/user` 而失败，于是走组织接口，这也正是安装令牌唯一能建仓的方式。
+- **保存时就验证：** 没有给安装 ID 时，按命名空间依次查 `/orgs/{ns}/installation` 和 `/users/{ns}/installation`，然后实际换一次令牌。私钥不对、App 没装、App ID 错了，都会在保存 target 时报错，而不是等到第一次推送才失败。
+- 私钥只接受 RSA 的 PKCS#1 或 PKCS#8 PEM，也就是 GitHub 下载的格式。它从不出现在 API 输出、审计日志或错误信息里，有测试覆盖。

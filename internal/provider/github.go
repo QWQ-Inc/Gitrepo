@@ -52,8 +52,11 @@ func (g *GitHub) Validate(t *store.Target) error {
 	if t.Namespace == "" {
 		return errors.New("github target requires --namespace (user or organization that owns the mirrors)")
 	}
-	if t.CredKind != "token" {
-		return errors.New("github target requires a token credential")
+	if t.CredKind != "token" && t.CredKind != CredGitHubApp {
+		return errors.New("github target requires a token or github-app credential")
+	}
+	if t.CredKind == CredGitHubApp && t.AppID == "" {
+		return errors.New("github-app credential needs the App ID")
 	}
 	return nil
 }
@@ -137,6 +140,9 @@ func (g *GitHub) SetDefaultBranch(ctx context.Context, t *store.Target, secret s
 }
 
 func (g *GitHub) Check(ctx context.Context, t *store.Target, secret string) (string, error) {
+	if t.CredKind == CredGitHubApp {
+		return g.checkApp(ctx, t, secret)
+	}
 	var me struct {
 		Login string `json:"login"`
 	}
