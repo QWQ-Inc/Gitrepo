@@ -75,12 +75,13 @@ func (s *Server) handlePostReceive(w http.ResponseWriter, r *http.Request) {
 		updates = append(updates, syncer.RefUpdate{Old: u.Old, New: u.New, Ref: u.Ref})
 	}
 	bctx, bcancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	n, berr := syncer.BackupHubUpdates(bctx, s.git, path, updates)
+	forced, berr := syncer.BackupHubUpdates(bctx, s.git, path, updates)
 	bcancel()
+	s.auditPush(req.Pusher, req.Transport, req.ClientAddr, org+"/"+name, updates, forced)
 	if berr != nil {
 		s.log.Error("back up overwritten refs", "repo", req.Repo, "err", berr)
 		say("warning: could not back up overwritten refs: %v", berr)
-	} else if n > 0 {
+	} else if n := len(forced); n > 0 {
 		say("kept %d overwritten/deleted ref(s) under refs/backup/ on the hub", n)
 		if s.bundles != nil {
 			// The published history was rewritten: no bundle may keep

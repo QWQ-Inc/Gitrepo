@@ -118,6 +118,7 @@ func (s *Server) apiCreateWebhook(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	noteAudit(r, "webhook %s → %s (%s; events %s)", hook.Name, hook.URLHost, hook.Format, strings.Join(hook.Events, ","))
 	writeJSON(w, http.StatusCreated, toWebhookOut(hook))
 }
 
@@ -147,6 +148,7 @@ func (s *Server) apiUpdateWebhook(w http.ResponseWriter, r *http.Request) {
 			s.fail(w, err)
 			return
 		}
+		noteAudit(r, "webhook %s enabled %t", hook.Name, *in.Enabled)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -161,6 +163,7 @@ func (s *Server) apiDeleteWebhook(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	noteAudit(r, "webhook %s → %s", hook.Name, hook.URLHost)
 	w.WriteHeader(http.StatusNoContent)
 }
 

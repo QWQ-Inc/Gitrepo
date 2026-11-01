@@ -6,6 +6,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -35,12 +36,35 @@ type Config struct {
 	// admin token. Additional tokens are managed through the API.
 	AdminTokenEnv string `yaml:"admin_token_env"`
 
+	// TrustedProxies lists reverse proxies (IPs or CIDRs) whose
+	// X-Forwarded-For header is believed when recording client addresses.
+	TrustedProxies []string `yaml:"trusted_proxies"`
+
 	Git     GitConfig     `yaml:"git"`
 	Sync    SyncConfig    `yaml:"sync"`
 	Policy  PolicyConfig  `yaml:"policy"`
 	Alerts  AlertsConfig  `yaml:"alerts"`
 	SSH     SSHConfig     `yaml:"ssh"`
 	Bundles BundlesConfig `yaml:"bundles"`
+	Audit   AuditConfig   `yaml:"audit"`
+}
+
+// AuditConfig controls the audit log of administrative changes and pushes.
+type AuditConfig struct {
+	// Retention is how long entries are kept (0 = forever).
+	Retention Duration `yaml:"retention"`
+}
+
+// TrustedProxyPrefixes returns the parsed trusted_proxies (Load rejects
+// invalid entries; here they are skipped).
+func (c *Config) TrustedProxyPrefixes() []netip.Prefix {
+	var out []netip.Prefix
+	for _, t := range c.TrustedProxies {
+		if p, err := ParsePrefix(t); err == nil {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // BundlesConfig controls bundle-uri: pre-built bundles that clients with
@@ -134,6 +158,7 @@ func Default() *Config {
 			FailureThreshold:        3,
 			CredentialExpiryWarning: Duration(14 * 24 * time.Hour),
 		},
+		Audit: AuditConfig{Retention: Duration(365 * 24 * time.Hour)},
 	}
 }
 
@@ -210,8 +235,34 @@ func (c *Config) validate() error {
 	if c.Sync.RetryBase.D() <= 0 || c.Sync.RetryMax.D() < c.Sync.RetryBase.D() {
 		errs = append(errs, errors.New("sync.retry_base must be positive and <= sync.retry_max"))
 	}
+	if c.Audit.Retention.D() < 0 {
+		errs = append(errs, errors.New("audit.retention must not be negative"))
+	}
+	for _, t := range c.TrustedProxies {
+		if _, err := ParsePrefix(t); err != nil {
+			errs = append(errs, fmt.Errorf("trusted_proxies: %w", err))
+		}
+	}
 	c.PublicURL = strings.TrimRight(c.PublicURL, "/")
 	return errors.Join(errs...)
+}
+
+// ParsePrefix accepts a CIDR ("10.0.0.0/8") or a single address.
+func ParsePrefix(s string) (netip.Prefix, error) {
+	s = strings.TrimSpace(s)
+	if strings.Contains(s, "/") {
+		p, err := netip.ParsePrefix(s)
+		if err != nil {
+			return netip.Prefix{}, fmt.Errorf("invalid CIDR %q", s)
+		}
+		return p.Masked(), nil
+	}
+	a, err := netip.ParseAddr(s)
+	if err != nil {
+		return netip.Prefix{}, fmt.Errorf("invalid address %q", s)
+	}
+	a = a.Unmap()
+	return netip.PrefixFrom(a, a.BitLen()), nil
 }
 
 // Duration is a time.Duration that unmarshals from strings like "30s",

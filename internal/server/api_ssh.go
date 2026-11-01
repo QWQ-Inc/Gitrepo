@@ -126,6 +126,7 @@ func (s *Server) apiCreateSSHKey(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	noteAudit(r, "ssh key %s %s (scopes %s; repos %s)", k.Name, k.Fingerprint, strings.Join(k.Scopes, ","), orAll(k.Repos))
 	writeJSON(w, http.StatusCreated, toSSHKeyOut(k))
 }
 
@@ -134,6 +135,9 @@ func (s *Server) apiDeleteSSHKey(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.fail(w, badRequest("invalid id"))
 		return
+	}
+	if k, err := s.store.GetSSHKey(r.Context(), id); err == nil {
+		noteAudit(r, "ssh key %s %s", k.Name, k.Fingerprint)
 	}
 	if err := s.store.DeleteSSHKey(r.Context(), id); err != nil {
 		s.fail(w, err)

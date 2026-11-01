@@ -223,6 +223,23 @@ CREATE TABLE ssh_keys (
 	`
 ALTER TABLE targets ADD COLUMN max_lfs_object_size INTEGER NOT NULL DEFAULT 0;
 `,
+	// 6: audit log of administrative changes and pushes.
+	`
+CREATE TABLE audit_log (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  at          INTEGER NOT NULL,
+  actor       TEXT    NOT NULL,
+  via         TEXT    NOT NULL,
+  client_addr TEXT    NOT NULL DEFAULT '',
+  action      TEXT    NOT NULL,
+  path        TEXT    NOT NULL DEFAULT '',
+  repo        TEXT    NOT NULL DEFAULT '',
+  status      INTEGER NOT NULL DEFAULT 0,
+  detail      TEXT    NOT NULL DEFAULT ''
+);
+CREATE INDEX audit_log_repo ON audit_log (repo, id);
+CREATE INDEX audit_log_at ON audit_log (at);
+`,
 }
 
 func (s *Store) migrate(ctx context.Context) error {

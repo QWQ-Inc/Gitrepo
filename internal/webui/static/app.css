@@ -48,7 +48,7 @@ h1 { font-size: 20px; margin: 0 0 16px; }
 h2 { font-size: 15px; margin: 28px 0 10px; }
 p.hint, .muted { color: var(--muted); }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; }
-.panel + .panel { margin-top: 16px; }
+.panel + .panel, .panel + .table-wrap { margin-top: 16px; }
 .table-wrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }

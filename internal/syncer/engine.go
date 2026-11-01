@@ -616,10 +616,10 @@ type RefUpdate struct {
 }
 
 // BackupHubUpdates preserves hub values that a client push overwrote
-// (non-fast-forward, tag move) or deleted.
-func BackupHubUpdates(ctx context.Context, g *gitexec.Git, repoPath string, updates []RefUpdate) (int, error) {
+// (non-fast-forward, tag move) or deleted, and returns those refs.
+func BackupHubUpdates(ctx context.Context, g *gitexec.Git, repoPath string, updates []RefUpdate) ([]string, error) {
 	stamp := backupStamp(time.Now())
-	var lines []string
+	var lines, refs []string
 	for _, u := range updates {
 		if gitexec.IsZero(u.Old) {
 			continue
@@ -627,9 +627,13 @@ func BackupHubUpdates(ctx context.Context, g *gitexec.Git, repoPath string, upda
 		overwrite := gitexec.IsZero(u.New) || strings.HasPrefix(u.Ref, "refs/tags/") || !g.IsAncestor(ctx, repoPath, u.Old, u.New)
 		if overwrite {
 			lines = append(lines, "update refs/backup/"+stamp+"/"+u.Ref+" "+u.Old)
+			refs = append(refs, u.Ref)
 		}
 	}
-	return len(lines), g.UpdateRefs(ctx, repoPath, lines)
+	if err := g.UpdateRefs(ctx, repoPath, lines); err != nil {
+		return nil, err
+	}
+	return refs, nil
 }
 
 // PruneBackups deletes backup refs older than retention.

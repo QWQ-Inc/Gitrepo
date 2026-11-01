@@ -77,6 +77,7 @@ func (s *Server) apiImport(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	noteAudit(r, "from %s (force %t)", rem.Label(), in.Force)
 	res, err := s.mgr.Import(r.Context(), repo, rem, in.Force)
 	if err != nil {
 		status := http.StatusBadGateway

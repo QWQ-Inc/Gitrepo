@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/textproto"
 	"os"
 	"os/exec"
@@ -56,6 +57,8 @@ type Server struct {
 	PublicURL string
 	// Git provides published-only views of repositories for archives.
 	Git *gitexec.Git
+	// TrustedProxies may set X-Forwarded-For (see ClientAddr).
+	TrustedProxies []netip.Prefix
 }
 
 const (
@@ -136,6 +139,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"GIT_PROJECT_ROOT=" + s.ReposDir,
 		"GIT_HTTP_EXPORT_ALL=1",
 	}, s.GitEnv(ctx, repo, p, write, "http.receivepack", "true", "http.uploadpack", "true")...)
+	env = append(env, githooks.EnvTransport+"=http", githooks.EnvClientAddr+"="+ClientAddr(r, s.TrustedProxies))
 	// Hand http-backend exactly the service that was authorized: it reads
 	// the last "service" parameter while authorization used the first.
 	if rest == "info/refs" {

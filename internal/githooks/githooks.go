@@ -33,6 +33,10 @@ const (
 	EnvWait        = "GITREPO_WAIT_MS"
 	EnvGit         = "GITREPO_GIT"
 	EnvTicket      = "GITREPO_ASKPASS_TICKET"
+	// EnvTransport ("http" or "ssh") and EnvClientAddr describe the pusher's
+	// connection for the audit log.
+	EnvTransport  = "GITREPO_TRANSPORT"
+	EnvClientAddr = "GITREPO_CLIENT_ADDR"
 )
 
 // PostReceiveRequest is sent by the post-receive hook to the server.
@@ -42,6 +46,9 @@ type PostReceiveRequest struct {
 	Updates []RefUpdate `json:"updates"`
 	WaitMS  int64       `json:"wait_ms"`
 	Pusher  string      `json:"pusher"`
+	// Transport and ClientAddr are recorded in the audit log.
+	Transport  string `json:"transport,omitempty"`
+	ClientAddr string `json:"client_addr,omitempty"`
 }
 
 type RefUpdate struct {
@@ -356,11 +363,13 @@ func PostReceive(stdin io.Reader, stderr io.Writer) int {
 		}
 	}
 	req := PostReceiveRequest{
-		Token:   os.Getenv(EnvHookToken),
-		Repo:    os.Getenv(EnvRepo),
-		Updates: updates,
-		WaitMS:  wait,
-		Pusher:  os.Getenv("REMOTE_USER"),
+		Token:      os.Getenv(EnvHookToken),
+		Repo:       os.Getenv(EnvRepo),
+		Updates:    updates,
+		WaitMS:     wait,
+		Pusher:     os.Getenv("REMOTE_USER"),
+		Transport:  os.Getenv(EnvTransport),
+		ClientAddr: os.Getenv(EnvClientAddr),
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(wait)*time.Millisecond+30*time.Second)
 	defer cancel()

@@ -73,6 +73,12 @@ func TestSSH(t *testing.T) {
 		if r.SSHURL != url {
 			t.Fatalf("ssh_url = %q, want %q", r.SSHURL, url)
 		}
+		var page auditPage
+		e.do(http.MethodGet, "/api/audit?repo=acme/sshdemo", nil, &page)
+		if len(page.Entries) != 1 || page.Entries[0].Actor != "ssh:dev" || page.Entries[0].Via != "ssh" ||
+			page.Entries[0].ClientAddr != "127.0.0.1" || !strings.HasPrefix(page.Entries[0].Detail, "main created at ") {
+			t.Fatalf("audit of the ssh push: %+v", page.Entries)
+		}
 	})
 
 	t.Run("a read-only key can clone (protocol v2) but not push", func(t *testing.T) {

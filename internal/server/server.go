@@ -172,6 +172,7 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*Server, error) {
 		Signer:          lfsSigner,
 		PublicURL:       cfg.PublicURL,
 		Git:             s.git,
+		TrustedProxies:  cfg.TrustedProxyPrefixes(),
 	}
 	if cfg.Bundles.Enabled {
 		s.bundles = &bundles.Manager{Dir: cfg.BundlesDir(), Git: s.git, Interval: cfg.Bundles.Interval.D(), MinSize: int64(cfg.Bundles.MinSize), Log: log}
@@ -434,6 +435,7 @@ func (s *Server) patrol(ctx context.Context) {
 	if err := s.store.PruneRuns(ctx, 200); err != nil {
 		s.log.Warn("prune sync runs", "err", err)
 	}
+	s.pruneAudit(ctx)
 	s.checkCredentialExpiry(ctx)
 	// Bundle builds can take long for big repositories; they must not hold
 	// up patrols and retries, and only one refresh runs at a time.

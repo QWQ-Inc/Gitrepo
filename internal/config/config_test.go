@@ -65,3 +65,30 @@ func TestParseByteSize(t *testing.T) {
 		t.Error("accepted garbage")
 	}
 }
+
+func TestTrustedProxies(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.yaml")
+	os.WriteFile(path, []byte("version: 1\ntrusted_proxies: [\"10.0.0.0/8\", \"192.168.1.10\", \"::1\"]\naudit:\n  retention: 90d\n"), 0o644)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.TrustedProxyPrefixes()
+	if len(got) != 3 || got[0].String() != "10.0.0.0/8" || got[1].String() != "192.168.1.10/32" || got[2].String() != "::1/128" {
+		t.Errorf("trusted proxies = %v", got)
+	}
+	if cfg.Audit.Retention.D() != 90*24*time.Hour {
+		t.Errorf("audit retention = %v", cfg.Audit.Retention.D())
+	}
+	os.WriteFile(path, []byte("version: 1\ntrusted_proxies: [\"10.0.0.0/33\"]\n"), 0o644)
+	if _, err := Load(path); err == nil {
+		t.Error("accepted an invalid CIDR")
+	}
+}
+
+func TestExampleConfigLoads(t *testing.T) {
+	if _, err := Load("../../deploy/gitrepo.example.yaml"); err != nil {
+		t.Fatalf("deploy/gitrepo.example.yaml: %v", err)
+	}
+}

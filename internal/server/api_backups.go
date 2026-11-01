@@ -80,6 +80,7 @@ func (s *Server) apiRestoreBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.log.Info("backup restored", "repo", repo.Slug, "backup", in.Backup, "branch", in.Branch)
+	noteAudit(r, "%s restored as %s at %s", in.Backup, in.Branch, short(sha))
 	writeJSON(w, http.StatusOK, map[string]string{"branch": in.Branch, "sha": sha})
 }
 
@@ -137,5 +138,6 @@ func (s *Server) apiPurgeBackups(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.log.Warn("backups purged", "repo", repo.Slug, "backups", res.Backups, "lfs_objects", res.LFSObjects)
+	noteAudit(r, "purged %d backup(s), %d LFS object(s)", res.Backups, res.LFSObjects)
 	writeJSON(w, http.StatusOK, res)
 }

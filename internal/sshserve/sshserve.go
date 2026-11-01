@@ -28,6 +28,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/qwq-inc/gitrepo/internal/auth"
+	"github.com/qwq-inc/gitrepo/internal/githooks"
 	"github.com/qwq-inc/gitrepo/internal/gitserve"
 	"github.com/qwq-inc/gitrepo/internal/lfs"
 	"github.com/qwq-inc/gitrepo/internal/registry"
@@ -242,6 +243,9 @@ func (s *Server) Close() error {
 	return nil
 }
 
+// clientKey carries the client's host in a connection's context.
+type clientKey struct{}
+
 func (s *Server) handleConn(raw net.Conn) {
 	nc := &idleConn{Conn: raw, timeout: orDefault(s.IdleTimeout, 10*time.Minute)}
 	raw.SetDeadline(time.Now().Add(30 * time.Second)) // unauthenticated clients
@@ -272,7 +276,8 @@ func (s *Server) handleConn(raw net.Conn) {
 		delete(s.byKey[id], conn)
 		s.mu.Unlock()
 	}()
-	ctx, cancel := context.WithCancel(context.Background())
+	host, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
+	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), clientKey{}, host))
 	defer cancel()
 	go func() { conn.Wait(); cancel() }()
 
@@ -472,6 +477,8 @@ func (s *Server) exec(ctx context.Context, p *auth.Principal, ch ssh.Channel, cm
 	}
 
 	env := append([]string{"PATH=" + os.Getenv("PATH")}, s.Git.GitEnv(ctx, repo, p, write)...)
+	clientHost, _ := ctx.Value(clientKey{}).(string)
+	env = append(env, githooks.EnvTransport+"=ssh", githooks.EnvClientAddr+"="+clientHost)
 	if gitProtocol != "" {
 		env = append(env, "GIT_PROTOCOL="+gitProtocol)
 	}

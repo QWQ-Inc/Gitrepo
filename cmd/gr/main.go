@@ -46,7 +46,7 @@ func main() {
 	root.PersistentFlags().StringVar(&flagToken, "token", os.Getenv("GITREPO_TOKEN"), "admin token (env GITREPO_TOKEN)")
 	root.PersistentFlags().BoolVar(&flagJSON, "json", false, "print raw JSON")
 
-	root.AddCommand(targetCmd(), bindCmd(), bindingCmd(), repoCmd(), remoteCmd(), syncCmd(), statusCmd(), runsCmd(), tokenCmd(), keyCmd(), sshInfoCmd(), webhookCmd(), backupCmd())
+	root.AddCommand(targetCmd(), bindCmd(), bindingCmd(), repoCmd(), remoteCmd(), syncCmd(), statusCmd(), runsCmd(), tokenCmd(), keyCmd(), sshInfoCmd(), webhookCmd(), backupCmd(), auditCmd())
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
@@ -903,8 +903,8 @@ func runsCmd() *cobra.Command {
 
 func oneLine(s string) string {
 	s = strings.ReplaceAll(strings.TrimSpace(s), "\n", " ")
-	if len(s) > 120 {
-		s = s[:120] + "…"
+	if r := []rune(s); len(r) > 120 {
+		s = string(r[:120]) + "…"
 	}
 	return s
 }
@@ -1312,4 +1312,100 @@ Content written in the last five minutes is kept; mirrors are not touched.`,
 	purge.Flags().BoolVar(&yes, "yes", false, "confirm")
 	cmd.AddCommand(list, restore, purge)
 	return cmd
+}
+
+// ------------------------------------------------------------------- audit
+
+func auditCmd() *cobra.Command {
+	var repo, actor, action string
+	var limit int
+	var before int64
+	cmd := &cobra.Command{
+		Use:   "audit",
+		Short: "Show the audit log (admin changes and pushes)",
+		Long: `Show the audit log, newest first.
+
+Every API call that changes something (with its status, also when refused)
+and every push accepted by the hub is recorded with who did it, from which
+address and over which transport. Request bodies are never recorded.
+Entries are kept for audit.retention (default 365 days).`,
+		Args: cobra.NoArgs,
+		RunE: func(c *cobra.Command, args []string) error {
+			q := url.Values{}
+			if repo != "" {
+				q.Set("repo", strings.TrimSuffix(strings.Trim(repo, "/"), ".git"))
+			}
+			if actor != "" {
+				q.Set("actor", actor)
+			}
+			if action != "" {
+				q.Set("action", action)
+			}
+			if before > 0 {
+				q.Set("before", strconv.FormatInt(before, 10))
+			}
+			q.Set("limit", strconv.Itoa(limit))
+			var page struct {
+				Entries []struct {
+					ID         int64     `json:"id"`
+					At         time.Time `json:"at"`
+					Actor      string    `json:"actor"`
+					Via        string    `json:"via"`
+					ClientAddr string    `json:"client_addr"`
+					Action     string    `json:"action"`
+					Path       string    `json:"path"`
+					Repo       string    `json:"repo"`
+					Status     int       `json:"status"`
+					Detail     string    `json:"detail"`
+				} `json:"entries"`
+				Next int64 `json:"next"`
+			}
+			if err := call(http.MethodGet, "/api/audit?"+q.Encode(), nil, &page); err != nil {
+				return err
+			}
+			if flagJSON {
+				return printJSON(page)
+			}
+			if len(page.Entries) == 0 {
+				fmt.Println("no entries")
+				return nil
+			}
+			w := table()
+			fmt.Fprintln(w, "ID\tTIME\tACTOR\tVIA\tCLIENT\tACTION\tSTATUS\tDETAIL")
+			for _, e := range page.Entries {
+				what := e.Action
+				if e.Path != "" {
+					// The route plus the concrete path reads best as
+					// "DELETE /api/targets/mirror-a".
+					what, _, _ = strings.Cut(e.Action, " ")
+					what += " " + e.Path
+				} else if e.Repo != "" {
+					what += " " + e.Repo
+				}
+				status := "-"
+				if e.Status != 0 {
+					status = strconv.Itoa(e.Status)
+				}
+				fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", e.ID, e.At.Local().Format("2006-01-02 15:04:05"), e.Actor, e.Via, orDash(e.ClientAddr), what, status, oneLine(e.Detail))
+			}
+			w.Flush()
+			if page.Next != 0 {
+				fmt.Printf("\nolder entries: gr audit --before %d\n", page.Next)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&repo, "repo", "", "only entries for ORG/NAME")
+	cmd.Flags().StringVar(&actor, "actor", "", "only entries by this token, key (ssh:<name>) or admin")
+	cmd.Flags().StringVar(&action, "action", "", "only actions containing this text, e.g. push, DELETE, targets")
+	cmd.Flags().IntVarP(&limit, "limit", "n", 50, "number of entries (max 500)")
+	cmd.Flags().Int64Var(&before, "before", 0, "only entries older than this ID (paging)")
+	return cmd
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }

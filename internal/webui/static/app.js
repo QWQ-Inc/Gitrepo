@@ -135,6 +135,7 @@ const routes = [
   [/^#\/bindings$/, viewBindings],
   [/^#\/tokens$/, viewTokens],
   [/^#\/webhooks$/, viewWebhooks],
+  [/^#\/audit(?:\?.*)?$/, viewAudit],
 ];
 
 async function render() {
@@ -266,7 +267,8 @@ function quickStart(targets, bindings) {
 async function viewRepo(org, name) {
   const slug = org + '/' + name;
   const base = '/api/repos/' + enc(org) + '/' + enc(name);
-  const [repo, runs, targets, backups] = await Promise.all([api('GET', base), api('GET', base + '/runs?limit=30'), api('GET', '/api/targets'), api('GET', base + '/backups')]);
+  const [repo, runs, targets, backups, audit] = await Promise.all([api('GET', base), api('GET', base + '/runs?limit=30'), api('GET', '/api/targets'), api('GET', base + '/backups'),
+    api('GET', '/api/audit?limit=10&repo=' + enc(slug))]);
 
   const syncNow = (overwrite) => action(async () => {
     if (overwrite && !confirm('以 Hub 为准覆盖所有分叉的镜像 ref？\n被覆盖的镜像内容会先备份到 Hub 的 refs/backup/ 下。')) return false;
@@ -372,6 +374,8 @@ async function viewRepo(org, name) {
         }, '已清除') }, '清除')))), '没有备份。'),
     h('h2', {}, '同步记录'),
     table(['时间', '镜像', '触发', '结果', '变更', '耗时', '错误'], runRows, '暂无记录。'),
+    h('div', { class: 'spread' }, h('h2', {}, '操作记录'), h('a', { href: '#/audit?repo=' + enc(slug) }, '查看全部')),
+    auditTable(audit.entries, false),
     h('h2', {}, '危险操作'),
     h('div', { class: 'panel' }, h('div', { class: 'spread' },
       h('span', { class: 'muted' }, '注销后 Hub 上的数据移入 trash 目录，各镜像不受影响。'),
@@ -682,4 +686,75 @@ async function viewWebhooks() {
     table(['名称', '格式', '目标', '事件', '仓库', '状态', '最近投递', ''], rows, '还没有通知。'),
     h('h2', {}, '添加通知'),
     h('div', { class: 'panel' }, form));
+}
+
+// -------------------------------------------------------------------- audit
+
+const VIA_LABEL = { api: 'API', http: 'HTTPS', ssh: 'SSH' };
+
+function auditRow(e, showRepo) {
+  let what;
+  if (e.path) {
+    what = h('code', {}, e.action.split(' ')[0] + ' ' + e.path);
+  } else {
+    what = [h('code', {}, e.action), showRepo && e.repo ? [' ', h('a', { href: '#/repo/' + e.repo.split('/').map(enc).join('/') }, e.repo)] : null];
+  }
+  let result;
+  if (!e.status) result = h('span', { class: 'badge synced' }, '已接受');
+  else if (e.status < 400) result = h('span', { class: 'badge synced' }, String(e.status));
+  else result = h('span', { class: 'badge failed' }, String(e.status));
+  return h('tr', {},
+    h('td', { class: 'nowrap', title: fmtDate(e.at) }, fmtDate(e.at)),
+    h('td', {}, e.actor),
+    h('td', {}, VIA_LABEL[e.via] || e.via),
+    h('td', { class: 'mono' }, e.client_addr || '—'),
+    h('td', {}, what),
+    h('td', {}, result),
+    h('td', {}, e.detail || ''));
+}
+
+function auditTable(entries, showRepo) {
+  return table(['时间', '操作者', '方式', '来源地址', '操作', '结果', '说明'], entries.map((e) => auditRow(e, showRepo)), '暂无记录。');
+}
+
+async function viewAudit() {
+  const params = new URLSearchParams((location.hash.split('?')[1]) || '');
+  const filters = { actor: params.get('actor') || '', repo: params.get('repo') || '', action: params.get('action') || '' };
+  const query = (extra) => {
+    const q = new URLSearchParams({ limit: '100' });
+    for (const [k, v] of Object.entries(filters)) if (v) q.set(k, v);
+    for (const [k, v] of Object.entries(extra || {})) q.set(k, v);
+    return '/api/audit?' + q.toString();
+  };
+  const page = await api('GET', query());
+  const wrap = auditTable(page.entries, true);
+  const tbody = wrap.querySelector('tbody');
+  let next = page.next || 0;
+  const more = h('button', { class: 'secondary', hidden: !next, onclick: action(async () => {
+    const p = await api('GET', query({ before: String(next) }));
+    for (const e of p.entries) tbody.append(auditRow(e, true));
+    next = p.next || 0;
+    more.hidden = !next;
+    return false;
+  }) }, '加载更早的记录');
+
+  const form = h('form', { class: 'grid', onsubmit: (ev) => {
+    ev.preventDefault();
+    const d = formData(ev.target);
+    const q = new URLSearchParams();
+    for (const k of ['actor', 'repo', 'action']) if (d[k]) q.set(k, d[k]);
+    const target = '#/audit' + (q.toString() ? '?' + q.toString() : '');
+    if (location.hash === target) render(); else location.hash = target;
+  } },
+  field('操作者', h('input', { name: 'actor', value: filters.actor, placeholder: 'admin、令牌名、ssh:公钥名' })),
+  field('仓库', h('input', { name: 'repo', value: filters.repo, placeholder: 'acme/app' })),
+  field('操作包含', h('input', { name: 'action', value: filters.action, placeholder: 'push、DELETE、targets' })),
+  h('div', { class: 'row' }, h('button', { type: 'submit' }, '筛选'), ' ', h('a', { href: '#/audit' }, '清除筛选')));
+
+  app.replaceChildren(
+    h('h1', {}, '审计日志'),
+    h('p', { class: 'hint' }, '记录所有修改类 API 调用（包括被拒绝的）和 Hub 接受的每次 push：谁、何时、从哪个地址、做了什么。请求内容（凭据等）从不记录。默认保留 365 天（audit.retention）。'),
+    h('div', { class: 'panel' }, form),
+    wrap,
+    h('div', { class: 'row' }, more));
 }

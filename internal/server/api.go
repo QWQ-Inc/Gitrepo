@@ -52,6 +52,7 @@ func (s *Server) registerAPI(mux *http.ServeMux) {
 	s.registerWebhookAPI(h)
 	s.registerSSHAPI(h)
 	s.registerBackupAPI(h)
+	s.registerAuditAPI(h)
 }
 
 func (s *Server) requireAdmin(fn http.HandlerFunc) http.HandlerFunc {
@@ -62,11 +63,16 @@ func (s *Server) requireAdmin(fn http.HandlerFunc) http.HandlerFunc {
 			writeErr(w, http.StatusUnauthorized, errors.New("admin token required"))
 			return
 		}
+		next := fn
 		if !p.IsAdmin() {
-			writeErr(w, http.StatusForbidden, errors.New("admin scope required"))
-			return
+			next = func(w http.ResponseWriter, r *http.Request) {
+				writeErr(w, http.StatusForbidden, errors.New("admin scope required"))
+			}
 		}
-		fn(w, r)
+		if audited(r) {
+			next = s.withAudit(p, next)
+		}
+		next(w, r)
 	}
 }
 
@@ -149,6 +155,39 @@ type targetIn struct {
 	MaxLFSSize  *int64  `json:"max_lfs_object_size"`
 	Credential  *credIn `json:"credential"`
 	ExpiresAt   *string `json:"expires_at"`
+}
+
+// fields names the settings a request changes (never their values: the
+// credential is secret). Used for the audit log.
+func (in *targetIn) fields() []string {
+	var f []string
+	add := func(set bool, name string) {
+		if set {
+			f = append(f, name)
+		}
+	}
+	add(in.Provider != nil, "provider")
+	add(in.BaseURL != nil, "base_url")
+	add(in.APIURL != nil, "api_url")
+	add(in.Namespace != nil, "namespace")
+	add(in.URLTemplate != nil, "url_template")
+	add(in.Visibility != nil, "visibility")
+	add(in.AutoCreate != nil, "auto_create")
+	add(in.MaxFileSize != nil, "max_file_size")
+	add(in.MaxLFSSize != nil, "max_lfs_object_size")
+	add(in.Credential != nil, "credential")
+	add(in.ExpiresAt != nil, "expires_at")
+	if len(f) == 0 {
+		f = append(f, "nothing")
+	}
+	return f
+}
+
+func orAll(repos []string) string {
+	if len(repos) == 0 {
+		return "all"
+	}
+	return strings.Join(repos, ",")
 }
 
 type targetOut struct {
@@ -307,6 +346,7 @@ func (s *Server) apiCreateTarget(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	noteAudit(r, "target %s (%s, credential %s)", t.Name, t.Provider, t.CredKind)
 	writeJSON(w, http.StatusCreated, toTargetOut(t))
 }
 
@@ -358,6 +398,7 @@ func (s *Server) apiUpdateTarget(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	noteAudit(r, "changed %s", strings.Join(in.fields(), ", "))
 	writeJSON(w, http.StatusOK, toTargetOut(t))
 }
 
@@ -501,6 +542,7 @@ func (s *Server) apiCreateBinding(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	noteAudit(r, "binding %s → %s (name %s, on divergence %s)", b.Org, t.Name, b.NameTemplate, b.OnDivergence)
 	applied := 0
 	skipped := []string{}
 	if in.ApplyExisting {
@@ -542,6 +584,13 @@ func (s *Server) apiDeleteBinding(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.fail(w, badRequest("invalid id"))
 		return
+	}
+	if bs, err := s.store.ListBindings(r.Context(), ""); err == nil {
+		for _, b := range bs {
+			if b.ID == id {
+				noteAudit(r, "binding %s → %s", b.Org, b.TargetName)
+			}
+		}
 	}
 	if err := s.store.DeleteBinding(r.Context(), id); err != nil {
 		s.fail(w, err)
@@ -693,6 +742,7 @@ func (s *Server) apiCreateRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	useBindings := in.Bindings == nil || *in.Bindings
+	noteAuditRepo(r, in.Slug)
 	repo, created, err := s.reg.CreateRepo(r.Context(), in.Slug, in.Visibility, useBindings)
 	if err != nil {
 		if !errors.Is(err, store.ErrConflict) {
@@ -705,6 +755,8 @@ func (s *Server) apiCreateRepo(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, &apiError{status: http.StatusConflict, err: fmt.Errorf("repository %s already exists", repo.Slug)})
 		return
 	}
+	noteAuditRepo(r, repo.Slug)
+	noteAudit(r, "visibility %s", repo.Visibility)
 	for _, t := range in.Targets {
 		if _, err := s.reg.AddRemote(r.Context(), repo, t, "", "", "", "", false); err != nil {
 			s.fail(w, badRequest("add remote %s: %v", t, err))
@@ -751,6 +803,7 @@ func (s *Server) apiDeleteRepo(w http.ResponseWriter, r *http.Request) {
 	if s.bundles != nil {
 		s.bundles.Remove(repo.Slug)
 	}
+	noteAudit(r, "moved to %s", trash)
 	writeJSON(w, http.StatusOK, map[string]string{"moved_to": trash})
 }
 
@@ -782,6 +835,7 @@ func (s *Server) apiAddRemote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mgr.Enqueue(repo.ID, syncer.Request{Trigger: syncer.TriggerManual, RemoteIDs: []int64{rem.ID}})
+	noteAudit(r, "mirror %s (on divergence %s, adopt %t)", rem.Label(), rem.OnDivergence, rem.Adopt)
 	ro, err := s.repoOut(r.Context(), repo, false)
 	if err != nil {
 		s.fail(w, err)
@@ -847,6 +901,7 @@ func (s *Server) apiUpdateRemote(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	noteAudit(r, "mirror %s: enabled %t, on divergence %s, adopt %t", rem.Label(), rem.Enabled, rem.OnDivergence, rem.Adopt)
 	s.mgr.Enqueue(repo.ID, syncer.Request{Trigger: syncer.TriggerManual, RemoteIDs: []int64{rem.ID}})
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -866,6 +921,7 @@ func (s *Server) apiDeleteRemote(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	noteAudit(r, "mirror %s", rem.Label())
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -980,6 +1036,10 @@ func (s *Server) apiCreateToken(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, badRequest("name is required (letters, digits, '-', '_', '.')"))
 		return
 	}
+	if in.Name == auth.Admin().Name {
+		s.fail(w, badRequest("%q is reserved for the bootstrap admin token", in.Name))
+		return
+	}
 	scopes, err := auth.ParseScopes(strings.Join(in.Scopes, ","))
 	if err != nil {
 		s.fail(w, badRequest("%v", err))
@@ -996,6 +1056,7 @@ func (s *Server) apiCreateToken(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	noteAudit(r, "token %s (scopes %s; repos %s)", t.Name, strings.Join(t.Scopes, ","), orAll(t.Repos))
 	writeJSON(w, http.StatusCreated, tokenOut{ID: t.ID, Name: t.Name, Scopes: t.Scopes, Repos: t.Repos, Token: plain, CreatedAt: ts(t.CreatedAt)})
 }
 
@@ -1004,6 +1065,13 @@ func (s *Server) apiDeleteToken(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.fail(w, badRequest("invalid id"))
 		return
+	}
+	if ts, err := s.store.ListTokens(r.Context()); err == nil {
+		for _, t := range ts {
+			if t.ID == id {
+				noteAudit(r, "token %s", t.Name)
+			}
+		}
 	}
 	if err := s.store.DeleteToken(r.Context(), id); err != nil {
 		s.fail(w, err)

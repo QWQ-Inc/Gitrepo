@@ -17,6 +17,11 @@ secret_key_env: GITREPO_SECRET_KEY
 # Environment variable holding the bootstrap admin token.
 admin_token_env: GITREPO_ADMIN_TOKEN
 
+# Reverse proxies (IPs or CIDRs) allowed to set X-Forwarded-For. Client
+# addresses in the audit log come from that header only when the direct peer
+# is listed here; otherwise the header is ignored.
+trusted_proxies: []        # e.g. ["127.0.0.1", "10.0.0.0/8"]
+
 git:
   binary: git          # git >= 2.31 is required
   # self_path: /usr/local/bin/gitrepo   # executable used by hooks/askpass; default: this binary
@@ -49,3 +54,6 @@ bundles:
 alerts:
   failure_threshold: 3            # remote.failed after this many consecutive failures
   credential_expiry_warning: 14d  # credential.expiring when a target expires within this window
+
+audit:
+  retention: 365d            # audit log entries older than this are pruned; 0 = keep forever

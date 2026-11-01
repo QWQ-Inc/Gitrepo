@@ -286,7 +286,27 @@ JSON 投递带以下请求头：`X-Gitrepo-Event`、`X-Gitrepo-Delivery`；配�
 
 `gr token create ci --scopes read --repos 'acme/*'` 可以把 token 限制在部分仓库。token 只存 SHA-256 哈希。`--public` 仓库允许匿名读。
 
+名为 `admin` 的 token 不能创建：这个名字留给启动时配置的管理员 token，审计日志里才不会混淆。
+
 注意：备份（`refs/backup/*`）不会出现在 clone、ls-remote、源码包和 bundle 里，但它们引用的对象仍在 Hub 仓库中。有读权限、又知道 SHA 的人可以通过协议 v2 按 SHA 取回这些对象，这和 GitHub 上悬空提交的情况一样。敏感内容请用 `gr backup purge` 彻底清除，见[备份与清除](#备份与清除)。
+
+## 审计日志
+
+Gitrepo 保管着各平台的凭据，所以"谁在什么时候改了什么"都有记录：
+
+- **管理操作**：所有修改类 API 调用（新增、修改凭据、删除、签发 token、清除备份……），包括被拒绝的。记录内容为操作者、来源地址、路由和路径、HTTP 状态，以及一句说明，例如 `token ci (scopes read; repos acme/*)`、`changed credential`，被拒绝时是错误信息。**请求内容从不记录**，凭据、webhook URL 和 token 都不会出现在日志里。只读请求和未通过认证的请求不记录。
+- **push**：Hub 接受的每次 push，包括推送者（token 名或 `ssh:公钥名`）、HTTPS 还是 SSH、来源地址，以及每个 ref 的变化。强推会标出 `(forced)`：
+
+```
+$ gr audit --repo acme/app
+ID  TIME                 ACTOR  VIA   CLIENT       ACTION             STATUS  DETAIL
+12  2026-11-01 12:30:02  dev    http  203.0.113.7  git push acme/app  -       main d3f63368bfa9 → b4ef06c5f7ef (forced)
+11  2026-11-01 12:29:40  admin  api   203.0.113.9  POST /api/repos/acme/app/backups/purge  200  purged 1 backup(s), 0 LFS object(s)
+```
+
+`gr audit` 支持 `--actor`、`--repo`、`--action`（子串匹配，如 `push`、`DELETE`、`targets`）和 `--before`（翻页）。控制台的"审计"页面和每个仓库页面的"操作记录"显示同样的内容。记录默认保留 365 天（`audit.retention`，`0` 表示永久）。
+
+Gitrepo 在反向代理后面时，把代理地址写进 `trusted_proxies`，来源地址才会取自 `X-Forwarded-For`；不在列表里的对端发来的这个头会被忽略，防止伪造。
 
 ## CLI 速查
 
@@ -304,6 +324,7 @@ gr key     add|list|rm                   SSH 公钥
 gr ssh                                   SSH 地址与主机指纹
 gr webhook add|list|test|enable|disable|rm
 gr backup  list|restore|purge            被覆盖历史的隐藏备份
+gr audit   [--repo] [--actor] [--action] 审计日志
 ```
 
 所有命令都支持 `--json`。`gr` 读取 `GITREPO_URL` 和 `GITREPO_TOKEN`。
@@ -328,6 +349,7 @@ gr backup  list|restore|purge            被覆盖历史的隐藏备份
 | POST | `/api/repos/{org}/{name}/backups/restore` | 把备份恢复成新分支，`{"backup":"refs/backup/…","branch":"可选"}` |
 | POST | `/api/repos/{org}/{name}/backups/purge` | 彻底清除，`{"backups":[…]}` 或 `{"all":true}`，`"lfs":true` 同时清理无引用的 LFS 对象 |
 | GET | `/api/repos/{org}/{name}/runs` | 同步历史 |
+| GET | `/api/audit` | 审计日志，新的在前；`?repo=&actor=&action=&limit=&before=`，返回 `next` 用于翻页 |
 | GET/POST | `/api/tokens`，DELETE `/api/tokens/{id}` | 客户端 token |
 | GET/POST | `/api/webhooks`，PATCH/DELETE `/api/webhooks/{id}` | 出站通知 |
 | GET/POST | `/api/ssh-keys`，DELETE `/api/ssh-keys/{id}` | SSH 公钥 |
@@ -343,6 +365,7 @@ Git 地址：`/{org}/{name}.git`（smart HTTP，协议 v2）；启用 SSH 后还
 
 ## 运维
 
+- **审计**：见[审计日志](#审计日志)。
 - **数据目录**：`repos/`（bare 仓库，含 LFS 对象）、`gitrepo.db`（SQLite）、`ssh/`（SSH 主机密钥）、`bundles/`（可随时重建）、`trash/`（注销的仓库）。备份这个目录和 `GITREPO_SECRET_KEY` 就够了。即使整个目录丢失，代码也可以用 `gr repo import` 从任一镜像恢复。
 - **重试**：失败的镜像按 30s、1m、2m… 指数退避自动重试，上限 1h；巡检每 10 分钟全量检查一次，兜底 webhook 丢失和服务重启。
 - **告警**：见[通知](#通知)。
