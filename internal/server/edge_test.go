@@ -47,7 +47,8 @@ func TestEdgeNode(t *testing.T) {
 	cfg.DataDir = filepath.Join(t.TempDir(), "edge")
 	cfg.Git.SelfPath = gitrepoBin
 	cfg.SecretKeyEnv = e.cfg.SecretKeyEnv
-	cfg.AdminTokenEnv = "RH_TEST_EDGE_NO_ADMIN"
+	cfg.AdminTokenEnv = "RH_TEST_EDGE_ADMIN"
+	t.Setenv("RH_TEST_EDGE_ADMIN", "edge-admin-secret")
 	cfg.Edge.Upstream = "http://" + e.hubAddr
 	cfg.Edge.TokenEnv = "RH_TEST_EDGE_TOKEN"
 	t.Setenv("RH_TEST_EDGE_TOKEN", edgeTok.Token)
@@ -267,7 +268,11 @@ func TestEdgeNode(t *testing.T) {
 			t.Fatalf("edge API: %s", resp.Status)
 		}
 		req, _ := http.NewRequest(http.MethodGet, "http://"+edgeAddr+"/metrics", nil)
-		req.Header.Set("Authorization", "Bearer "+adminToken) // the hub's admin token
+		req.Header.Set("Authorization", "Bearer "+adminToken) // the hub's admin token is not replicated
+		if resp, err := http.DefaultClient.Do(req); err != nil || resp.StatusCode != 401 {
+			t.Fatalf("the hub's admin token worked on the edge: %v %v", err, resp)
+		}
+		req.Header.Set("Authorization", "Bearer edge-admin-secret")
 		resp, err = http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatal(err)

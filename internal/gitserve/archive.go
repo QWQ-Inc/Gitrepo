@@ -75,6 +75,10 @@ func (s *Server) ServeArchive(w http.ResponseWriter, r *http.Request, org, name,
 		return
 	}
 
+	if s.Edge != nil && !s.Edge.RepoReady(repo.Slug) {
+		edgeUnavailable(w)
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
 	defer cancel()
 	// Work in a view that holds only branches and tags, so hidden refs can

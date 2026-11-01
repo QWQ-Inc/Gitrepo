@@ -124,7 +124,18 @@ func loadOrCreateHostKey(path string) (ssh.Signer, error) {
 	return ssh.NewSignerFromKey(priv)
 }
 
-const keyIDExt = "gitrepo-key-id"
+const (
+	keyIDExt = "gitrepo-key-id"
+	keyFPExt = "gitrepo-key-fp"
+)
+
+// keyRef identifies the key a connection authenticated with. The ID finds
+// the row; the fingerprint proves it is still the same key (an ID can be
+// reused after the key was deleted, e.g. on an edge node).
+type keyRef struct {
+	id int64
+	fp string
+}
 
 func (s *Server) checkKey(_ ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 	k, err := s.Store.GetSSHKeyByFingerprint(context.Background(), ssh.FingerprintSHA256(key))
@@ -135,7 +146,7 @@ func (s *Server) checkKey(_ ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissio
 	if err != nil || string(stored.Marshal()) != string(key.Marshal()) {
 		return nil, errors.New("unknown public key")
 	}
-	return &ssh.Permissions{Extensions: map[string]string{keyIDExt: strconv.FormatInt(k.ID, 10)}}, nil
+	return &ssh.Permissions{Extensions: map[string]string{keyIDExt: strconv.FormatInt(k.ID, 10), keyFPExt: k.Fingerprint}}, nil
 }
 
 func orDefault[T int | time.Duration](v, def T) T {
@@ -259,7 +270,8 @@ func (s *Server) handleConn(raw net.Conn) {
 	go ssh.DiscardRequests(reqs)
 
 	id, _ := strconv.ParseInt(conn.Permissions.Extensions[keyIDExt], 10, 64)
-	if _, err := s.principal(id); err != nil {
+	ref := keyRef{id: id, fp: conn.Permissions.Extensions[keyFPExt]}
+	if _, err := s.principal(ref); err != nil {
 		return
 	}
 	s.mu.Lock()
@@ -303,7 +315,7 @@ func (s *Server) handleConn(raw net.Conn) {
 		go func() {
 			defer wg.Done()
 			defer func() { <-sessions }()
-			s.session(ctx, id, ch, chReqs)
+			s.session(ctx, ref, ch, chReqs)
 		}()
 	}
 	wg.Wait()
@@ -312,10 +324,13 @@ func (s *Server) handleConn(raw net.Conn) {
 // principal loads the key's current scopes. It is called for every
 // command, so deleting or narrowing a key takes effect immediately, even on
 // connections that are already open.
-func (s *Server) principal(keyID int64) (*auth.Principal, error) {
-	k, err := s.Store.GetSSHKey(context.Background(), keyID)
+func (s *Server) principal(ref keyRef) (*auth.Principal, error) {
+	k, err := s.Store.GetSSHKey(context.Background(), ref.id)
 	if err != nil {
 		return nil, err
+	}
+	if k.Fingerprint != ref.fp {
+		return nil, errors.New("key no longer authorized")
 	}
 	_ = s.Store.TouchSSHKey(context.Background(), k.ID)
 	return &auth.Principal{Name: "ssh:" + k.Name, Scopes: k.Scopes, Repos: k.Repos}, nil
@@ -329,7 +344,7 @@ func sendExit(ch ssh.Channel, code int) {
 // session serves one channel: env (GIT_PROTOCOL only), exec, or a shell
 // request answered with a friendly message. Requests keep being answered
 // while a command runs.
-func (s *Server) session(ctx context.Context, keyID int64, ch ssh.Channel, reqs <-chan *ssh.Request) {
+func (s *Server) session(ctx context.Context, keyID keyRef, ch ssh.Channel, reqs <-chan *ssh.Request) {
 	defer ch.Close()
 	var gitProtocol string
 	done := make(chan struct{})
@@ -479,6 +494,12 @@ func (s *Server) exec(ctx context.Context, p *auth.Principal, ch ssh.Channel, cm
 		return 0
 	}
 
+	if s.Git.Edge != nil && verb == "git-upload-pack" {
+		if !s.Git.Edge.RepoReady(repo.Slug) {
+			return fail("this edge node does not have a current copy of %s yet; retry shortly", repo.Slug)
+		}
+		s.Git.Edge.WaitFresh(ctx, repo.Slug, 15*time.Second)
+	}
 	if verb == "git-receive-pack" && s.Git.Gate != nil {
 		done, err := s.Git.Gate.BeginPush(repo.ID)
 		if err != nil {

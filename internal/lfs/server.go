@@ -54,10 +54,11 @@ type Server struct {
 	PublicURL string
 	Log       *slog.Logger
 
-	// Edge nodes: Fill fetches objects a download needs but the local
-	// store lacks; UploadProxy answers upload batches (on the hub).
-	Fill        func(ctx context.Context, repo Repo, missing []Object) error
-	UploadProxy func(w http.ResponseWriter, r *http.Request, repo Repo, body []byte)
+	// Edge nodes: Fill starts fetching objects a download batch needs but
+	// the local store lacks (without waiting); Await waits until one is
+	// stored. With them, batches answer with local links right away.
+	Fill  func(repo Repo, missing []Object)
+	Await func(ctx context.Context, repo Repo, oid string) error
 }
 
 // Object names an LFS object in a batch request.
@@ -185,10 +186,7 @@ func (s *Server) batch(w http.ResponseWriter, r *http.Request, repo Repo) {
 		writeErr(w, http.StatusUnprocessableEntity, "invalid batch request")
 		return
 	}
-	if req.Operation == "upload" && s.UploadProxy != nil {
-		s.UploadProxy(w, r, repo, raw)
-		return
-	}
+
 	if len(req.Objects) > maxBatchObjects {
 		writeErr(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("at most %d objects per batch request", maxBatchObjects))
 		return
@@ -215,17 +213,17 @@ func (s *Server) batch(w http.ResponseWriter, r *http.Request, repo Repo) {
 		s.authErr(w, err)
 		return
 	}
+	filling := map[string]bool{}
 	if req.Operation == "download" && s.Fill != nil {
 		var missing []Object
 		for _, o := range req.Objects {
 			if ValidOID(o.OID) && o.Size >= 0 && !Has(repo.Dir, o.OID, o.Size) {
 				missing = append(missing, o)
+				filling[o.OID] = true
 			}
 		}
 		if len(missing) > 0 {
-			if err := s.Fill(r.Context(), repo, missing); err != nil && s.Log != nil {
-				s.Log.Warn("fill LFS objects from the hub", "repo", repo.Slug, "err", err)
-			}
+			s.Fill(repo, missing)
 		}
 	}
 	base := s.baseURL(r, repo.Slug)
@@ -236,7 +234,7 @@ func (s *Server) batch(w http.ResponseWriter, r *http.Request, repo Repo) {
 		case !ValidOID(o.OID) || o.Size < 0:
 			ro.Error = &objError{Code: http.StatusUnprocessableEntity, Message: "invalid object"}
 		case req.Operation == "download":
-			if !Has(repo.Dir, o.OID, o.Size) {
+			if !Has(repo.Dir, o.OID, o.Size) && !filling[o.OID] {
 				ro.Error = &objError{Code: http.StatusNotFound, Message: "object does not exist on the hub"}
 				break
 			}
@@ -306,6 +304,14 @@ func (s *Server) authorizeObject(w http.ResponseWriter, r *http.Request, repo Re
 func (s *Server) download(w http.ResponseWriter, r *http.Request, repo Repo, oid string) {
 	if !s.authorizeObject(w, r, repo, oid, "download") {
 		return
+	}
+	if s.Await != nil {
+		if _, err := os.Stat(ObjectPath(repo.Dir, oid)); err != nil {
+			if err := s.Await(r.Context(), repo, oid); err != nil {
+				writeErr(w, http.StatusNotFound, "object is not available: "+err.Error())
+				return
+			}
+		}
 	}
 	f, err := os.Open(ObjectPath(repo.Dir, oid))
 	if err != nil {

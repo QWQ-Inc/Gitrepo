@@ -65,9 +65,13 @@ type Server struct {
 	// edge is set when this instance is a read-only edge node.
 	edge   *edge.Replica
 	edgeWG sync.WaitGroup
-	sshLn  net.Listener
-	auth   *auth.Authenticator
-	gitsrv *gitserve.Server
+	// stopping is closed when Shutdown begins (ends edge long-polls).
+	stopping     chan struct{}
+	shutdownOnce sync.Once
+	shutdownErr  error
+	sshLn        net.Listener
+	auth         *auth.Authenticator
+	gitsrv       *gitserve.Server
 
 	tickets    *gitexec.Tickets
 	hookToken  string
@@ -129,6 +133,7 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*Server, error) {
 
 		expiryNotified: map[int64]time.Time{},
 		clock:          newStateClock(),
+		stopping:       make(chan struct{}),
 	}
 	s.git = &gitexec.Git{
 		Bin:            cfg.Git.Binary,
@@ -196,17 +201,27 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*Server, error) {
 		s.bundles = &bundles.Manager{Dir: cfg.BundlesDir(), Git: s.git, Interval: cfg.Bundles.Interval.D(), MinSize: int64(cfg.Bundles.MinSize), Log: log}
 		s.gitsrv.Bundles = s.bundles
 	}
+	// Repositories created by a push appear on edges right away (an LFS
+	// upload through an edge precedes the push's post-receive).
+	s.gitsrv.OnCreate = func(repo *store.Repo) { s.clock.bump(repo.Slug) }
 	if cfg.Edge.Upstream != "" {
 		tok := strings.TrimSpace(os.Getenv(cfg.Edge.TokenEnv))
 		if tok == "" {
 			st.Close()
 			return nil, fmt.Errorf("edge mode: set %s to a hub token with the edge scope (gr token create <name> --scopes edge)", cfg.Edge.TokenEnv)
 		}
+		if u, err := url.Parse(cfg.Edge.Upstream); err == nil && u.Scheme == "http" && !isLoopback(u.Hostname()) {
+			log.Warn("edge: the hub is reached over plain http; the edge token and replicated credentials travel unencrypted", "upstream", cfg.Edge.Upstream)
+		}
 		s.edge = &edge.Replica{Upstream: cfg.Edge.Upstream, Token: tok, Store: st, Registry: s.reg, Git: s.git, Log: log}
+		if err := s.edge.Load(context.Background()); err != nil {
+			st.Close()
+			return nil, fmt.Errorf("edge: load state: %w", err)
+		}
 		s.gitsrv.Upstream = cfg.Edge.Upstream
 		s.gitsrv.Edge = s.edge
 		s.gitsrv.LFS.Fill = s.edge.FillLFS
-		s.gitsrv.LFS.UploadProxy = s.edge.ProxyLFSUpload
+		s.gitsrv.LFS.Await = s.edge.AwaitLFS
 	}
 	if cfg.SSH.Listen != "" {
 		s.ssh = &sshserve.Server{
@@ -412,6 +427,12 @@ func (s *Server) Start(ln net.Listener) error {
 
 // Shutdown stops accepting requests, cancels syncs and closes the database.
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.shutdownOnce.Do(func() { s.shutdownErr = s.shutdown(ctx) })
+	return s.shutdownErr
+}
+
+func (s *Server) shutdown(ctx context.Context) error {
+	close(s.stopping)
 	if s.cancel != nil {
 		s.cancel()
 	}
@@ -561,6 +582,11 @@ func (s *Server) retryDue(ctx context.Context) {
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.Ping(r.Context()); err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	if s.edge != nil && !s.edge.Ready() {
+		// Not loaded yet, or the hub refused this edge: send traffic elsewhere.
+		http.Error(w, "edge not ready", http.StatusServiceUnavailable)
 		return
 	}
 	w.Write([]byte("ok\n"))

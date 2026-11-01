@@ -291,6 +291,18 @@ ALTER TABLE release_mirrors ADD COLUMN adopted INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE release_mirrors ADD COLUMN creating INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE release_mirrors ADD COLUMN attempt_hash TEXT NOT NULL DEFAULT '';
 `,
+	// 10: edge replication. Hub: when backups were last purged (edges must
+	// drop the purged objects too). Edge: which hub repository a local copy
+	// is of, the version it holds, and replication progress.
+	`
+ALTER TABLE repos ADD COLUMN purged_at INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE repos ADD COLUMN upstream_key TEXT NOT NULL DEFAULT '';
+ALTER TABLE repos ADD COLUMN upstream_version TEXT NOT NULL DEFAULT '';
+CREATE TABLE edge_meta (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+`,
 }
 
 func (s *Store) migrate(ctx context.Context) error {

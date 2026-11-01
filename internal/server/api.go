@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -1128,6 +1129,10 @@ func (s *Server) apiCreateToken(w http.ResponseWriter, r *http.Request) {
 	repos, err := auth.ParseRepoPatterns(strings.Join(in.Repos, ","))
 	if err != nil {
 		s.fail(w, badRequest("%v", err))
+		return
+	}
+	if slices.Contains(scopes, auth.ScopeEdge) && len(repos) > 0 {
+		s.fail(w, badRequest("an edge token replicates every repository; create it without repository patterns"))
 		return
 	}
 	plain, hash := auth.NewToken()

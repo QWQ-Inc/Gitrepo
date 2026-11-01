@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -83,6 +84,12 @@ type Repo struct {
 	Visibility    string
 	CreatedAt     int64
 	UpdatedAt     int64
+	// PurgedAt is when backups were last purged (hub).
+	PurgedAt int64
+	// UpstreamKey and UpstreamVersion describe an edge node's copy: which
+	// hub repository (identity and purge) it is, and the version fetched.
+	UpstreamKey     string
+	UpstreamVersion string
 }
 
 type Remote struct {
@@ -299,11 +306,11 @@ FROM bindings b JOIN targets t ON t.id = b.target_id`
 
 // ------------------------------------------------------------------ repos
 
-const repoCols = `id, slug, default_branch, visibility, created_at, updated_at`
+const repoCols = `id, slug, default_branch, visibility, created_at, updated_at, purged_at, upstream_key, upstream_version`
 
 func scanRepo(sc interface{ Scan(...any) error }) (*Repo, error) {
 	var r Repo
-	if err := sc.Scan(&r.ID, &r.Slug, &r.DefaultBranch, &r.Visibility, &r.CreatedAt, &r.UpdatedAt); err != nil {
+	if err := sc.Scan(&r.ID, &r.Slug, &r.DefaultBranch, &r.Visibility, &r.CreatedAt, &r.UpdatedAt, &r.PurgedAt, &r.UpstreamKey, &r.UpstreamVersion); err != nil {
 		return nil, wrapErr(err)
 	}
 	return &r, nil
@@ -312,8 +319,8 @@ func scanRepo(sc interface{ Scan(...any) error }) (*Repo, error) {
 func (s *Store) CreateRepo(ctx context.Context, r *Repo) error {
 	now := Now()
 	r.CreatedAt, r.UpdatedAt = now, now
-	res, err := s.db.ExecContext(ctx, `INSERT INTO repos (slug, default_branch, visibility, created_at, updated_at) VALUES (?,?,?,?,?)`,
-		r.Slug, r.DefaultBranch, r.Visibility, r.CreatedAt, r.UpdatedAt)
+	res, err := s.db.ExecContext(ctx, `INSERT INTO repos (slug, default_branch, visibility, created_at, updated_at, upstream_key, upstream_version) VALUES (?,?,?,?,?,?,?)`,
+		r.Slug, r.DefaultBranch, r.Visibility, r.CreatedAt, r.UpdatedAt, r.UpstreamKey, r.UpstreamVersion)
 	if err != nil {
 		return wrapErr(err)
 	}
@@ -351,6 +358,34 @@ func (s *Store) UpdateRepo(ctx context.Context, r *Repo) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE repos SET default_branch=?, visibility=?, updated_at=? WHERE id=?`,
 		r.DefaultBranch, r.Visibility, r.UpdatedAt, r.ID)
 	return wrapErr(err)
+}
+
+// SetRepoPurged records that the repository's backups were purged.
+func (s *Store) SetRepoPurged(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE repos SET purged_at=? WHERE id=?`, Now(), id)
+	return wrapErr(err)
+}
+
+// SetRepoUpstream records an edge copy's hub identity and fetched version.
+func (s *Store) SetRepoUpstream(ctx context.Context, id int64, key, version string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE repos SET upstream_key=?, upstream_version=? WHERE id=?`, key, version, id)
+	return wrapErr(err)
+}
+
+// EdgeMeta reads an edge replication setting ("" if unset).
+func (s *Store) EdgeMeta(ctx context.Context, key string) (string, error) {
+	var v string
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM edge_meta WHERE key=?`, key).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return v, err
+}
+
+// SetEdgeMeta writes an edge replication setting.
+func (s *Store) SetEdgeMeta(ctx context.Context, key, value string) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO edge_meta (key, value) VALUES (?,?) ON CONFLICT (key) DO UPDATE SET value=excluded.value`, key, value)
+	return err
 }
 
 func (s *Store) DeleteRepo(ctx context.Context, id int64) error {

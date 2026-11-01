@@ -56,12 +56,13 @@ func (c *stateClock) repoVersion(slug string) string {
 }
 
 // EdgeState is what an edge node replicates.
+// The bootstrap admin token is deliberately not replicated: it is chosen
+// by a person (not random), so its unsalted hash could be brute-forced.
 type EdgeState struct {
-	Version   string      `json:"version"`
-	Repos     []EdgeRepo  `json:"repos"`
-	Tokens    []EdgeToken `json:"tokens"`
-	SSHKeys   []EdgeKey   `json:"ssh_keys"`
-	AdminHash string      `json:"admin_hash,omitempty"`
+	Version string      `json:"version"`
+	Repos   []EdgeRepo  `json:"repos"`
+	Tokens  []EdgeToken `json:"tokens"`
+	SSHKeys []EdgeKey   `json:"ssh_keys"`
 }
 
 type EdgeRepo struct {
@@ -70,6 +71,11 @@ type EdgeRepo struct {
 	DefaultBranch string `json:"default_branch,omitempty"`
 	// Version changes whenever the repository's branches or tags may have.
 	Version string `json:"version"`
+	// Identity changes when the slug is deleted and created again; Purged
+	// when backups were purged. Either way an edge rebuilds its copy so
+	// nothing removed on the hub stays fetchable there.
+	Identity string `json:"identity"`
+	Purged   int64  `json:"purged,omitempty"`
 }
 
 type EdgeToken struct {
@@ -101,6 +107,9 @@ func (s *Server) apiEdgeState(w http.ResponseWriter, r *http.Request) {
 	case !p.IsEdge():
 		writeErr(w, http.StatusForbidden, errors.New("edge scope required"))
 		return
+	case !p.IsAdmin() && len(p.Repos) > 0:
+		writeErr(w, http.StatusForbidden, errors.New("an edge token must cover all repositories (create it without --repos)"))
+		return
 	}
 	version, changed := s.clock.version()
 	if since := r.URL.Query().Get("since"); since == version {
@@ -113,6 +122,7 @@ func (s *Server) apiEdgeState(w http.ResponseWriter, r *http.Request) {
 			select {
 			case <-changed:
 			case <-t.C:
+			case <-s.stopping:
 			case <-r.Context().Done():
 				t.Stop()
 				return
@@ -122,14 +132,17 @@ func (s *Server) apiEdgeState(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	ctx := r.Context()
-	st := EdgeState{Version: version, Repos: []EdgeRepo{}, Tokens: []EdgeToken{}, SSHKeys: []EdgeKey{}, AdminHash: s.auth.AdminHash}
+	st := EdgeState{Version: version, Repos: []EdgeRepo{}, Tokens: []EdgeToken{}, SSHKeys: []EdgeKey{}}
 	repos, err := s.store.ListRepos(ctx)
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
 	for _, rp := range repos {
-		st.Repos = append(st.Repos, EdgeRepo{Slug: rp.Slug, Visibility: rp.Visibility, DefaultBranch: rp.DefaultBranch, Version: s.clock.repoVersion(rp.Slug)})
+		st.Repos = append(st.Repos, EdgeRepo{
+			Slug: rp.Slug, Visibility: rp.Visibility, DefaultBranch: rp.DefaultBranch, Version: s.clock.repoVersion(rp.Slug),
+			Identity: strconv.FormatInt(rp.ID, 10) + "@" + strconv.FormatInt(rp.CreatedAt, 10), Purged: rp.PurgedAt,
+		})
 	}
 	tokens, err := s.store.ListTokens(ctx)
 	if err != nil {

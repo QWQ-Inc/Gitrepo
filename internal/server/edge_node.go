@@ -3,6 +3,7 @@ package server
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 )
@@ -49,4 +50,12 @@ func (s *Server) edgeMetrics(b *strings.Builder) {
 		up = 0
 	}
 	fmt.Fprintf(b, "# HELP gitrepo_edge_upstream_ok Whether the last exchange with the hub succeeded.\n# TYPE gitrepo_edge_upstream_ok gauge\ngitrepo_edge_upstream_ok %d\n", up)
+}
+
+func isLoopback(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

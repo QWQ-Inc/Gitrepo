@@ -74,22 +74,23 @@ func (m *Manager) Start() {
 	m.mu.Lock()
 	m.queue = make(chan int64, 1024)
 	m.stop = make(chan struct{})
+	stop, queue := m.stop, m.queue // Stop clears m.stop; the worker keeps its own
 	m.mu.Unlock()
 	m.stopped.Add(1)
 	go func() {
 		defer m.stopped.Done()
 		for {
 			select {
-			case <-m.stop:
+			case <-stop:
 				return
-			case id := <-m.queue:
+			case id := <-queue:
 				m.mu.Lock()
 				delete(m.queued, id)
 				m.mu.Unlock()
 				ctx, cancel := context.WithCancel(context.Background())
 				go func() {
 					select {
-					case <-m.stop:
+					case <-stop:
 						cancel()
 					case <-ctx.Done():
 					}
@@ -107,6 +108,7 @@ func (m *Manager) Start() {
 func (m *Manager) Stop() {
 	m.mu.Lock()
 	stop := m.stop
+	m.stop = nil
 	m.mu.Unlock()
 	if stop != nil {
 		close(stop)

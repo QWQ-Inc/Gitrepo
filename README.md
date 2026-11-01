@@ -429,7 +429,9 @@ docker run -d -p 8080:8080 -v gitrepo-edge:/data \
   gitrepo:local serve
 ```
 
-- **能做什么**：clone、fetch、源码包、LFS 下载都由边缘节点用本地副本处理（SSH 也可以读）。鉴权和 Hub 完全一致：仓库可见性、token 和 SSH 公钥都复制到了边缘（只复制哈希），Hub 暂时不可达时，读取照常可用。
+- **能做什么**：clone、fetch、源码包、LFS 下载都由边缘节点用本地副本处理（SSH 也可以读）。
+- **鉴权**：和 Hub 一致。仓库可见性、token 和 SSH 公钥都复制到了边缘（只复制哈希）。Hub 的 admin token 不会复制。
+- **Hub 不可达时**：读取照常可用，边缘重启后也能直接用本地副本提供服务。
 - **写去哪里**：
   - push 会被 307 重定向到 Hub，git 会自动跟随。也可以把 push 地址直接设成 Hub：`git remote set-url --push origin https://git.example.com/acme/demo.git`。
   - LFS 上传会被转给 Hub。
@@ -437,12 +439,15 @@ docker run -d -p 8080:8080 -v gitrepo-edge:/data \
 - **多快能看到新内容**：
   - 边缘对 Hub 做长轮询，Hub 上每次 push 或管理变更都会立即唤醒它，只 fetch 有变化的仓库。测试中，Hub 上 push 到边缘可读大约 0.1 秒。
   - 刚 push 完就从边缘 fetch，如果边缘正在拉这个仓库，会先等它拉完（最多 15 秒）。
-  - token 被吊销、仓库被注销，也会在几秒内同步到边缘。
+  - token 被吊销、仓库被注销，也会在几秒内同步到边缘，即使边缘正在拉取大仓库也不受影响。
+  - Hub 上清除了备份，或者删除仓库后用同一个名字重建，边缘会丢弃旧副本重新拉取，被清除或已删除的内容不会再从边缘取到，按 SHA 也不行。重新拉取完成之前，这个仓库在边缘上返回 503。
 - **LFS**：边缘第一次被请求某个对象时，从 Hub 下载并按 SHA-256 校验，之后都从本地提供。
 - **按区域路由**：给同一个域名配 GeoDNS，或者给不同地区各配一个域名，让读取落到最近的边缘节点，push 地址指向 Hub。
-- **监控**：边缘的 `/metrics`（用 Hub 的 admin token）提供 `gitrepo_edge_ready`、`gitrepo_edge_last_update_timestamp_seconds`、`gitrepo_edge_pending_fetches`、`gitrepo_edge_upstream_ok`。
+- **监控**：边缘的 `/healthz` 在尚未加载、或被 Hub 拒绝时返回 503。边缘的 `/metrics`（用边缘自己的 `GITREPO_ADMIN_TOKEN`）提供 `gitrepo_edge_ready`、`gitrepo_edge_last_update_timestamp_seconds`、`gitrepo_edge_pending_fetches`、`gitrepo_edge_upstream_ok`。
 - **注意**：
-  - edge token 能读所有仓库，也能拿到所有 token 的哈希，应只发给自己运维的节点。
+  - edge token 能读所有仓库，也能拿到所有 token 的哈希，应只发给自己运维的节点。它不能限定仓库范围。
+  - 在 Hub 上删除这个 token，边缘会停止服务。
+  - 边缘和 Hub 之间请用 HTTPS。用明文 http 连接非本机的 Hub 时，边缘会在启动时警告。
   - 边缘自己的 `GITREPO_SECRET_KEY` 只用来签 LFS 下载链接，可以和 Hub 不同。
   - Hub 重启后，边缘会把每个仓库都检查一遍；没有变化的仓库 fetch 不会传任何数据。
 

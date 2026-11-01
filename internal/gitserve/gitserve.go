@@ -5,7 +5,9 @@ package gitserve
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -69,8 +71,19 @@ type Server struct {
 
 // Replica is what the Git server needs from an edge node's replica.
 type Replica interface {
+	// Ready: the edge has the hub's state and the hub accepts it.
 	Ready() bool
+	// RepoReady: a complete copy of the repository is on disk.
+	RepoReady(slug string) bool
 	WaitFresh(ctx context.Context, slug string, max time.Duration)
+	// ProxyLFS forwards an LFS request to the hub.
+	ProxyLFS(w http.ResponseWriter, r *http.Request, slug, rest string, body []byte)
+}
+
+// edgeUnavailable answers for an edge that cannot serve slug yet.
+func edgeUnavailable(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", "5")
+	http.Error(w, "gitrepo: this edge node does not have a current copy of the repository yet; retry shortly, or use the hub", http.StatusServiceUnavailable)
 }
 
 const (
@@ -126,12 +139,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if s.Edge != nil && !s.Edge.Ready() {
-			w.Header().Set("Retry-After", "5")
-			http.Error(w, "gitrepo: this edge node is still loading its copy of the hub; retry shortly", http.StatusServiceUnavailable)
+			edgeUnavailable(w)
 			return
-		}
-		if s.Edge != nil && rest == "info/refs" {
-			s.Edge.WaitFresh(r.Context(), slug, 15*time.Second)
 		}
 	}
 
@@ -164,6 +173,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.Edge != nil {
+		// After authorization: nothing about private repositories can be
+		// learnt from these waits.
+		if !s.Edge.RepoReady(slug) {
+			edgeUnavailable(w)
+			return
+		}
+		if rest == "info/refs" {
+			s.Edge.WaitFresh(r.Context(), slug, 15*time.Second)
+		}
+	}
 	if write && s.Gate != nil {
 		// Refusing at info/refs lets git show the reason to the user; the
 		// POST is where the push actually happens, so it registers.
@@ -209,6 +229,24 @@ func (s *Server) serveLFS(w http.ResponseWriter, r *http.Request, slug, rest str
 		}
 		w.WriteHeader(status)
 		fmt.Fprintf(w, `{"message":%q}`, "gitrepo: "+msg)
+	}
+	if s.Edge != nil && r.Method == http.MethodPost && (rest == "objects/batch" || rest == "locks/verify") {
+		// Uploads go to the hub, which authorizes them - also for a
+		// repository the edge has not heard of yet (a push creating it).
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		if err != nil {
+			lfsErr(http.StatusBadRequest, "cannot read request")
+			return
+		}
+		var op struct {
+			Operation string `json:"operation"`
+		}
+		json.Unmarshal(body, &op)
+		if rest == "locks/verify" || op.Operation == "upload" {
+			s.Edge.ProxyLFS(w, r, slug, rest, body)
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
 	}
 	p, perr := s.Auth.FromRequest(r)
 	if perr != nil && !strings.HasPrefix(auth.TokenFromRequest(r), "lfs1.") {

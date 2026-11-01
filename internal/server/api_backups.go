@@ -138,6 +138,9 @@ func (s *Server) apiPurgeBackups(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.log.Warn("backups purged", "repo", repo.Slug, "backups", res.Backups, "lfs_objects", res.LFSObjects)
+	if err := s.store.SetRepoPurged(r.Context(), repo.ID); err != nil {
+		s.log.Error("record purge", "repo", repo.Slug, "err", err)
+	}
 	noteAudit(r, "purged %d backup(s), %d LFS object(s)", res.Backups, res.LFSObjects)
 	writeJSON(w, http.StatusOK, res)
 }
