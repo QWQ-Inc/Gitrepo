@@ -13,15 +13,18 @@ import (
 )
 
 // Scopes. Each scope implies the ones listed after it:
-// admin ⇒ create ⇒ write ⇒ read.
+// admin ⇒ create ⇒ write ⇒ read. ScopeEdge is for edge nodes: it reads
+// every repository and the hub's replication state (repository list,
+// token and SSH key hashes), and writes nothing.
 const (
 	ScopeRead   = "read"
 	ScopeWrite  = "write"
 	ScopeCreate = "create"
 	ScopeAdmin  = "admin"
+	ScopeEdge   = "edge"
 )
 
-var scopeRank = map[string]int{ScopeRead: 1, ScopeWrite: 2, ScopeCreate: 3, ScopeAdmin: 4}
+var scopeRank = map[string]int{ScopeRead: 1, ScopeWrite: 2, ScopeCreate: 3, ScopeAdmin: 4, ScopeEdge: 1}
 
 // ValidScope reports whether s is a known scope.
 func ValidScope(s string) bool { _, ok := scopeRank[s]; return ok }
@@ -72,6 +75,11 @@ func (p *Principal) maxRank() int {
 // IsAdmin reports whether p has the admin scope.
 func (p *Principal) IsAdmin() bool { return p != nil && p.maxRank() >= scopeRank[ScopeAdmin] }
 
+// IsEdge reports whether p may replicate the hub (edge scope or admin).
+func (p *Principal) IsEdge() bool {
+	return p != nil && (p.IsAdmin() || slices.Contains(p.Scopes, ScopeEdge))
+}
+
 // Can reports whether p holds scope for the repository slug.
 func (p *Principal) Can(scope, slug string) bool {
 	if p == nil {
@@ -113,7 +121,7 @@ func ParseScopes(s string) ([]string, error) {
 			continue
 		}
 		if !ValidScope(part) {
-			return nil, fmt.Errorf("unknown scope %q (valid: read, write, create, admin)", part)
+			return nil, fmt.Errorf("unknown scope %q (valid: read, write, create, admin, edge)", part)
 		}
 		if !slices.Contains(out, part) {
 			out = append(out, part)

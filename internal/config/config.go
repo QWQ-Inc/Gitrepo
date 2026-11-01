@@ -48,6 +48,18 @@ type Config struct {
 	Bundles  BundlesConfig  `yaml:"bundles"`
 	Audit    AuditConfig    `yaml:"audit"`
 	Releases ReleasesConfig `yaml:"releases"`
+	Edge     EdgeConfig     `yaml:"edge"`
+}
+
+// EdgeConfig turns this instance into a read-only edge node of a hub: it
+// serves clones, fetches, archives and LFS downloads from a local copy and
+// sends pushes to the hub.
+type EdgeConfig struct {
+	// Upstream is the hub's URL (empty: this instance is a hub).
+	Upstream string `yaml:"upstream"`
+	// TokenEnv names the environment variable holding a hub token with
+	// the edge scope.
+	TokenEnv string `yaml:"token_env"`
 }
 
 // ReleasesConfig controls releases kept on the hub and published to mirrors.
@@ -168,6 +180,7 @@ func Default() *Config {
 		},
 		Audit:    AuditConfig{Retention: Duration(365 * 24 * time.Hour)},
 		Releases: ReleasesConfig{MaxAssetSize: ByteSize(2 << 30)},
+		Edge:     EdgeConfig{TokenEnv: "GITREPO_EDGE_TOKEN"},
 	}
 }
 
@@ -219,6 +232,9 @@ func (c *Config) applyEnv() {
 	if v := os.Getenv("GITREPO_GIT_BINARY"); v != "" {
 		c.Git.Binary = v
 	}
+	if v := os.Getenv("GITREPO_EDGE_UPSTREAM"); v != "" {
+		c.Edge.Upstream = v
+	}
 }
 
 func (c *Config) validate() error {
@@ -243,6 +259,12 @@ func (c *Config) validate() error {
 	}
 	if c.Sync.RetryBase.D() <= 0 || c.Sync.RetryMax.D() < c.Sync.RetryBase.D() {
 		errs = append(errs, errors.New("sync.retry_base must be positive and <= sync.retry_max"))
+	}
+	if c.Edge.Upstream != "" {
+		c.Edge.Upstream = strings.TrimRight(c.Edge.Upstream, "/")
+		if !strings.HasPrefix(c.Edge.Upstream, "https://") && !strings.HasPrefix(c.Edge.Upstream, "http://") {
+			errs = append(errs, errors.New("edge.upstream must be the hub's http(s) URL"))
+		}
 	}
 	if c.Audit.Retention.D() < 0 {
 		errs = append(errs, errors.New("audit.retention must not be negative"))

@@ -28,6 +28,9 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "# HELP gitrepo_repos Number of registered repositories.\n# TYPE gitrepo_repos gauge\ngitrepo_repos %d\n", len(repos))
+	if s.edge != nil {
+		s.edgeMetrics(&b)
+	}
 
 	b.WriteString("# HELP gitrepo_remote_state Current state of each mirror (1 for the active state).\n# TYPE gitrepo_remote_state gauge\n")
 	states := []string{store.StatePending, store.StateSynced, store.StateSyncing, store.StateBehind, store.StateDiverged, store.StateFailed, store.StatePaused}

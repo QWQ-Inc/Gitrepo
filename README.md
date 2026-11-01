@@ -327,6 +327,7 @@ JSON 投递带以下请求头：`X-Gitrepo-Event`、`X-Gitrepo-Delivery`；配�
 | `write` | 另外可以 push 已有仓库 |
 | `create` | 另外可以通过 push 新地址来建仓 |
 | `admin` | 另外可以使用管理 API 和 `gr` |
+| `edge` | 给[边缘节点](#只读边缘节点)用：读取所有仓库和复制状态，不能写 |
 
 例外：Release 接口按仓库授权，`write` 权限就能发布 Release，见 [Release](#release)。
 
@@ -414,6 +415,37 @@ gr release create|edit|upload|remove-file|publish|list|show|download|rm  发布�
 
 Git 地址：`/{org}/{name}.git`（smart HTTP，协议 v2）；启用 SSH 后还有 `ssh://git@<host>:<port>/{org}/{name}.git`。
 
+## 只读边缘节点
+
+Hub 在一个地区、开发者和 CI 在另一个地区（例如 Hub 在海外、用户在国内）时，可以在用户附近部署边缘节点，让 clone 和 fetch 走近路：
+
+```bash
+gr token create edge-shanghai --scopes edge          # 在 Hub 上签发
+docker run -d -p 8080:8080 -v gitrepo-edge:/data \
+  -e GITREPO_EDGE_UPSTREAM=https://git.example.com \
+  -e GITREPO_EDGE_TOKEN=grp_… \
+  -e GITREPO_SECRET_KEY="$(docker run --rm gitrepo:local keygen)" \
+  -e GITREPO_PUBLIC_URL=https://git-sh.example.com \
+  gitrepo:local serve
+```
+
+- **能做什么**：clone、fetch、源码包、LFS 下载都由边缘节点用本地副本处理（SSH 也可以读）。鉴权和 Hub 完全一致：仓库可见性、token 和 SSH 公钥都复制到了边缘（只复制哈希），Hub 暂时不可达时，读取照常可用。
+- **写去哪里**：
+  - push 会被 307 重定向到 Hub，git 会自动跟随。也可以把 push 地址直接设成 Hub：`git remote set-url --push origin https://git.example.com/acme/demo.git`。
+  - LFS 上传会被转给 Hub。
+  - 管理 API、控制台和 Release 都只在 Hub 上。
+- **多快能看到新内容**：
+  - 边缘对 Hub 做长轮询，Hub 上每次 push 或管理变更都会立即唤醒它，只 fetch 有变化的仓库。测试中，Hub 上 push 到边缘可读大约 0.1 秒。
+  - 刚 push 完就从边缘 fetch，如果边缘正在拉这个仓库，会先等它拉完（最多 15 秒）。
+  - token 被吊销、仓库被注销，也会在几秒内同步到边缘。
+- **LFS**：边缘第一次被请求某个对象时，从 Hub 下载并按 SHA-256 校验，之后都从本地提供。
+- **按区域路由**：给同一个域名配 GeoDNS，或者给不同地区各配一个域名，让读取落到最近的边缘节点，push 地址指向 Hub。
+- **监控**：边缘的 `/metrics`（用 Hub 的 admin token）提供 `gitrepo_edge_ready`、`gitrepo_edge_last_update_timestamp_seconds`、`gitrepo_edge_pending_fetches`、`gitrepo_edge_upstream_ok`。
+- **注意**：
+  - edge token 能读所有仓库，也能拿到所有 token 的哈希，应只发给自己运维的节点。
+  - 边缘自己的 `GITREPO_SECRET_KEY` 只用来签 LFS 下载链接，可以和 Hub 不同。
+  - Hub 重启后，边缘会把每个仓库都检查一遍；没有变化的仓库 fetch 不会传任何数据。
+
 ## 运维
 
 - **审计**：见[审计日志](#审计日志)。
@@ -452,7 +484,7 @@ docker run --rm -v gitrepo-data-new:/data -v /backups/2026-11-01:/snapshot:ro gi
 
 - **M1（已完成）**：target / binding / token，push 自动建仓，pre/post-receive，force-with-lease 同步，分叉检测与备份，巡检与重试，`gr status`。
 - **M2**：~~出站 webhook 与告警~~、~~Web 控制台~~（已完成）。
-- **M3**：~~源码包~~、~~bundle-uri~~（已完成）、只读边缘节点、按区域读取路由。
+- **M3**：~~源码包~~、~~bundle-uri~~、~~只读边缘节点~~、~~按区域读取路由~~（已完成，路由用 GeoDNS 或分区域域名，见[只读边缘节点](#只读边缘节点)）。
 - **M4**：~~Gitea / Forgejo 适配器~~、~~Git LFS~~、~~Gitee 适配器~~、~~同步 Release~~（已完成）。
 
 ## 发布

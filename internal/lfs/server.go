@@ -1,6 +1,7 @@
 package lfs
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -52,12 +53,20 @@ type Server struct {
 	// empty, links are derived from the request.
 	PublicURL string
 	Log       *slog.Logger
+
+	// Edge nodes: Fill fetches objects a download needs but the local
+	// store lacks; UploadProxy answers upload batches (on the hub).
+	Fill        func(ctx context.Context, repo Repo, missing []Object) error
+	UploadProxy func(w http.ResponseWriter, r *http.Request, repo Repo, body []byte)
 }
 
-type batchObject struct {
+// Object names an LFS object in a batch request.
+type Object struct {
 	OID  string `json:"oid"`
 	Size int64  `json:"size"`
 }
+
+type batchObject = Object
 
 type batchRequest struct {
 	Operation string        `json:"operation"`
@@ -171,8 +180,13 @@ func (s *Server) Serve(w http.ResponseWriter, r *http.Request, repo Repo, rest s
 
 func (s *Server) batch(w http.ResponseWriter, r *http.Request, repo Repo) {
 	var req batchRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+	raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil || json.Unmarshal(raw, &req) != nil {
 		writeErr(w, http.StatusUnprocessableEntity, "invalid batch request")
+		return
+	}
+	if req.Operation == "upload" && s.UploadProxy != nil {
+		s.UploadProxy(w, r, repo, raw)
 		return
 	}
 	if len(req.Objects) > maxBatchObjects {
@@ -200,6 +214,19 @@ func (s *Server) batch(w http.ResponseWriter, r *http.Request, repo Repo) {
 	} else if err := s.Auth(r, repo.Slug, req.Operation == "upload"); err != nil {
 		s.authErr(w, err)
 		return
+	}
+	if req.Operation == "download" && s.Fill != nil {
+		var missing []Object
+		for _, o := range req.Objects {
+			if ValidOID(o.OID) && o.Size >= 0 && !Has(repo.Dir, o.OID, o.Size) {
+				missing = append(missing, o)
+			}
+		}
+		if len(missing) > 0 {
+			if err := s.Fill(r.Context(), repo, missing); err != nil && s.Log != nil {
+				s.Log.Warn("fill LFS objects from the hub", "repo", repo.Slug, "err", err)
+			}
+		}
 	}
 	base := s.baseURL(r, repo.Slug)
 	out := make([]batchResponseObject, 0, len(req.Objects))

@@ -457,6 +457,9 @@ func (s *Server) exec(ctx context.Context, p *auth.Principal, ch ssh.Channel, cm
 	default:
 		return fail("unsupported command %q (git-upload-pack, git-receive-pack and git-lfs-authenticate are available; for archives use https://…/archive/<org>/<name>/<rev>.tar.gz)", verb)
 	}
+	if s.Git.Upstream != "" && write {
+		return fail("this is a read-only edge node; push to %s", s.Git.Upstream)
+	}
 	repo, err := s.Git.Access(ctx, slug, p, write, create)
 	if err != nil {
 		if errors.Is(err, gitserve.ErrNotFound) {

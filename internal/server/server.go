@@ -24,6 +24,7 @@ import (
 	"github.com/qwq-inc/gitrepo/internal/auth"
 	"github.com/qwq-inc/gitrepo/internal/bundles"
 	"github.com/qwq-inc/gitrepo/internal/config"
+	"github.com/qwq-inc/gitrepo/internal/edge"
 	"github.com/qwq-inc/gitrepo/internal/gitexec"
 	"github.com/qwq-inc/gitrepo/internal/gitserve"
 	"github.com/qwq-inc/gitrepo/internal/lfs"
@@ -59,9 +60,14 @@ type Server struct {
 	bundles *bundles.Manager // nil when bundles are disabled
 	// releases keeps releases and publishes them to mirrors.
 	releases *releases.Manager
-	sshLn    net.Listener
-	auth     *auth.Authenticator
-	gitsrv   *gitserve.Server
+	// clock versions the state edge nodes replicate.
+	clock *stateClock
+	// edge is set when this instance is a read-only edge node.
+	edge   *edge.Replica
+	edgeWG sync.WaitGroup
+	sshLn  net.Listener
+	auth   *auth.Authenticator
+	gitsrv *gitserve.Server
 
 	tickets    *gitexec.Tickets
 	hookToken  string
@@ -122,6 +128,7 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*Server, error) {
 		done:       make(chan struct{}),
 
 		expiryNotified: map[int64]time.Time{},
+		clock:          newStateClock(),
 	}
 	s.git = &gitexec.Git{
 		Bin:            cfg.Git.Binary,
@@ -188,6 +195,18 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*Server, error) {
 	if cfg.Bundles.Enabled {
 		s.bundles = &bundles.Manager{Dir: cfg.BundlesDir(), Git: s.git, Interval: cfg.Bundles.Interval.D(), MinSize: int64(cfg.Bundles.MinSize), Log: log}
 		s.gitsrv.Bundles = s.bundles
+	}
+	if cfg.Edge.Upstream != "" {
+		tok := strings.TrimSpace(os.Getenv(cfg.Edge.TokenEnv))
+		if tok == "" {
+			st.Close()
+			return nil, fmt.Errorf("edge mode: set %s to a hub token with the edge scope (gr token create <name> --scopes edge)", cfg.Edge.TokenEnv)
+		}
+		s.edge = &edge.Replica{Upstream: cfg.Edge.Upstream, Token: tok, Store: st, Registry: s.reg, Git: s.git, Log: log}
+		s.gitsrv.Upstream = cfg.Edge.Upstream
+		s.gitsrv.Edge = s.edge
+		s.gitsrv.LFS.Fill = s.edge.FillLFS
+		s.gitsrv.LFS.UploadProxy = s.edge.ProxyLFSUpload
 	}
 	if cfg.SSH.Listen != "" {
 		s.ssh = &sshserve.Server{
@@ -310,9 +329,13 @@ func (s *Server) writeShims() error {
 
 // Handler returns the public HTTP handler.
 func (s *Server) Handler() http.Handler {
+	if s.edge != nil {
+		return s.edgeHandler()
+	}
 	mux := http.NewServeMux()
 	s.registerAPI(mux)
 	s.registerReleaseAPI(mux)
+	s.registerEdgeAPI(mux)
 	mux.Handle("GET /ui/", webui.Handler("/ui/"))
 	mux.Handle("GET /ui", http.RedirectHandler("/ui/", http.StatusFound))
 	mux.Handle("GET /{$}", http.RedirectHandler("/ui/", http.StatusFound))
@@ -366,9 +389,19 @@ func (s *Server) Start(ln net.Listener) error {
 		s.log.Info("ssh enabled", "listen", sshLn.Addr().String(), "host_key", s.ssh.Fingerprint())
 	}
 	s.notify.Start(2)
-	s.releases.Start()
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
+	if s.edge != nil {
+		// An edge follows its hub; it has no mirrors, releases or patrol.
+		s.edgeWG.Add(1)
+		go func() {
+			defer s.edgeWG.Done()
+			s.edge.Run(ctx)
+		}()
+		close(s.done)
+		return nil
+	}
+	s.releases.Start()
 	if s.opts.NoBackground {
 		close(s.done)
 	} else {
@@ -382,6 +415,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.cancel != nil {
 		s.cancel()
 	}
+	s.edgeWG.Wait()
 	var errs []error
 	if s.httpSrv != nil {
 		errs = append(errs, s.httpSrv.Shutdown(ctx))

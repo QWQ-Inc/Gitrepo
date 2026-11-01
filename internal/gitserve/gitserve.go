@@ -61,6 +61,16 @@ type Server struct {
 	TrustedProxies []netip.Prefix
 	// Gate refuses pushes while a repository is under maintenance.
 	Gate *Gate
+	// Upstream, on an edge node, is the hub: pushes are redirected there.
+	Upstream string
+	// Edge is the edge node's replica (nil on the hub).
+	Edge Replica
+}
+
+// Replica is what the Git server needs from an edge node's replica.
+type Replica interface {
+	Ready() bool
+	WaitFresh(ctx context.Context, slug string, max time.Duration)
 }
 
 const (
@@ -107,6 +117,23 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	write := service == svcReceive
+
+	if s.Upstream != "" {
+		if write {
+			// A read-only edge: git follows the redirect of its first
+			// request and pushes to the hub.
+			http.Redirect(w, r, strings.TrimRight(s.Upstream, "/")+r.URL.RequestURI(), http.StatusTemporaryRedirect)
+			return
+		}
+		if s.Edge != nil && !s.Edge.Ready() {
+			w.Header().Set("Retry-After", "5")
+			http.Error(w, "gitrepo: this edge node is still loading its copy of the hub; retry shortly", http.StatusServiceUnavailable)
+			return
+		}
+		if s.Edge != nil && rest == "info/refs" {
+			s.Edge.WaitFresh(r.Context(), slug, 15*time.Second)
+		}
+	}
 
 	p, err := s.Auth.FromRequest(r)
 	if err != nil {

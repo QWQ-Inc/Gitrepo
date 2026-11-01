@@ -967,7 +967,7 @@ func tokenCmd() *cobra.Command {
 			return nil
 		},
 	}
-	create.Flags().StringVar(&scopes, "scopes", "write", "read | write | create | admin (each implies the previous)")
+	create.Flags().StringVar(&scopes, "scopes", "write", "read | write | create | admin (each implies the previous); edge for an edge node")
 	create.Flags().StringVar(&repos, "repos", "", "comma-separated repository patterns, e.g. 'acme/*' (default: all)")
 	list := &cobra.Command{
 		Use: "list", Aliases: []string{"ls"}, Short: "List tokens", Args: cobra.NoArgs,

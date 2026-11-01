@@ -387,6 +387,15 @@ func (g *Git) Fetch(ctx context.Context, repo, url string, cred *Cred, refspecs 
 	return err
 }
 
+// MirrorFetch makes repo's branches and tags exactly those of url (an edge
+// node following its hub): new and moved refs are fetched, removed ones
+// pruned.
+func (g *Git) MirrorFetch(ctx context.Context, repo, url string, cred *Cred) error {
+	_, _, err := g.runRemote(ctx, repo, cred, url, "fetch", "--quiet", "--prune", "--no-tags", "--no-write-fetch-head", "--force", url,
+		"+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*")
+	return err
+}
+
 // LFSObjects returns the Git LFS objects (oid → size) referenced by blobs
 // reachable from tips but not from exclude. Exclude values the repository
 // does not have are ignored. Everything is streamed: only candidate pointer

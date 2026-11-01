@@ -60,3 +60,9 @@ audit:
 
 releases:
   max_asset_size: 2GiB       # largest release file accepted (GitHub's limit is 2 GiB); 0 = unlimited
+
+# A read-only edge node of another Gitrepo (the hub) serves clones, fetches,
+# archives and LFS downloads near its users and sends pushes to the hub.
+edge:
+  upstream: ""               # e.g. https://git.example.com (env GITREPO_EDGE_UPSTREAM); empty = this is a hub
+  token_env: GITREPO_EDGE_TOKEN   # hub token with the edge scope (gr token create edge-1 --scopes edge)

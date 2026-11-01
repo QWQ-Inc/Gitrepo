@@ -85,6 +85,9 @@ func (s *Server) withAudit(p *auth.Principal, fn http.HandlerFunc) http.HandlerF
 			})
 		}()
 		fn(sw, r.WithContext(context.WithValue(r.Context(), auditKey{}, note)))
+		if sw.status < 400 && s.clock != nil {
+			s.clock.bump(note.repo) // edges pick up the change
+		}
 	}
 }
 

@@ -80,3 +80,34 @@ func TestCleanText(t *testing.T) {
 		t.Errorf("cap: %d %q", len(got), got[len(got)-5:])
 	}
 }
+
+func TestReplaceTokensKeepsRows(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	if err := s.ReplaceTokens(ctx, []Token{{Name: "a", Hash: "h1", Scopes: []string{"read"}}, {Name: "b", Hash: "h2", Scopes: []string{"write"}}}); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := s.GetTokenByHash(ctx, "h1")
+	// b is revoked, a changes scope, c is new and takes the name b.
+	if err := s.ReplaceTokens(ctx, []Token{{Name: "a", Hash: "h1", Scopes: []string{"write"}}, {Name: "b", Hash: "h3", Scopes: []string{"read"}}}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := s.GetTokenByHash(ctx, "h1")
+	if err != nil || after.ID != before.ID || after.Scopes[0] != "write" {
+		t.Fatalf("kept token: %+v %v (was id %d)", after, err, before.ID)
+	}
+	if _, err := s.GetTokenByHash(ctx, "h2"); err == nil {
+		t.Fatal("revoked token still present")
+	}
+	if c, err := s.GetTokenByHash(ctx, "h3"); err != nil || c.Name != "b" {
+		t.Fatalf("new token: %+v %v", c, err)
+	}
+	// Two names swapping between existing tokens.
+	if err := s.ReplaceTokens(ctx, []Token{{Name: "b", Hash: "h1", Scopes: []string{"read"}}, {Name: "a", Hash: "h3", Scopes: []string{"read"}}}); err != nil {
+		t.Fatalf("swap names: %v", err)
+	}
+}

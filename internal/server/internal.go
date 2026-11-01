@@ -93,12 +93,14 @@ func (s *Server) handlePostReceive(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	repo, err := s.store.GetRepoBySlug(ctx, org+"/"+name)
 	if err != nil {
+		s.clock.bump(org + "/" + name)
 		say("warning: repository is not registered: %v", err)
 		return
 	}
 	if err := s.fixHead(ctx, repo, path, updates); err != nil {
 		s.log.Warn("update HEAD", "repo", repo.Slug, "err", err)
 	}
+	s.clock.bump(repo.Slug) // edges fetch the new refs (and HEAD)
 	pushed := map[string]string{}
 	for _, u := range updates {
 		if gitexec.IsZero(u.New) {
