@@ -142,6 +142,23 @@ remote: gitrepo:   [diverged] gitlab:acme-group/demo  refs/heads/main
 
 每个推送操作都把刚观测到的远端值作为 lease。如果观测和推送之间远端又被改动，远端会拒绝这次推送，下一轮同步把它识别为分叉。
 
+## 备份与清除
+
+被覆盖的历史不会立刻消失。这包括 Hub 上的强推和删分支、带 `--force` 的导入、以及 `--overwrite` 覆盖掉的镜像提交，它们会以隐藏 ref 的形式在 Hub 上保留 `sync.backup_retention`（默认 30 天）。
+
+```bash
+gr backup list acme/demo                                       # 时间、来源、原分支、提交、到期
+gr backup restore acme/demo refs/backup/<时间>/refs/heads/main  # 恢复成新分支 restore/main-<时间>，也会同步到镜像
+gr backup purge acme/demo --all --lfs --yes                     # 彻底清除
+```
+
+**推送了密钥怎么办**：先强推去掉它，再执行 `gr backup purge … --lfs`。清除会删除备份，并把只被备份引用的提交和 LFS 文件从 Hub 上彻底删掉（`git gc`），此后按 SHA 也取不回来。几点注意：
+- 最近 5 分钟内写入的内容会被保留，以免误删正在进行的 push；
+- 镜像平台上的副本要在各平台上自行处理；
+- 无论如何都要轮换泄露的密钥。
+
+控制台仓库页的"备份"一节也可以恢复和清除。
+
 ## 接管已有仓库
 
 如果镜像仓库里已经有 Gitrepo 没写过的内容（比如以前直接在 GitHub 上维护的项目），Gitrepo 不会自动往里写，首次同步会失败并提示：
@@ -269,7 +286,7 @@ JSON 投递带以下请求头：`X-Gitrepo-Event`、`X-Gitrepo-Delivery`；配�
 
 `gr token create ci --scopes read --repos 'acme/*'` 可以把 token 限制在部分仓库。token 只存 SHA-256 哈希。`--public` 仓库允许匿名读。
 
-注意：`refs/backup/*` 不会出现在 clone 和 ls-remote 的结果里，但它们引用的对象仍在 Hub 仓库中。有读权限、又知道 SHA 的人可以通过协议 v2 按 SHA 取回这些对象，保留期默认 30 天。这和 GitHub 上悬空提交的情况一样，所以被强推删掉的密钥依然要轮换。
+注意：备份（`refs/backup/*`）不会出现在 clone、ls-remote、源码包和 bundle 里，但它们引用的对象仍在 Hub 仓库中。有读权限、又知道 SHA 的人可以通过协议 v2 按 SHA 取回这些对象，这和 GitHub 上悬空提交的情况一样。敏感内容请用 `gr backup purge` 彻底清除，见[备份与清除](#备份与清除)。
 
 ## CLI 速查
 
@@ -286,6 +303,7 @@ gr token   create|list|rm
 gr key     add|list|rm                   SSH 公钥
 gr ssh                                   SSH 地址与主机指纹
 gr webhook add|list|test|enable|disable|rm
+gr backup  list|restore|purge            被覆盖历史的隐藏备份
 ```
 
 所有命令都支持 `--json`。`gr` 读取 `GITREPO_URL` 和 `GITREPO_TOKEN`。
@@ -306,6 +324,9 @@ gr webhook add|list|test|enable|disable|rm
 | PATCH/DELETE | `/api/repos/{org}/{name}/remotes/{id}` | 暂停、恢复、改分叉策略或 URL / 移除 |
 | POST | `/api/repos/{org}/{name}/sync` | 立即同步，`{"wait":true,"overwrite":false}` |
 | POST | `/api/repos/{org}/{name}/import` | 从已有镜像导入或恢复，`{"target":"github","force":false}` |
+| GET | `/api/repos/{org}/{name}/backups` | 列出备份 |
+| POST | `/api/repos/{org}/{name}/backups/restore` | 把备份恢复成新分支，`{"backup":"refs/backup/…","branch":"可选"}` |
+| POST | `/api/repos/{org}/{name}/backups/purge` | 彻底清除，`{"backups":[…]}` 或 `{"all":true}`，`"lfs":true` 同时清理无引用的 LFS 对象 |
 | GET | `/api/repos/{org}/{name}/runs` | 同步历史 |
 | GET/POST | `/api/tokens`，DELETE `/api/tokens/{id}` | 客户端 token |
 | GET/POST | `/api/webhooks`，PATCH/DELETE `/api/webhooks/{id}` | 出站通知 |

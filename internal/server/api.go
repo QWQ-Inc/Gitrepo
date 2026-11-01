@@ -51,6 +51,7 @@ func (s *Server) registerAPI(mux *http.ServeMux) {
 	h("GET /api/status", s.apiListRepos)
 	s.registerWebhookAPI(h)
 	s.registerSSHAPI(h)
+	s.registerBackupAPI(h)
 }
 
 func (s *Server) requireAdmin(fn http.HandlerFunc) http.HandlerFunc {

@@ -46,7 +46,7 @@ func main() {
 	root.PersistentFlags().StringVar(&flagToken, "token", os.Getenv("GITREPO_TOKEN"), "admin token (env GITREPO_TOKEN)")
 	root.PersistentFlags().BoolVar(&flagJSON, "json", false, "print raw JSON")
 
-	root.AddCommand(targetCmd(), bindCmd(), bindingCmd(), repoCmd(), remoteCmd(), syncCmd(), statusCmd(), runsCmd(), tokenCmd(), keyCmd(), sshInfoCmd(), webhookCmd())
+	root.AddCommand(targetCmd(), bindCmd(), bindingCmd(), repoCmd(), remoteCmd(), syncCmd(), statusCmd(), runsCmd(), tokenCmd(), keyCmd(), sshInfoCmd(), webhookCmd(), backupCmd())
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
@@ -1197,4 +1197,119 @@ func sshInfoCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// ------------------------------------------------------------------ backup
+
+func backupCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "backup",
+		Short: "Hidden backups of overwritten history (list, restore, purge)",
+		Long: `Hidden backups of overwritten history.
+
+Whenever history is overwritten — a force push or branch deletion on the
+hub, a forced import, or a mirror's own commits replaced by --overwrite —
+the old commits are kept under refs/backup/ for sync.backup_retention
+(default 30 days). They are invisible to clones but still in the hub.
+
+After a secret was pushed and force-pushed away, purge the backups so the
+commits are removed from the hub for good (and rotate the secret anyway).`,
+	}
+	type entry struct {
+		Ref       string    `json:"ref"`
+		Source    string    `json:"source"`
+		Remote    string    `json:"remote"`
+		Original  string    `json:"original"`
+		SHA       string    `json:"sha"`
+		Subject   string    `json:"subject"`
+		CreatedAt time.Time `json:"created_at"`
+		ExpiresAt time.Time `json:"expires_at"`
+	}
+	list := &cobra.Command{
+		Use: "list ORG/NAME", Aliases: []string{"ls"}, Short: "List backups", Args: cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			p, err := repoPath(args[0])
+			if err != nil {
+				return err
+			}
+			var bs []entry
+			if err := call(http.MethodGet, p+"/backups", nil, &bs); err != nil {
+				return err
+			}
+			if flagJSON {
+				return printJSON(bs)
+			}
+			if len(bs) == 0 {
+				fmt.Println("no backups")
+				return nil
+			}
+			w := table()
+			fmt.Fprintln(w, "CREATED\tFROM\tREF\tCOMMIT\tSUBJECT\tEXPIRES\tBACKUP")
+			for _, b := range bs {
+				from := b.Source
+				if b.Remote != "" {
+					from = b.Remote
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", ago(&b.CreatedAt), from, b.Original, short(b.SHA), oneLine(b.Subject), b.ExpiresAt.Format("2006-01-02"), b.Ref)
+			}
+			return w.Flush()
+		},
+	}
+	var branch string
+	restore := &cobra.Command{
+		Use: "restore ORG/NAME BACKUP", Short: "Publish a backup as a new branch (mirrors receive it too)", Args: cobra.ExactArgs(2),
+		RunE: func(c *cobra.Command, args []string) error {
+			p, err := repoPath(args[0])
+			if err != nil {
+				return err
+			}
+			var res struct{ Branch, SHA string }
+			if err := call(http.MethodPost, p+"/backups/restore", map[string]any{"backup": args[1], "branch": branch}, &res); err != nil {
+				return err
+			}
+			fmt.Printf("restored %s as branch %s\n", short(res.SHA), res.Branch)
+			return nil
+		},
+	}
+	restore.Flags().StringVar(&branch, "branch", "", "branch name (default: restore/<branch>-<time>)")
+	var all, purgeLFS, yes bool
+	purge := &cobra.Command{
+		Use:   "purge ORG/NAME [BACKUP...]",
+		Short: "Delete backups and remove their content from the hub for good",
+		Long: `Delete backups and remove the commits only they referenced from the hub
+(git gc), so those commits can no longer be fetched, even by SHA. With
+--lfs, Git LFS objects that nothing references any more are deleted too.
+Content written in the last five minutes is kept; mirrors are not touched.`,
+		Args: cobra.MinimumNArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			p, err := repoPath(args[0])
+			if err != nil {
+				return err
+			}
+			if len(args) == 1 && !all {
+				return errors.New("name the backups to purge, or pass --all")
+			}
+			if !yes {
+				return errors.New("this cannot be undone; add --yes to confirm")
+			}
+			var res struct {
+				Backups    int `json:"backups"`
+				LFSObjects int `json:"lfs_objects"`
+			}
+			if err := call(http.MethodPost, p+"/backups/purge", map[string]any{"backups": args[1:], "all": all, "lfs": purgeLFS}, &res); err != nil {
+				return err
+			}
+			fmt.Printf("purged %d backup(s)", res.Backups)
+			if purgeLFS {
+				fmt.Printf(" and %d unreferenced LFS object(s)", res.LFSObjects)
+			}
+			fmt.Println(". Mirrors keep their own copies; rotate any leaked secret.")
+			return nil
+		},
+	}
+	purge.Flags().BoolVar(&all, "all", false, "purge every backup of the repository")
+	purge.Flags().BoolVar(&purgeLFS, "lfs", false, "also delete LFS objects no ref references any more")
+	purge.Flags().BoolVar(&yes, "yes", false, "confirm")
+	cmd.AddCommand(list, restore, purge)
+	return cmd
 }

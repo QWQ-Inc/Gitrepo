@@ -63,6 +63,7 @@ function ago(iso) {
 }
 
 function fmtDate(iso) { return iso ? new Date(iso).toLocaleString() : '—'; }
+function fmtDay(iso) { return iso ? new Date(iso).toLocaleDateString() : '—'; }
 
 const STATE_LABEL = {
   synced: '已同步', syncing: '同步中', pending: '等待中', behind: '落后',
@@ -265,7 +266,7 @@ function quickStart(targets, bindings) {
 async function viewRepo(org, name) {
   const slug = org + '/' + name;
   const base = '/api/repos/' + enc(org) + '/' + enc(name);
-  const [repo, runs, targets] = await Promise.all([api('GET', base), api('GET', base + '/runs?limit=30'), api('GET', '/api/targets')]);
+  const [repo, runs, targets, backups] = await Promise.all([api('GET', base), api('GET', base + '/runs?limit=30'), api('GET', '/api/targets'), api('GET', base + '/backups')]);
 
   const syncNow = (overwrite) => action(async () => {
     if (overwrite && !confirm('以 Hub 为准覆盖所有分叉的镜像 ref？\n被覆盖的镜像内容会先备份到 Hub 的 refs/backup/ 下。')) return false;
@@ -349,6 +350,26 @@ async function viewRepo(org, name) {
     table(['镜像', '状态', '上次成功', '分叉时', 'URL', ''], remoteRows, '还没有镜像。'),
     h('h2', {}, '添加镜像'),
     h('div', { class: 'panel' }, targets.length ? addForm : h('p', {}, '请先', h('a', { href: '#/targets' }, '添加平台凭据'), '。')),
+    h('h2', {}, '备份'),
+    h('p', { class: 'hint' }, '被强推覆盖、删除或导入替换的历史会在 Hub 上隐藏保留一段时间（默认 30 天），clone 看不到。泄露了密钥时，请轮换密钥并清除备份。'),
+    table(['时间', '来源', '原 ref', '提交', '说明', '到期', ''], backups.map((b) => h('tr', {},
+      h('td', { class: 'nowrap' }, ago(b.created_at)),
+      h('td', {}, b.remote || (b.source === 'hub' ? 'Hub' : b.source)),
+      h('td', { class: 'mono' }, b.original),
+      h('td', { class: 'mono' }, short(b.sha)),
+      h('td', {}, b.subject || ''),
+      h('td', { class: 'nowrap' }, fmtDay(b.expires_at)),
+      h('td', { class: 'actions' },
+        h('button', { class: 'secondary small', onclick: action(async () => {
+          const res = await api('POST', base + '/backups/restore', { backup: b.ref });
+          rerender();
+          return `已恢复为分支 ${res.branch}`;
+        }) }, '恢复为分支'), ' ',
+        h('button', { class: 'danger small', onclick: action(async () => {
+          if (window.prompt(`彻底清除这个备份（Hub 上的内容会被删除，无法恢复）？输入 ${slug} 确认`) !== slug) return false;
+          await api('POST', base + '/backups/purge', { backups: [b.ref], lfs: true });
+          rerender();
+        }, '已清除') }, '清除')))), '没有备份。'),
     h('h2', {}, '同步记录'),
     table(['时间', '镜像', '触发', '结果', '变更', '耗时', '错误'], runRows, '暂无记录。'),
     h('h2', {}, '危险操作'),
@@ -381,7 +402,7 @@ async function viewTargets() {
     h('td', {}, t.namespace || '—'),
     h('td', { class: 'mono' }, t.url_template || t.base_url || '（默认）'),
     h('td', {}, t.credential_kind, t.credential_username ? ` (${t.credential_username})` : ''),
-    h('td', {}, t.expires_at ? fmtDate(t.expires_at).split(' ')[0] : '—'),
+    h('td', {}, t.expires_at ? fmtDay(t.expires_at) : '—'),
     h('td', { class: 'actions' },
       t.provider !== 'generic' ? h('button', { class: 'secondary small', onclick: action(async () => {
         const res = await api('POST', '/api/targets/' + enc(t.name) + '/check');
