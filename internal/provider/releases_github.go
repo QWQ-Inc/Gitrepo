@@ -22,7 +22,7 @@ type ghRelease struct {
 }
 
 func (r *ghRelease) remote() *RemoteRelease {
-	rr := &RemoteRelease{ID: idString(r.ID), uploadURL: r.UploadURL}
+	rr := &RemoteRelease{ID: idString(r.ID), Key: idString(r.ID), uploadURL: r.UploadURL}
 	for _, a := range r.Assets {
 		rr.Assets = append(rr.Assets, RemoteAsset{ID: idString(a.ID), Name: a.Name, Size: a.Size})
 	}
@@ -46,7 +46,13 @@ func (g *GitHub) GetRelease(ctx context.Context, t *store.Target, secret string,
 
 func (g *GitHub) CreateRelease(ctx context.Context, t *store.Target, secret string, spec RepoSpec, rel Release) (*RemoteRelease, error) {
 	var r ghRelease
-	body := map[string]any{"tag_name": rel.Tag, "name": rel.Name, "body": rel.Body, "prerelease": rel.Prerelease, "draft": false}
+	// "legacy": the latest release is the highest version, so publishing a
+	// backport does not make it "Latest". The target only matters if the
+	// tag vanished from the mirror; then GitHub recreates it at our commit.
+	body := map[string]any{"tag_name": rel.Tag, "name": rel.Name, "body": rel.Body, "prerelease": rel.Prerelease, "draft": false, "make_latest": "legacy"}
+	if rel.Commit != "" {
+		body["target_commitish"] = rel.Commit
+	}
 	if _, err := doJSON(ctx, http.MethodPost, g.releasesAPI(t, spec), g.headers(secret), body, &r); err != nil {
 		return nil, err
 	}
@@ -54,7 +60,7 @@ func (g *GitHub) CreateRelease(ctx context.Context, t *store.Target, secret stri
 }
 
 func (g *GitHub) UpdateRelease(ctx context.Context, t *store.Target, secret string, spec RepoSpec, rr *RemoteRelease, rel Release) error {
-	body := map[string]any{"name": rel.Name, "body": rel.Body, "prerelease": rel.Prerelease}
+	body := map[string]any{"name": rel.Name, "body": rel.Body, "prerelease": rel.Prerelease, "make_latest": "legacy"}
 	_, err := doJSON(ctx, http.MethodPatch, g.releasesAPI(t, spec)+"/"+url.PathEscape(rr.ID), g.headers(secret), body, nil)
 	return err
 }

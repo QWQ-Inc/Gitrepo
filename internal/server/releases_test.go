@@ -264,9 +264,10 @@ func TestReleaseSync(t *testing.T) {
 			t.Fatal("the hand-made release was changed")
 		}
 		put(ci.Token, "v3.0", "app.tar.gz", tarball)
-		if err := ciAPI.Do(t.Context(), http.MethodPost, rel+"/v3.0/publish", map[string]any{"wait": true, "adopt": true}, &r); err != nil {
-			t.Fatal(err)
+		if err := ciAPI.Do(t.Context(), http.MethodPost, rel+"/v3.0/publish", map[string]any{"wait": true, "adopt": true}, &r); err == nil || !strings.Contains(err.Error(), "admin") {
+			t.Fatalf("a repository write token adopted a release made by hand: %v", err)
 		}
+		e.do(http.MethodPost, rel+"/v3.0/publish", map[string]any{"wait": true, "adopt": true}, &r)
 		allSynced(t, r)
 		g := mirrored("v3.0")["gh"]
 		if g["#body"] != "three" || g["app.tar.gz"] != sha256hex(tarball) || g["manual.zip"] != "foreign" {

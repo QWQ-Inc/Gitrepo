@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"strconv"
 
 	"github.com/qwq-inc/gitrepo/internal/store"
 )
@@ -27,7 +28,7 @@ func (g *Gitee) GetRelease(ctx context.Context, t *store.Target, secret string, 
 	var r struct {
 		ID json.Number `json:"id"`
 	}
-	if _, err := g.call(ctx, http.MethodGet, g.repoAPI(t, spec)+"/releases/tags/"+escapeTag(tag), secret, nil, &r); err != nil {
+	if _, err := g.call(ctx, http.MethodGet, g.repoAPI(t, spec)+"/releases/tags/"+url.PathEscape(tag), secret, nil, &r); err != nil {
 		if statusOf(err) == http.StatusNotFound {
 			return nil, nil
 		}
@@ -36,13 +37,20 @@ func (g *Gitee) GetRelease(ctx context.Context, t *store.Target, secret string, 
 	if r.ID == "" || r.ID == "0" {
 		return nil, nil // Gitee answers {} for a tag without a release
 	}
-	rr := &RemoteRelease{ID: idString(r.ID)}
-	var files []giteeAttach
-	if _, err := g.call(ctx, http.MethodGet, g.repoAPI(t, spec)+"/releases/"+url.PathEscape(rr.ID)+"/attach_files", secret, nil, &files); err != nil {
-		return nil, err
-	}
-	for _, f := range files {
-		rr.Assets = append(rr.Assets, RemoteAsset{ID: idString(f.ID), Name: f.Name, Size: f.Size})
+	rr := &RemoteRelease{ID: idString(r.ID), Key: idString(r.ID)}
+	// Attachments are paginated (at most 100 per page).
+	for page := 1; page <= 100; page++ {
+		var files []giteeAttach
+		u := g.repoAPI(t, spec) + "/releases/" + url.PathEscape(rr.ID) + "/attach_files?per_page=100&page=" + strconv.Itoa(page)
+		if _, err := g.call(ctx, http.MethodGet, u, secret, nil, &files); err != nil {
+			return nil, err
+		}
+		for _, f := range files {
+			rr.Assets = append(rr.Assets, RemoteAsset{ID: idString(f.ID), Name: f.Name, Size: f.Size})
+		}
+		if len(files) < 100 {
+			break
+		}
 	}
 	return rr, nil
 }
@@ -65,7 +73,7 @@ func (g *Gitee) CreateRelease(ctx context.Context, t *store.Target, secret strin
 	if _, err := g.call(ctx, http.MethodPost, g.repoAPI(t, spec)+"/releases", secret, giteeReleaseBody(rel), &r); err != nil {
 		return nil, err
 	}
-	return &RemoteRelease{ID: idString(r.ID)}, nil
+	return &RemoteRelease{ID: idString(r.ID), Key: idString(r.ID)}, nil
 }
 
 func (g *Gitee) UpdateRelease(ctx context.Context, t *store.Target, secret string, spec RepoSpec, rr *RemoteRelease, rel Release) error {

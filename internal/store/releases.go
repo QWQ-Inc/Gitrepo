@@ -43,24 +43,37 @@ const (
 	RelUnsupported = "unsupported"
 )
 
-// MirroredAsset records an asset Gitrepo uploaded to a mirror.
+// MirroredAsset records an asset Gitrepo uploaded to a mirror. Name is the
+// name the platform gave it (GitHub rewrites some characters).
 type MirroredAsset struct {
 	ID     string `json:"id"`
 	SHA256 string `json:"sha256"`
+	Name   string `json:"name,omitempty"`
 }
 
 // ReleaseMirror is the publication state of a release on one remote.
 type ReleaseMirror struct {
-	ReleaseID     int64
-	RemoteID      int64
+	ReleaseID int64
+	RemoteID  int64
+	// RemoteRelease identifies the platform release Gitrepo created or
+	// adopted (see provider.RemoteRelease.Key).
 	RemoteRelease string
-	State         string
-	SyncedHash    string
-	Assets        map[string]MirroredAsset
-	LastError     string
-	Failures      int
-	NextRetryAt   int64
-	UpdatedAt     int64
+	// Adopted releases were made by someone else: Gitrepo manages only its
+	// own files there and never deletes the release itself.
+	Adopted bool
+	// Creating is set while a create request is in flight, so a release
+	// whose creation response was lost is recognised as ours.
+	Creating bool
+	// AttemptHash is the content a failed or conflicting attempt tried to
+	// publish; unchanged content is not retried before NextRetryAt.
+	AttemptHash string
+	State       string
+	SyncedHash  string
+	Assets      map[string]MirroredAsset
+	LastError   string
+	Failures    int
+	NextRetryAt int64
+	UpdatedAt   int64
 }
 
 const releaseCols = `id, repo_id, tag, name, body, prerelease, published, adopt, created_at, updated_at`
@@ -208,11 +221,12 @@ func (s *Store) SaveReleaseMirror(ctx context.Context, m *ReleaseMirror) error {
 		m.Assets = map[string]MirroredAsset{}
 	}
 	assets, _ := json.Marshal(m.Assets)
-	_, err := s.db.ExecContext(ctx, `INSERT INTO release_mirrors (release_id, remote_id, remote_release, state, synced_hash, assets, last_error, failures, next_retry_at, updated_at)
-VALUES (?,?,?,?,?,?,?,?,?,?)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO release_mirrors (release_id, remote_id, remote_release, state, synced_hash, assets, last_error, failures, next_retry_at, updated_at, adopted, creating, attempt_hash)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT (release_id, remote_id) DO UPDATE SET remote_release=excluded.remote_release, state=excluded.state, synced_hash=excluded.synced_hash,
-assets=excluded.assets, last_error=excluded.last_error, failures=excluded.failures, next_retry_at=excluded.next_retry_at, updated_at=excluded.updated_at`,
-		m.ReleaseID, m.RemoteID, m.RemoteRelease, m.State, m.SyncedHash, string(assets), m.LastError, m.Failures, m.NextRetryAt, m.UpdatedAt)
+assets=excluded.assets, last_error=excluded.last_error, failures=excluded.failures, next_retry_at=excluded.next_retry_at, updated_at=excluded.updated_at,
+adopted=excluded.adopted, creating=excluded.creating, attempt_hash=excluded.attempt_hash`,
+		m.ReleaseID, m.RemoteID, m.RemoteRelease, m.State, m.SyncedHash, string(assets), m.LastError, m.Failures, m.NextRetryAt, m.UpdatedAt, b2i(m.Adopted), b2i(m.Creating), m.AttemptHash)
 	return wrapErr(err)
 }
 
@@ -221,11 +235,15 @@ func (s *Store) DeleteReleaseMirror(ctx context.Context, releaseID, remoteID int
 	return err
 }
 
-// ReleasesToRetry lists published releases with a mirror whose retry is due
-// or that waits for its tag.
+// ReleasesToRetry lists published releases with a mirror whose retry is due,
+// that waits for its tag, or that has never been published to (e.g. a new
+// mirror).
 func (s *Store) ReleasesToRetry(ctx context.Context, now int64) ([]int64, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT r.id FROM releases r JOIN release_mirrors m ON m.release_id = r.id
-WHERE r.published = 1 AND ((m.state IN ('failed','pending') AND m.next_retry_at <= ?) OR m.state = 'waiting')`, now)
+	rows, err := s.db.QueryContext(ctx, `SELECT r.id FROM releases r WHERE r.published = 1 AND (
+  EXISTS (SELECT 1 FROM release_mirrors m WHERE m.release_id = r.id
+          AND ((m.state IN ('failed','pending') AND m.next_retry_at <= ?) OR m.state = 'waiting'))
+  OR EXISTS (SELECT 1 FROM remotes x WHERE x.repo_id = r.repo_id AND x.enabled = 1
+          AND NOT EXISTS (SELECT 1 FROM release_mirrors m2 WHERE m2.release_id = r.id AND m2.remote_id = x.id)))`, now)
 	if err != nil {
 		return nil, err
 	}
@@ -241,15 +259,36 @@ WHERE r.published = 1 AND ((m.state IN ('failed','pending') AND m.next_retry_at 
 	return ids, rows.Err()
 }
 
-const relMirrorCols = `release_id, remote_id, remote_release, state, synced_hash, assets, last_error, failures, next_retry_at, updated_at`
+const relMirrorCols = `release_id, remote_id, remote_release, state, synced_hash, assets, last_error, failures, next_retry_at, updated_at, adopted, creating, attempt_hash`
 
 func scanReleaseMirror(sc interface{ Scan(...any) error }) (*ReleaseMirror, error) {
 	var m ReleaseMirror
 	var assets string
-	if err := sc.Scan(&m.ReleaseID, &m.RemoteID, &m.RemoteRelease, &m.State, &m.SyncedHash, &assets, &m.LastError, &m.Failures, &m.NextRetryAt, &m.UpdatedAt); err != nil {
+	var adopted, creating int
+	if err := sc.Scan(&m.ReleaseID, &m.RemoteID, &m.RemoteRelease, &m.State, &m.SyncedHash, &assets, &m.LastError, &m.Failures, &m.NextRetryAt, &m.UpdatedAt, &adopted, &creating, &m.AttemptHash); err != nil {
 		return nil, wrapErr(err)
 	}
+	m.Adopted, m.Creating = adopted != 0, creating != 0
 	m.Assets = map[string]MirroredAsset{}
 	_ = json.Unmarshal([]byte(assets), &m.Assets)
 	return &m, nil
+}
+
+// ReleaseAssetsOfRepo lists the assets of all releases of a repository.
+func (s *Store) ReleaseAssetsOfRepo(ctx context.Context, repoID int64) ([]*ReleaseAsset, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT a.id, a.release_id, a.name, a.size, a.sha256, a.content_type, a.created_at
+FROM release_assets a JOIN releases r ON r.id = a.release_id WHERE r.repo_id = ? ORDER BY a.id`, repoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*ReleaseAsset
+	for rows.Next() {
+		var a ReleaseAsset
+		if err := rows.Scan(&a.ID, &a.ReleaseID, &a.Name, &a.Size, &a.SHA256, &a.ContentType, &a.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, &a)
+	}
+	return out, rows.Err()
 }

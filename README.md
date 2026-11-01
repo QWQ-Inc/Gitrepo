@@ -261,13 +261,14 @@ gr release create acme/demo v1.2.0 --title "1.2.0" --notes-file CHANGELOG.md dis
 ```
 
 - **先有标签，再有 Release**：标签同步到某个镜像（并且和 Hub 上的完全一致）之后，Release 才会在那里创建，平台不会自己从某个分支建出一个标签。在此之前状态为 `waiting`，每次同步结束后会自动重试。
-- **改动会跟上**：改说明（`gr release edit`）、追加或替换附件（`gr release upload`）、删除附件（`gr release remove-file`）都会同步到各镜像。没有变化的附件不会重复上传。删除 Release（`gr release rm`）会删除各镜像上由 Gitrepo 创建的 Release，标签保留。
-- **不覆盖别人的 Release**：镜像上已有同名 Release、但不是 Gitrepo 创建的，显示为 `conflict`，原样保留；确认后可以用 `gr release publish … --adopt` 接管，此时会更新它的标题和说明并补上附件，它原有的附件保留。
-- **草稿**：`--draft` 只保存在 Hub 上，之后用 `gr release publish` 发布。
+- **改动会跟上**：改说明（`gr release edit`）、追加或替换附件（`gr release upload`）、删除附件（`gr release remove-file`）都会同步到各镜像。没有变化的附件不会重复上传；平台改了文件名（GitHub 会把空格等字符换掉）也认得出来。
+- **删除**：`gr release rm` 删除各镜像上由 Gitrepo 创建的 Release，标签保留。镜像上的 Release 如果已被别人删掉重建，就不会再去动它。有镜像删除失败时，Hub 上的 Release 保留、改为未发布（不会在已经删掉的镜像上重新出现），重试即可。
+- **不覆盖别人的 Release**：镜像上已有同名 Release、但不是 Gitrepo 创建的，显示为 `conflict`，原样保留。确认后可以用 admin token 执行 `gr release publish … --adopt` 接管：此时会更新它的标题和说明，并补上 Gitrepo 的附件，它原有的附件保留。删除被接管的 Release 时，只删除 Gitrepo 上传的附件，Release 本身留在平台上。
+- **草稿**：`--draft` 只保存在 Hub 上，之后用 `gr release publish` 发布。草稿、以及各镜像的状态和错误信息，只有对仓库有 write 权限的人能看到。
 - **CI 不需要 admin token**：Release 相关接口的权限按仓库计算，对仓库有 `write` 权限的 token 就能发布，例如 `gr token create ci --scopes write --repos 'acme/*'`。读取 Release 和下载附件与 clone 的权限相同。
 - **附件**：附件也保存在 Hub 上（`gr release download`），单个文件默认最大 2 GiB（`releases.max_asset_size`），会随 `gitrepo backup` 一起备份。
 - **各平台的差异**：GitLab 没有"预发布"标记；GitLab 的附件以项目上传文件加 Release 链接的形式出现，删除附件只删除链接。Gitee 要求 Release 有说明，没有填写时使用标题。纯 Git 服务器（generic）没有 Release，显示为 `unsupported`。
-- 失败的镜像按 30s、1m、2m… 退避重试，上限 1 小时。控制台的仓库页可以创建、发布和删除 Release。
+- 失败的镜像在后台按 30s、1m、2m… 退避重试，上限 1 小时；手动发布（`gr release publish`）会立即重试。已经同步到所有镜像的 Release 不会产生任何 API 调用。控制台的仓库页可以创建、发布和删除 Release。
 
 ## 首次克隆加速（bundle-uri）
 

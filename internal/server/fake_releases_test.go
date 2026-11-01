@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Fake release APIs of the four platforms, strict where it matters:
@@ -28,13 +29,14 @@ type fakeAsset struct {
 }
 
 type fakeRelease struct {
-	ID     int
-	Tag    string
-	Name   string
-	Body   string
-	Pre    bool
-	Target string
-	Assets []*fakeAsset
+	ID      int
+	Created string
+	Tag     string
+	Name    string
+	Body    string
+	Pre     bool
+	Target  string
+	Assets  []*fakeAsset
 }
 
 type fakeReleaseStore struct {
@@ -42,6 +44,34 @@ type fakeReleaseStore struct {
 	nextID  int
 	uploads map[string]string // GitLab upload path -> sha
 	log     []string
+	// Failure injection, per platform.
+	failDelete map[string]bool // DELETE of a release answers 500
+	failCreate map[string]bool // POST of a release answers 500, nothing created
+	loseCreate map[string]bool // the release is created, but the answer is a 504
+	slowUpload map[string]bool // uploads take a second
+}
+
+// inject sets a failure switch.
+func (f *fakePlatforms) inject(what, platform string, on bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	st := f.relStore()
+	m := map[string]*map[string]bool{"delete": &st.failDelete, "create": &st.failCreate, "lose": &st.loseCreate, "slow": &st.slowUpload}[what]
+	if *m == nil {
+		*m = map[string]bool{}
+	}
+	(*m)[platform] = on
+}
+
+// githubAssetName mimics GitHub, which rewrites spaces and other
+// characters in uploaded file names.
+func githubAssetName(n string) string {
+	return strings.Map(func(r rune) rune {
+		if r == ' ' || r > 127 {
+			return '.'
+		}
+		return r
+	}, n)
 }
 
 func (f *fakePlatforms) relStore() *fakeReleaseStore {
@@ -64,7 +94,7 @@ func (f *fakePlatforms) addForeignRelease(platform, project, tag string, assets 
 	defer f.mu.Unlock()
 	st := f.relStore()
 	st.nextID++
-	rel := &fakeRelease{ID: st.nextID, Tag: tag, Name: "made by hand", Body: "by hand"}
+	rel := &fakeRelease{ID: st.nextID, Tag: tag, Name: "made by hand", Body: "by hand", Created: fmt.Sprintf("2026-01-01T00:00:%02dZ", st.nextID%60)}
 	for _, a := range assets {
 		st.nextID++
 		rel.Assets = append(rel.Assets, &fakeAsset{ID: st.nextID, Name: a, Size: 1, SHA: "foreign"})
@@ -155,6 +185,12 @@ func (f *fakePlatforms) serveRelease(w http.ResponseWriter, r *http.Request) boo
 		}
 	}
 	f.mu.Lock()
+	slow := platform == "gh-upload" && f.relStore().slowUpload["gh"]
+	f.mu.Unlock()
+	if slow {
+		time.Sleep(time.Second)
+	}
+	f.mu.Lock()
 	defer f.mu.Unlock()
 	st := f.relStore()
 	seg := strings.Split(rest, "/")
@@ -181,7 +217,7 @@ func (f *fakePlatforms) serveRelease(w http.ResponseWriter, r *http.Request) boo
 		for _, a := range rel.Assets {
 			assets = append(assets, map[string]any{"id": a.ID, "name": a.Name, "size": a.Size, "url": a.URL})
 		}
-		out := map[string]any{"id": rel.ID, "tag_name": rel.Tag, "name": rel.Name, "body": rel.Body, "description": rel.Body, "prerelease": rel.Pre, "assets": assets}
+		out := map[string]any{"id": rel.ID, "tag_name": rel.Tag, "name": rel.Name, "body": rel.Body, "description": rel.Body, "prerelease": rel.Pre, "assets": assets, "created_at": rel.Created}
 		if plat == "gh" {
 			out["upload_url"] = f.srv.URL + "/gh/api/uploads/repos/" + project + "/releases/" + strconv.Itoa(rel.ID) + "/assets{?name,label}"
 		}
@@ -253,6 +289,10 @@ func (f *fakePlatforms) serveRelease(w http.ResponseWriter, r *http.Request) boo
 			if rel == nil {
 				return notFound()
 			}
+			if st.failDelete["gl"] {
+				writeJSONResp(w, 500, map[string]string{"message": "500 Internal Server Error"})
+				return true
+			}
 			delete(st.rels, key(tag))
 			logf("gl delete %s", tag)
 			writeJSONResp(w, 200, relJSON(rel))
@@ -300,7 +340,7 @@ func (f *fakePlatforms) serveRelease(w http.ResponseWriter, r *http.Request) boo
 			return true
 		}
 		st.nextID++
-		rel := &fakeRelease{ID: st.nextID, Tag: tag, Name: str(b, "name"), Body: str(b, "description")}
+		rel := &fakeRelease{ID: st.nextID, Tag: tag, Name: str(b, "name"), Body: str(b, "description"), Created: fmt.Sprintf("2026-02-01T00:00:%02dZ", st.nextID%60)}
 		st.rels[key(tag)] = rel
 		logf("gl create %s", tag)
 		writeJSONResp(w, 201, relJSON(rel))
@@ -314,6 +354,9 @@ func (f *fakePlatforms) serveRelease(w http.ResponseWriter, r *http.Request) boo
 	after = after[1:]
 	switch {
 	case r.Method == "GET" && len(after) >= 2 && after[0] == "tags":
+		if plat != "gh" && len(after) != 2 {
+			return notFound() // Gitea and Gitee route the tag as one path segment
+		}
 		rel := st.rels[key(unesc(strings.Join(after[1:], "/")))]
 		if rel == nil {
 			if plat == "ge" {
@@ -338,11 +381,20 @@ func (f *fakePlatforms) serveRelease(w http.ResponseWriter, r *http.Request) boo
 			writeJSONResp(w, 422, map[string]string{"message": "already_exists"})
 			return true
 		}
+		if st.failCreate[plat] {
+			logf("%s create-failed %s", plat, tag)
+			writeJSONResp(w, 500, map[string]string{"message": "Server Error"})
+			return true
+		}
 		st.nextID++
 		pre, _ := b["prerelease"].(bool)
 		rel := &fakeRelease{ID: st.nextID, Tag: tag, Name: str(b, "name"), Body: str(b, "body"), Pre: pre, Target: str(b, "target_commitish")}
 		st.rels[key(tag)] = rel
 		logf("%s create %s", plat, tag)
+		if st.loseCreate[plat] {
+			writeJSONResp(w, 504, map[string]string{"message": "Gateway Timeout"})
+			return true
+		}
 		writeJSONResp(w, 201, relJSON(rel))
 	case r.Method == "PATCH" && len(after) == 1:
 		rel := byID(after[0])
@@ -362,6 +414,10 @@ func (f *fakePlatforms) serveRelease(w http.ResponseWriter, r *http.Request) boo
 		rel := byID(after[0])
 		if rel == nil {
 			return notFound()
+		}
+		if st.failDelete[plat] {
+			writeJSONResp(w, 500, map[string]string{"message": "Server Error"})
+			return true
 		}
 		delete(st.rels, key(rel.Tag))
 		logf("%s delete %s", plat, rel.Tag)
@@ -392,6 +448,9 @@ func (f *fakePlatforms) serveRelease(w http.ResponseWriter, r *http.Request) boo
 		if plat == "gh" && r.ContentLength != int64(len(content)) {
 			writeJSONResp(w, 400, map[string]string{"message": "Content-Length required"})
 			return true
+		}
+		if plat == "gh" {
+			name = githubAssetName(name)
 		}
 		a := addAsset(rel, name, content)
 		if a == nil {

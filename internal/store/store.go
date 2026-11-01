@@ -284,6 +284,13 @@ CREATE TABLE release_mirrors (
 ALTER TABLE targets ADD COLUMN cred_app_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE targets ADD COLUMN cred_installation_id TEXT NOT NULL DEFAULT '';
 `,
+	// 9: release ownership on mirrors: adopted releases, and a create that
+	// was sent but not confirmed.
+	`
+ALTER TABLE release_mirrors ADD COLUMN adopted INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE release_mirrors ADD COLUMN creating INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE release_mirrors ADD COLUMN attempt_hash TEXT NOT NULL DEFAULT '';
+`,
 }
 
 func (s *Store) migrate(ctx context.Context) error {

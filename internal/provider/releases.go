@@ -28,13 +28,17 @@ type Release struct {
 // RemoteRelease is a release as it exists on a platform.
 type RemoteRelease struct {
 	// ID identifies the release in the platform's API (GitLab: the tag).
-	ID     string
+	ID string
+	// Key identifies this particular release: another release created
+	// later for the same tag has a different key (GitLab: creation time).
+	Key    string
 	Assets []RemoteAsset
 	// uploadURL is GitHub's asset upload endpoint.
 	uploadURL string
 }
 
-// RemoteAsset is a file attached to a platform release.
+// RemoteAsset is a file attached to a platform release. Name is the
+// platform's name for it, which may differ from the uploaded one.
 type RemoteAsset struct {
 	ID   string
 	Name string

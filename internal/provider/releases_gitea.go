@@ -19,7 +19,7 @@ type giteaRelease struct {
 }
 
 func (r *giteaRelease) remote() *RemoteRelease {
-	rr := &RemoteRelease{ID: idString(r.ID)}
+	rr := &RemoteRelease{ID: idString(r.ID), Key: idString(r.ID)}
 	for _, a := range r.Assets {
 		rr.Assets = append(rr.Assets, RemoteAsset{ID: idString(a.ID), Name: a.Name, Size: a.Size})
 	}
@@ -28,7 +28,8 @@ func (r *giteaRelease) remote() *RemoteRelease {
 
 func (g *Gitea) GetRelease(ctx context.Context, t *store.Target, secret string, spec RepoSpec, tag string) (*RemoteRelease, error) {
 	var r giteaRelease
-	if _, err := doJSON(ctx, http.MethodGet, g.repoAPI(t, spec)+"/releases/tags/"+escapeTag(tag), g.headers(secret), nil, &r); err != nil {
+	// One path segment: Gitea routes the tag as a single parameter.
+	if _, err := doJSON(ctx, http.MethodGet, g.repoAPI(t, spec)+"/releases/tags/"+url.PathEscape(tag), g.headers(secret), nil, &r); err != nil {
 		if statusOf(err) == http.StatusNotFound {
 			return nil, nil
 		}
@@ -40,6 +41,9 @@ func (g *Gitea) GetRelease(ctx context.Context, t *store.Target, secret string, 
 func (g *Gitea) CreateRelease(ctx context.Context, t *store.Target, secret string, spec RepoSpec, rel Release) (*RemoteRelease, error) {
 	var r giteaRelease
 	body := map[string]any{"tag_name": rel.Tag, "name": rel.Name, "body": rel.Body, "prerelease": rel.Prerelease, "draft": false}
+	if rel.Commit != "" {
+		body["target_commitish"] = rel.Commit
+	}
 	if _, err := doJSON(ctx, http.MethodPost, g.repoAPI(t, spec)+"/releases", g.headers(secret), body, &r); err != nil {
 		return nil, err
 	}

@@ -15,8 +15,9 @@ import (
 // (/uploads) and linked from the release. GitLab has no pre-release flag.
 
 type glRelease struct {
-	TagName string `json:"tag_name"`
-	Assets  struct {
+	TagName   string `json:"tag_name"`
+	CreatedAt string `json:"created_at"`
+	Assets    struct {
 		Links []struct {
 			ID   json.Number `json:"id"`
 			Name string      `json:"name"`
@@ -25,7 +26,9 @@ type glRelease struct {
 }
 
 func (r *glRelease) remote() *RemoteRelease {
-	rr := &RemoteRelease{ID: r.TagName}
+	// The API addresses releases by tag; the creation time tells a release
+	// Gitrepo made from one someone created later for the same tag.
+	rr := &RemoteRelease{ID: r.TagName, Key: r.TagName + "@" + r.CreatedAt}
 	for _, l := range r.Assets.Links {
 		rr.Assets = append(rr.Assets, RemoteAsset{ID: idString(l.ID), Name: l.Name, Size: -1})
 	}

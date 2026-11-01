@@ -6,12 +6,13 @@ import (
 	"fmt"
 	"mime"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/qwq-inc/gitrepo/internal/auth"
 	"github.com/qwq-inc/gitrepo/internal/gitserve"
 	"github.com/qwq-inc/gitrepo/internal/releases"
 	"github.com/qwq-inc/gitrepo/internal/store"
@@ -61,7 +62,8 @@ func (s *Server) repoAccess(write bool, fn repoHandler) http.HandlerFunc {
 			case err != nil:
 				s.fail(w, err)
 			default:
-				fn(w, r, repo)
+				acc := &releaseAccess{p: p, write: p != nil && p.Can(auth.ScopeWrite, repo.Slug)}
+				fn(w, r.WithContext(context.WithValue(r.Context(), releaseAccessKey{}, acc)), repo)
 			}
 		}
 		if p != nil && audited(r) {
@@ -69,6 +71,35 @@ func (s *Server) repoAccess(write bool, fn repoHandler) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+type releaseAccessKey struct{}
+
+// releaseAccess is who is asking: readers without write access see only
+// published releases and no mirror details (those can name internal hosts
+// and carry platform error messages).
+type releaseAccess struct {
+	p     *auth.Principal
+	write bool
+}
+
+func accessOf(r *http.Request) *releaseAccess {
+	if a, ok := r.Context().Value(releaseAccessKey{}).(*releaseAccess); ok {
+		return a
+	}
+	return &releaseAccess{}
+}
+
+// requireAdminForAdopt: taking over a release someone made by hand changes
+// content Gitrepo does not own, with the target's (admin-configured)
+// credentials, so a repository write token is not enough.
+func requireAdminForAdopt(r *http.Request, adopt *bool) error {
+	if adopt != nil && *adopt {
+		if a := accessOf(r); a.p == nil || !a.p.IsAdmin() {
+			return &apiError{status: http.StatusForbidden, err: errors.New("adopting releases made by others needs an admin token")}
+		}
+	}
+	return nil
 }
 
 type releaseAssetOut struct {
@@ -104,7 +135,7 @@ type releaseOut struct {
 	Results []releases.Result `json:"results,omitempty"`
 }
 
-func (s *Server) releaseOut(ctx context.Context, repo *store.Repo, rel *store.Release) (*releaseOut, error) {
+func (s *Server) releaseOut(ctx context.Context, repo *store.Repo, rel *store.Release, withMirrors bool) (*releaseOut, error) {
 	out := &releaseOut{
 		Tag: rel.Tag, Name: rel.Name, Body: rel.Body, Prerelease: rel.Prerelease, Published: rel.Published, Adopt: rel.Adopt,
 		CreatedAt: store.ToTime(rel.CreatedAt).UTC(), UpdatedAt: store.ToTime(rel.UpdatedAt).UTC(),
@@ -121,6 +152,9 @@ func (s *Server) releaseOut(ctx context.Context, repo *store.Repo, rel *store.Re
 			URL: s.cfg.PublicURL + base + escapePathSegment(a.Name), CreatedAt: store.ToTime(a.CreatedAt).UTC(),
 		})
 	}
+	if !withMirrors {
+		return out, nil
+	}
 	remotes, err := s.store.ListRemotes(ctx, repo.ID)
 	if err != nil {
 		return nil, err
@@ -135,11 +169,11 @@ func (s *Server) releaseOut(ctx context.Context, repo *store.Repo, rel *store.Re
 	}
 	for _, rem := range remotes {
 		mo := releaseMirrorOut{RemoteID: rem.ID, Mirror: rem.Label(), State: store.RelPending}
-		if !rel.Published {
-			mo.State = "draft"
-		}
 		if st := byRemote[rem.ID]; st != nil {
 			mo.State, mo.Error, mo.UpdatedAt, mo.NextRetryAt = st.State, st.LastError, ts(st.UpdatedAt), ts(st.NextRetryAt)
+		}
+		if !rel.Published && (mo.State == store.RelPending || byRemote[rem.ID] == nil) {
+			mo.State = "draft"
 		}
 		if !rem.Enabled {
 			mo.State = "paused"
@@ -149,13 +183,13 @@ func (s *Server) releaseOut(ctx context.Context, repo *store.Repo, rel *store.Re
 	return out, nil
 }
 
-func escapePathSegment(s string) string {
-	return strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(s, "%", "%25"), "/", "%2F"), " ", "%20")
-}
+func escapePathSegment(s string) string { return url.PathEscape(s) }
 
+// releaseFromPath loads the release named in the path. Drafts exist only
+// for callers with write access.
 func (s *Server) releaseFromPath(r *http.Request, repo *store.Repo) (*store.Release, error) {
 	rel, err := s.store.GetReleaseByTag(r.Context(), repo.ID, r.PathValue("tag"))
-	if errors.Is(err, store.ErrNotFound) {
+	if errors.Is(err, store.ErrNotFound) || err == nil && !rel.Published && !accessOf(r).write {
 		return nil, &apiError{status: http.StatusNotFound, err: fmt.Errorf("no release for tag %q", r.PathValue("tag"))}
 	}
 	return rel, err
@@ -168,8 +202,12 @@ func (s *Server) apiListReleases(w http.ResponseWriter, r *http.Request, repo *s
 		return
 	}
 	out := []*releaseOut{}
+	writer := accessOf(r).write
 	for _, rel := range rels {
-		ro, err := s.releaseOut(r.Context(), repo, rel)
+		if !rel.Published && !writer {
+			continue
+		}
+		ro, err := s.releaseOut(r.Context(), repo, rel, writer)
 		if err != nil {
 			s.fail(w, err)
 			return
@@ -185,7 +223,7 @@ func (s *Server) apiGetRelease(w http.ResponseWriter, r *http.Request, repo *sto
 		s.fail(w, err)
 		return
 	}
-	ro, err := s.releaseOut(r.Context(), repo, rel)
+	ro, err := s.releaseOut(r.Context(), repo, rel, accessOf(r).write)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -244,6 +282,10 @@ func (s *Server) apiCreateRelease(w http.ResponseWriter, r *http.Request, repo *
 		s.fail(w, badRequest("tag is required"))
 		return
 	}
+	if err := requireAdminForAdopt(r, in.Adopt); err != nil {
+		s.fail(w, err)
+		return
+	}
 	tag := *in.Tag
 	refs, err := s.git.ForEachRef(r.Context(), s.reg.Path(repo.Slug), "refs/tags/"+tag)
 	if err != nil {
@@ -285,6 +327,10 @@ func (s *Server) apiUpdateRelease(w http.ResponseWriter, r *http.Request, repo *
 		s.fail(w, badRequest("the tag of a release cannot be changed"))
 		return
 	}
+	if err := requireAdminForAdopt(r, in.Adopt); err != nil {
+		s.fail(w, err)
+		return
+	}
 	if err := in.apply(rel); err != nil {
 		s.fail(w, err)
 		return
@@ -312,6 +358,10 @@ func (s *Server) apiPublishRelease(w http.ResponseWriter, r *http.Request, repo 
 		s.fail(w, err)
 		return
 	}
+	if err := requireAdminForAdopt(r, in.Adopt); err != nil {
+		s.fail(w, err)
+		return
+	}
 	rel.Published = true
 	if in.Adopt != nil {
 		rel.Adopt = *in.Adopt
@@ -331,7 +381,7 @@ func (s *Server) respondRelease(w http.ResponseWriter, r *http.Request, repo *st
 	if rel.Published {
 		if wait {
 			var err error
-			if results, err = s.releases.Publish(r.Context(), rel.ID, force); err != nil {
+			if results, err = s.releases.Publish(r.Context(), rel.ID, releases.PublishOptions{Force: force, Now: true}); err != nil {
 				s.fail(w, err)
 				return
 			}
@@ -339,7 +389,7 @@ func (s *Server) respondRelease(w http.ResponseWriter, r *http.Request, repo *st
 			s.releases.Enqueue(rel.ID)
 		}
 	}
-	ro, err := s.releaseOut(r.Context(), repo, rel)
+	ro, err := s.releaseOut(r.Context(), repo, rel, true)
 	if err != nil {
 		s.fail(w, err)
 		return

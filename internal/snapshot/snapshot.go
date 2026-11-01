@@ -35,6 +35,7 @@ import (
 	"github.com/qwq-inc/gitrepo/internal/gitexec"
 	"github.com/qwq-inc/gitrepo/internal/lfs"
 	"github.com/qwq-inc/gitrepo/internal/registry"
+	"github.com/qwq-inc/gitrepo/internal/releases"
 	"github.com/qwq-inc/gitrepo/internal/store"
 )
 
@@ -118,10 +119,46 @@ func Create(ctx context.Context, cfg *config.Config, g *gitexec.Git, dest, versi
 		}
 		m.Repos = append(m.Repos, *entry)
 	}
+	if err := dropDanglingReleaseFiles(ctx, dbCopy, dest, logf); err != nil {
+		return nil, err
+	}
 	if err := writeJSON(filepath.Join(dest, "manifest.json"), m); err != nil {
 		return nil, err
 	}
 	return m, nil
+}
+
+// dropDanglingReleaseFiles removes release assets from the database copy
+// whose file was deleted between the database copy and the file copy (the
+// asset was removed meanwhile), so the snapshot never references a file it
+// does not contain.
+func dropDanglingReleaseFiles(ctx context.Context, dbCopy, dest string, logf func(string, ...any)) error {
+	st, err := store.Open(dbCopy)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	repos, err := st.ListRepos(ctx)
+	if err != nil {
+		return err
+	}
+	for _, r := range repos {
+		assets, err := st.ReleaseAssetsOfRepo(ctx, r.ID)
+		if err != nil {
+			return err
+		}
+		for _, a := range assets {
+			p := filepath.Join(dest, "repos", filepath.FromSlash(r.Slug)+".releases", a.SHA256[0:2], a.SHA256[2:4], a.SHA256)
+			if _, err := os.Stat(p); err == nil {
+				continue
+			}
+			if err := st.DeleteReleaseAsset(ctx, a.ReleaseID, a.Name); err != nil && !errors.Is(err, store.ErrNotFound) {
+				return err
+			}
+			logf("%s: release file %s was deleted during the snapshot; left out", r.Slug, a.Name)
+		}
+	}
+	return nil
 }
 
 func backupRepo(ctx context.Context, g *gitexec.Git, repoPath, dest, slug string) (*Repo, error) {
@@ -264,6 +301,9 @@ func Restore(ctx context.Context, cfg *config.Config, g *gitexec.Git, src string
 	// Leases held by the original instance's syncs mean nothing here and
 	// would block syncs after the first start.
 	err = st.ClearLeases(ctx)
+	if err == nil {
+		err = checkReleaseFiles(ctx, st, cfg)
+	}
 	st.Close()
 	if err != nil {
 		os.Remove(tmp)
@@ -317,6 +357,28 @@ func restoreRepo(ctx context.Context, g *gitexec.Git, src, repoPath string, r Re
 	}
 	if n != r.ReleaseFiles {
 		return fmt.Errorf("restored %d release files, the snapshot lists %d", n, r.ReleaseFiles)
+	}
+	return nil
+}
+
+// checkReleaseFiles verifies that every release asset in the restored
+// database has its file.
+func checkReleaseFiles(ctx context.Context, st *store.Store, cfg *config.Config) error {
+	repos, err := st.ListRepos(ctx)
+	if err != nil {
+		return err
+	}
+	for _, r := range repos {
+		assets, err := st.ReleaseAssetsOfRepo(ctx, r.ID)
+		if err != nil {
+			return err
+		}
+		repoPath := filepath.Join(cfg.ReposDir(), filepath.FromSlash(r.Slug)+".git")
+		for _, a := range assets {
+			if _, err := os.Stat(releases.BlobPath(repoPath, a.SHA256)); err != nil {
+				return fmt.Errorf("%s: release file %s is missing from the snapshot", r.Slug, a.Name)
+			}
+		}
 	}
 	return nil
 }
