@@ -503,9 +503,13 @@ docker run --rm -v gitrepo-data-new:/data -v /backups/2026-11-01:/snapshot:ro gi
 
 ## 发布
 
-推送 `v*` 标签（例如 `git tag v0.1.0 && git push origin v0.1.0`）会触发 `.github/workflows/release.yml`：
+1. 把 [`CHANGELOG.md`](CHANGELOG.md) 里的 `## Unreleased` 改成版本号（例如 `## v0.1.0`）并提交；
+2. 推送同名标签：`git tag v0.1.0 && git push origin v0.1.0`。
 
-- 构建 Linux、macOS 的 amd64、arm64 二进制，连同 `SHA256SUMS` 发布到 GitHub Release；
+`.github/workflows/release.yml` 随后会：
+
+- 运行测试；
+- 构建 Linux、macOS 的 amd64、arm64 二进制，以及 Windows 版的 `gr.exe`，连同 `SHA256SUMS` 发布到 GitHub Release，说明取自 CHANGELOG 对应的那一节；
 - 构建多架构 Docker 镜像，推送到 `ghcr.io/qwq-inc/gitrepo:<标签>` 和 `:latest`。
 
 ## 开发

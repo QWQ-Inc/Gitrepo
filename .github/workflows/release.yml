@@ -31,11 +31,26 @@ jobs:
             cp LICENSE README.md deploy/gitrepo.example.yaml "$d/"
             tar -czf "dist/$d.tar.gz" "$d"
           done; done
-          (cd dist && sha256sum *.tar.gz > SHA256SUMS)
+          # The CLI also for Windows (the server needs a Unix system).
+          d="gr_${v}_windows_amd64"
+          mkdir "$d"
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w -X main.version=${v}" -o "$d/gr.exe" ./cmd/gr
+          cp LICENSE README.md "$d/"
+          zip -qr "dist/$d.zip" "$d"
+          (cd dist && sha256sum *.tar.gz *.zip > SHA256SUMS)
       - name: publish release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --verify-tag
+        run: |
+          set -eu
+          v="${GITHUB_REF_NAME}"
+          # Notes: the CHANGELOG.md section headed "## <tag>", else generated.
+          awk -v t="## ${v}" 'index($0, t) == 1 { f = 1; next } /^## / { if (f) exit } f' CHANGELOG.md > notes.md
+          if [ -s notes.md ]; then
+            gh release create "$v" dist/* --notes-file notes.md --verify-tag
+          else
+            gh release create "$v" dist/* --generate-notes --verify-tag
+          fi
 
   image:
     runs-on: ubuntu-latest
