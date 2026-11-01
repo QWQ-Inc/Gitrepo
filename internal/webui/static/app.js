@@ -432,6 +432,18 @@ async function viewTargets() {
         if (!res.ok) throw new Error('验证失败：' + res.error);
         return '验证通过：' + res.identity;
       }) }, '验证') : null, ' ',
+      t.provider !== 'generic' ? h('button', { class: 'secondary small', onclick: action(async () => {
+        if (!confirm(`在 ${t.provider} 上建一个临时私有仓库 gitrepo-check-…，把同步和发布要用到的写操作（建仓、LFS、推送、默认分支、可见性、Release 和附件）都试一遍，最后删除它。继续？`)) return false;
+        const res = await api('POST', '/api/targets/' + enc(t.name) + '/check', { write: true });
+        if (res.error) throw new Error('验证失败：' + res.error);
+        const label = { ok: '通过', failed: '失败', skipped: '跳过' };
+        editor.replaceChildren(h('h2', {}, '写入检查：', t.name),
+          table(['步骤', '结果', '说明'], (res.steps || []).map((st) => h('tr', {},
+            h('td', {}, st.name), h('td', {}, label[st.state] || st.state), h('td', {}, st.detail || ''))), ''),
+          res.leftover ? h('p', { class: 'error-text' }, `临时仓库 ${res.leftover} 没能删除，请到平台上手动删除。`) : null);
+        if (!res.ok) throw new Error('写入检查没有通过，详见下方');
+        return '写入检查通过';
+      }) }, '写入检查') : null, ' ',
       h('button', { class: 'secondary small', onclick: () => editor.replaceChildren(editTarget(t, editor)) }, '修改'), ' ',
       h('button', { class: 'danger small', onclick: action(async () => {
         if (!confirm(`删除平台凭据 ${t.name}？`)) return false;

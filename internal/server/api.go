@@ -601,7 +601,19 @@ func (s *Server) apiCheckTarget(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	var in struct {
+		// Write also runs the write check in a scratch repository.
+		Write bool `json:"write"`
+	}
+	if err := decode(r, &in); err != nil {
+		s.fail(w, err)
+		return
+	}
+	timeout := 30 * time.Second
+	if in.Write {
+		timeout = 10 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
 	secret, err := s.targetSecret(ctx, t)
 	if err != nil {
@@ -624,6 +636,25 @@ func (s *Server) apiCheckTarget(w http.ResponseWriter, r *http.Request) {
 	if t.ExpiresAt != 0 {
 		out["expires_at"] = ts(t.ExpiresAt)
 		out["expires_detected"] = t.ExpiresAuto
+	}
+	if in.Write {
+		wr := s.writeCheck(ctx, t, secret)
+		out["ok"], out["steps"] = wr.ok(), wr.Steps
+		var failed []string
+		for _, st := range wr.Steps {
+			if st.State == "failed" {
+				failed = append(failed, st.Name)
+			}
+		}
+		note := "write check passed"
+		if len(failed) > 0 {
+			note = "write check failed: " + strings.Join(failed, ", ")
+		}
+		if wr.Leftover != "" {
+			out["leftover"] = wr.Leftover
+			note += "; scratch repository " + wr.Leftover + " left on the platform"
+		}
+		noteAudit(r, "%s", note)
 	}
 	writeJSON(w, http.StatusOK, out)
 }

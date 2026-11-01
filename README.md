@@ -81,8 +81,11 @@ gr target add backup --provider generic \
   --url-template 'ssh://git@git.example.com/{namespace}/{name}.git' --namespace mirrors \
   --ssh-key-file ~/.ssh/gitrepo_mirror --known-hosts-file ./known_hosts
 
-gr target check github     # 用平台 API 验证凭据
+gr target check github             # 用平台 API 验证凭据
+gr target check github --write     # 完整检查：在平台上建一个临时私有仓库，把同步和发布用到的写操作都试一遍，再删除它
 ```
+
+`--write` 依次检查：建仓、上传 LFS 对象、推送分支和标签、设置默认分支和可见性、发布带附件的 Release 再删除，最后删除临时仓库（`gitrepo-check-<随机>`，在 target 的命名空间下）。它能在真正的仓库依赖这个凭据之前，确认它有 Gitrepo 需要的全部权限。删除仓库需要比镜像更大的权限（例如 GitHub 的 delete_repo），这一步失败不影响使用，命令会给出临时仓库的名字，请到平台上手动删除。控制台的"平台凭据"页面也有"写入检查"按钮。
 
 凭据用 AES-256-GCM 加密后入库，不会出现在命令行参数、URL 或日志里。
 

@@ -340,8 +340,21 @@ func targetCmd() *cobra.Command {
 			return nil
 		},
 	}
+	var write bool
 	check := &cobra.Command{
-		Use: "check NAME", Short: "Verify a target's credential against the platform API", Args: cobra.ExactArgs(1),
+		Use:   "check NAME",
+		Short: "Verify a target's credential against the platform API",
+		Long: `Verify a target's credential against the platform API.
+
+With --write, also do on the platform what syncing and releases do, in a
+scratch repository named gitrepo-check-<random> in the target's namespace:
+create it, upload a Git LFS object, push a branch and a tag, set the default
+branch and the visibility, publish a release with a file and remove it,
+then delete the repository. This proves the credential has every
+permission Gitrepo needs. Deleting the repository needs more permission
+than mirroring (e.g. delete_repo on GitHub); if it fails, the repository's
+name is printed so you can delete it by hand.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			var res struct {
 				OK              bool       `json:"ok"`
@@ -349,14 +362,27 @@ func targetCmd() *cobra.Command {
 				Error           string     `json:"error"`
 				ExpiresAt       *time.Time `json:"expires_at,omitempty"`
 				ExpiresDetected bool       `json:"expires_detected,omitempty"`
+				Steps           []struct {
+					Name   string `json:"name"`
+					State  string `json:"state"`
+					Detail string `json:"detail"`
+				} `json:"steps,omitempty"`
+				Leftover string `json:"leftover,omitempty"`
 			}
-			if err := call(http.MethodPost, "/api/targets/"+url.PathEscape(args[0])+"/check", nil, &res); err != nil {
+			var body any
+			if write {
+				body = map[string]any{"write": true}
+				if !flagJSON {
+					fmt.Fprintln(os.Stderr, "running the write check on the platform; this can take a minute…")
+				}
+			}
+			if err := call(http.MethodPost, "/api/targets/"+url.PathEscape(args[0])+"/check", body, &res); err != nil {
 				return err
 			}
 			if flagJSON {
 				return printJSON(res)
 			}
-			if !res.OK {
+			if res.Error != "" {
 				return fmt.Errorf("check failed: %s", res.Error)
 			}
 			fmt.Printf("ok: authenticated as %s\n", res.Identity)
@@ -367,9 +393,26 @@ func targetCmd() *cobra.Command {
 				}
 				fmt.Printf("credential expires %s (%s, in %d days)\n", res.ExpiresAt.Format("2006-01-02"), how, int(time.Until(*res.ExpiresAt).Hours()/24))
 			}
+			if len(res.Steps) > 0 {
+				w := table()
+				for _, st := range res.Steps {
+					fmt.Fprintf(w, "  [%s]\t%s\t%s\n", st.State, st.Name, st.Detail)
+				}
+				w.Flush()
+			}
+			if res.Leftover != "" {
+				fmt.Printf("the scratch repository %s is still on the platform; delete it by hand\n", res.Leftover)
+			}
+			if !res.OK {
+				return errors.New("write check failed")
+			}
+			if write {
+				fmt.Println("write check passed")
+			}
 			return nil
 		},
 	}
+	check.Flags().BoolVar(&write, "write", false, "also check every write operation in a scratch repository (created and deleted)")
 	cmd.AddCommand(add, update, list, rm, check)
 	return cmd
 }

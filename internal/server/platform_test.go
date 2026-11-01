@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/qwq-inc/gitrepo/internal/gitserve"
+	"github.com/qwq-inc/gitrepo/internal/lfs"
 )
 
 // fakePlatforms emulates the subset of the GitHub and GitLab APIs Gitrepo
@@ -28,6 +29,41 @@ type fakePlatforms struct {
 	// tokenExpiry: what GitHub and GitLab report as the token's expiry
 	// ("" = none).
 	tokenExpiry string
+	// denyDelete makes repository deletion fail (a token without the
+	// permission to delete).
+	denyDelete bool
+	lfsSigner  *lfs.Signer
+}
+
+// deleteRepo serves a repository deletion.
+func (f *fakePlatforms) deleteRepo(w http.ResponseWriter, platform, project string) {
+	f.mu.Lock()
+	deny := f.denyDelete
+	f.mu.Unlock()
+	if deny {
+		writeJSONResp(w, 403, map[string]string{"message": "Must have admin rights to Repository."})
+		return
+	}
+	os.RemoveAll(filepath.Join(f.dir, platform, project+".git"))
+	f.record(platform + " delete " + project)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// credOK checks Git-over-HTTPS credentials for a platform.
+func (f *fakePlatforms) credOK(platform, u, pw string) bool {
+	wantUser, wantPass := "x-access-token", ghToken
+	switch platform {
+	case "gl":
+		wantUser, wantPass = "oauth2", glToken
+	case "gt":
+		wantUser, wantPass = "oauth2", gtToken
+	case "ge":
+		wantUser, wantPass = "gitee-user", geToken // Gitee needs the real login
+	}
+	if platform == "gh" && u == wantUser && f.ghTokenOK(pw) {
+		return true // also a GitHub App installation token
+	}
+	return u == wantUser && pw == wantPass
 }
 
 func (f *fakePlatforms) setTokenExpiry(v string) {
@@ -139,22 +175,30 @@ func (f *fakePlatforms) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		f.gitea(w, r, strings.TrimPrefix(p, "/gt/api/v1"))
+	case strings.Contains(r.URL.Path, ".git/info/lfs/"):
+		// Git LFS, with the same credentials as git.
+		repoPath, rest, _ := strings.Cut(r.URL.Path, ".git/info/lfs/")
+		platform, project, _ := strings.Cut(strings.TrimPrefix(repoPath, "/"), "/")
+		f.mu.Lock()
+		if f.lfsSigner == nil {
+			f.lfsSigner = lfs.NewSigner([]byte("fake platforms"))
+		}
+		signer := f.lfsSigner
+		f.mu.Unlock()
+		ls := &lfs.Server{Signer: signer, Auth: func(r *http.Request, _ string, _ bool) error {
+			if u, pw, ok := r.BasicAuth(); !ok || !f.credOK(platform, u, pw) {
+				return lfs.ErrUnauthorized
+			}
+			return nil
+		}}
+		if r.Method == http.MethodPut {
+			f.record("lfs upload " + platform + " " + project)
+		}
+		ls.Serve(w, r, lfs.Repo{Slug: platform + "/" + project, Dir: filepath.Join(f.dir, platform, project+".git")}, rest)
 	default:
 		platform, rest, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/"), "/")
-		wantUser, wantPass := "x-access-token", ghToken
-		switch platform {
-		case "gl":
-			wantUser, wantPass = "oauth2", glToken
-		case "gt":
-			wantUser, wantPass = "oauth2", gtToken
-		case "ge":
-			wantUser, wantPass = "gitee-user", geToken // Gitee needs the real login
-		}
 		u, pw, ok := r.BasicAuth()
-		if platform == "gh" && ok && u == wantUser && f.ghTokenOK(pw) {
-			wantPass = pw // a GitHub App installation token
-		}
-		if !ok || u != wantUser || pw != wantPass {
+		if !ok || !f.credOK(platform, u, pw) {
 			w.Header().Set("WWW-Authenticate", `Basic realm="fake"`)
 			http.Error(w, "unauthorized", 401)
 			return
@@ -185,6 +229,8 @@ func (f *fakePlatforms) github(w http.ResponseWriter, r *http.Request, p string)
 		f.record("gh create org " + org + "/" + name + " private=" + jsonStr(body["private"]))
 		f.initRepo("gh", org+"/"+name)
 		writeJSONResp(w, 201, map[string]any{})
+	case r.Method == "DELETE" && strings.HasPrefix(p, "/repos/"):
+		f.deleteRepo(w, "gh", strings.TrimPrefix(p, "/repos/"))
 	case r.Method == "PATCH" && strings.HasPrefix(p, "/repos/"):
 		if _, ok := body["private"]; ok {
 			f.record("gh private " + strings.TrimPrefix(p, "/repos/") + "=" + jsonStr(body["private"]))
@@ -237,6 +283,8 @@ func (f *fakePlatforms) gitlab(w http.ResponseWriter, r *http.Request, p string)
 		switch {
 		case r.Method == "GET" && len(seg) == 2:
 			writeJSONResp(w, 200, map[string]any{})
+		case r.Method == "DELETE" && len(seg) == 2:
+			f.deleteRepo(w, "gl", project)
 		case r.Method == "PUT" && len(seg) == 2 && body["visibility"] != nil:
 			f.record("gl visibility " + project + "=" + jsonStr(body["visibility"]))
 			writeJSONResp(w, 200, map[string]any{})
@@ -280,6 +328,8 @@ func (f *fakePlatforms) gitea(w http.ResponseWriter, r *http.Request, p string) 
 		switch {
 		case r.Method == "GET" && len(seg) == 3:
 			writeJSONResp(w, 200, map[string]any{})
+		case r.Method == "DELETE" && len(seg) == 3:
+			f.deleteRepo(w, "gt", project)
 		case r.Method == "PATCH" && len(seg) == 3 && body["private"] != nil:
 			f.record("gt private " + project + "=" + jsonStr(body["private"]))
 			writeJSONResp(w, 200, map[string]any{})
@@ -324,6 +374,8 @@ func (f *fakePlatforms) gitee(w http.ResponseWriter, r *http.Request, p string) 
 		switch {
 		case r.Method == "GET" && len(seg) == 3:
 			writeJSONResp(w, 200, map[string]any{})
+		case r.Method == "DELETE" && len(seg) == 3:
+			f.deleteRepo(w, "ge", project)
 		case r.Method == "PATCH" && len(seg) == 3 && body["private"] != nil:
 			f.record("ge private " + project + "=" + jsonStr(body["private"]) + " name=" + jsonStr(body["name"]))
 			writeJSONResp(w, 200, map[string]any{})
