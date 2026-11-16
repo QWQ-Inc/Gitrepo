@@ -3,25 +3,76 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <title>Gitrepo</title>
+<!-- Sets data-theme before the first paint (no flash of the wrong theme). -->
+<script src="theme.js"></script>
+<link rel="stylesheet" href="stackenigma.css">
 <link rel="stylesheet" href="app.css">
 <script src="app.js" defer></script>
 </head>
 <body>
-<header class="top">
-  <a class="brand" href="#/">Gitrepo</a>
-  <nav id="nav">
-    <a href="#/">仓库</a>
-    <a href="#/targets">平台凭据</a>
-    <a href="#/bindings">备份规则</a>
-    <a href="#/protect">分支保护</a>
-    <a href="#/tokens">访问令牌</a>
-    <a href="#/webhooks">通知</a>
-    <a href="#/audit">审计</a>
-  </nav>
-  <button id="logout" class="link" hidden>退出</button>
-</header>
-<main id="app"></main>
-<div id="toast" role="status" aria-live="polite"></div>
+<div class="topprogress-track" id="progress" hidden><div class="topprogress-bar"></div></div>
+<div class="app">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-top">
+      <a class="brand" href="#/">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7" cy="5.5" r="2"/><circle cx="7" cy="18.5" r="2"/><circle cx="17" cy="9" r="2"/><path d="M7 7.5v9"/><path d="M17 11c0 3.5-3 4.5-8.2 6.2"/></svg>
+        </span>
+        Gitrepo
+      </a>
+    </div>
+    <nav class="sidebar-scroll" id="nav" aria-label="主导航">
+      <a class="nav-link" href="#/">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7.5 12 3l9 4.5-9 4.5-9-4.5z"/><path d="M3 7.5v9L12 21l9-4.5v-9"/><path d="M12 12v9"/></svg>
+        仓库
+      </a>
+      <div class="side-label">镜像</div>
+      <a class="nav-link" href="#/targets">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 18.5a4.5 4.5 0 0 1-.9-8.9A6 6 0 0 1 17.6 8 5 5 0 0 1 17 18.5H7z"/></svg>
+        平台凭据
+      </a>
+      <a class="nav-link" href="#/bindings">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5" cy="12" r="2"/><path d="M7 12h5"/><path d="M12 12l6-6"/><path d="M12 12l6 6"/><path d="M15 5h3.5v3.5"/><path d="M15 19h3.5v-3.5"/></svg>
+        备份规则
+      </a>
+      <div class="side-label">安全</div>
+      <a class="nav-link" href="#/protect">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 20 6v6c0 4.8-3.4 7.9-8 9-4.6-1.1-8-4.2-8-9V6l8-3z"/><path d="m9 12 2 2 4-4"/></svg>
+        分支保护
+      </a>
+      <a class="nav-link" href="#/tokens">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="15" r="4"/><path d="m10.8 12.2 8.7-8.7"/><path d="m16.5 6.5 2.5 2.5"/><path d="m14 9 2 2"/></svg>
+        访问令牌
+      </a>
+      <a class="nav-link" href="#/audit">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3.5h6v3H9z"/><path d="M7 5H5.5v15.5h13V5H17"/><path d="M9 11.5h6"/><path d="M9 15.5h4"/></svg>
+        审计日志
+      </a>
+      <div class="side-label">集成</div>
+      <a class="nav-link" href="#/webhooks">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 1.5h-15L6 16.5z"/><path d="M10 20.5a2 2 0 0 0 4 0"/></svg>
+        通知
+      </a>
+    </nav>
+    <div class="sidebar-foot">
+      <div class="tabs theme-switch" id="theme-switch" role="group" aria-label="主题">
+        <button class="tab" type="button" data-theme-choice="light">浅色</button>
+        <button class="tab" type="button" data-theme-choice="dark">深色</button>
+        <button class="tab" type="button" data-theme-choice="system">自动</button>
+      </div>
+      <button class="btn btn-ghost btn-sm logout" id="logout" type="button">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 4h4v16h-4"/><path d="M10 8l-4 4 4 4"/><path d="M6 12h10"/></svg>
+        <span>退出登录</span>
+      </button>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="content" id="app"></div>
+  </main>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<div id="modal-root"></div>
 </body>
 </html>

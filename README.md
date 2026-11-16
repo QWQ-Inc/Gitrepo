@@ -56,6 +56,8 @@ docker run -d --name gitrepo -p 8080:8080 -p 2222:2222 -v gitrepo-data:/data \
 
 打开 `https://git.example.com/` 进入 Web 控制台，用管理令牌登录，之后的第 2～5 步都可以在控制台里完成。下面以 CLI 为例。
 
+控制台支持浅色、深色和跟随系统（侧边栏底部切换），手机上也能用。它不加载任何外部资源，字体也打包在程序里，所以在内网或访问不了境外 CDN 的环境里显示效果一样。
+
 ### 2. 填入平台凭据（target）
 
 ```bash
@@ -192,7 +194,7 @@ gr backup purge acme/demo --all --lfs --yes                     # 彻底清除
 - 公开仓库的源码包和 bundle 如果经过 CDN 缓存，CDN 上可能还留着旧副本，需要在 CDN 上自行清除；
 - 无论如何都要轮换泄露的密钥。
 
-控制台仓库页的"备份"一节也可以恢复和清除。
+控制台仓库页的"备份"标签页也可以恢复和清除。
 
 ## 分支保护
 
@@ -568,4 +570,6 @@ GITREPO_CONTRACT=1 go test ./internal/provider -run Contract -v
 GITREPO_CONTRACT=1 GITREPO_CONTRACT_GITHUB=owner/repo GITHUB_TOKEN=… go test ./internal/provider -run Contract -v
 ```
 
-许可证：Apache-2.0。
+Web 控制台在 `internal/webui/static`，不需要构建步骤。视觉样式来自 StackEnigma design kit（`stackenigma.css`，原样放入，更新时直接替换），控制台自己的样式在 `app.css`，只使用设计包的变量。
+
+许可证：Apache-2.0。控制台的设计包沿用 Zeabur 开源设计体系（Apache-2.0），字体 Geist / Geist Mono 采用 SIL Open Font License 1.1，署名见 [`internal/webui/static/NOTICE.txt`](internal/webui/static/NOTICE.txt)。

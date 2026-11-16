@@ -6,8 +6,15 @@ package webui
 import (
 	"embed"
 	"io/fs"
+	"mime"
 	"net/http"
+	"strings"
 )
+
+func init() {
+	// Not in Go's built-in table; minimal images have no /etc/mime.types.
+	mime.AddExtensionType(".woff2", "font/woff2")
+}
 
 //go:embed static
 var files embed.FS
@@ -24,7 +31,11 @@ func Handler(prefix string) http.Handler {
 		h.Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "no-referrer")
-		h.Set("Cache-Control", "no-cache")
+		if strings.HasPrefix(r.URL.Path, prefix+"fonts/") {
+			h.Set("Cache-Control", "public, max-age=604800") // fonts never change in place
+		} else {
+			h.Set("Cache-Control", "no-cache")
+		}
 		fileServer.ServeHTTP(w, r)
 	})
 }
