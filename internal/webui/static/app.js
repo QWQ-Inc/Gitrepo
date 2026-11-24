@@ -549,11 +549,14 @@ async function viewRepo(org, name, tab) {
         h('div', {}, '解决：把镜像的提交合并后 push 到 Hub，或使用上方的“以 Hub 为准覆盖分叉”。')));
     }
     return h('tr', {},
-      h('td', {}, h('div', { class: 'cell-title' }, m.label), h('div', { class: 'cell-sub mono' }, m.url), notes.length ? h('div', { class: 'mirror-notes' }, notes) : null),
+      h('td', {}, h('div', { class: 'cell-title' }, m.label), h('div', { class: 'cell-sub mono' }, m.url),
+        m.view ? h('div', { class: 'cell-sub' }, h('span', { class: 'badge badge-info' }, '部分同步'), ' ', viewLabel(m)) : null,
+        notes.length ? h('div', { class: 'mirror-notes' }, notes) : null),
       h('td', {}, badge(m.enabled ? m.state : 'paused')),
       h('td', { class: 'nowrap' }, ago(m.last_success_at)),
       h('td', { class: 'nowrap' }, m.on_divergence === 'overwrite' ? '备份后覆盖' : '告警'),
       h('td', { class: 'actions' },
+        h('button', { class: 'btn btn-sm', type: 'button', title: '同步哪些内容', onclick: () => viewModal(path, m) }, '视图'),
         h('button', { class: 'btn btn-sm', type: 'button', onclick: action(async () => { await api('PATCH', path, { enabled: !m.enabled }); rerender(); }, m.enabled ? '已暂停' : '已恢复') }, m.enabled ? '暂停' : '恢复'),
         h('button', { class: 'btn btn-sm', type: 'button', title: '切换分叉策略', onclick: action(async () => {
           const next = m.on_divergence === 'overwrite' ? 'alert' : 'overwrite';
@@ -576,9 +579,11 @@ async function viewRepo(org, name, tab) {
         field('命名空间（可选）', h('input', { name: 'namespace', placeholder: '默认使用凭据上的命名空间' })),
         field('远端仓库名（可选）', h('input', { name: 'name', placeholder: name })),
         field('完整 URL（可选，覆盖推导）', h('input', { name: 'url', placeholder: 'ssh://git@git.example.com/x/y.git' }), 'wide'),
-        field('分叉时', select('on_divergence', [['alert', '告警，不覆盖'], ['overwrite', '备份后覆盖']], 'alert'))],
+        field('分叉时', select('on_divergence', [['alert', '告警，不覆盖'], ['overwrite', '备份后覆盖']], 'alert')),
+        viewFields(null, true)],
       submit: async (d) => {
-        await api('POST', base + '/remotes', d);
+        await api('POST', base + '/remotes', Object.assign(viewBody(d), {
+          target: d.target, namespace: d.namespace, name: d.name, url: d.url, on_divergence: d.on_divergence }));
         rerender();
         return '已添加，正在首次同步';
       },
@@ -682,6 +687,84 @@ async function viewRepo(org, name, tab) {
     info,
     h('div', { class: 'section' }, h('div', { class: 'tabnav' }, bar), panel));
   show(current);
+}
+
+// ------------------------------------------------------------ mirror views
+
+// A mirror's view: only part of the repository (a directory split, some
+// branches, renamed tags). Branch and tag maps are edited one per line.
+function splitMaps(refs) {
+  const branches = [];
+  const tags = [];
+  const other = [];
+  for (const r of refs || []) {
+    const [src, dst] = r.split(':');
+    if (src.startsWith('refs/heads/') && dst.startsWith('refs/heads/')) {
+      const a = src.slice(11);
+      const b = dst.slice(11);
+      branches.push(a === b ? a : a + ':' + b);
+    } else if (src.startsWith('refs/tags/') && dst.startsWith('refs/tags/')) {
+      const a = src.slice(10);
+      const b = dst.slice(10);
+      tags.push(a === b ? a : a + ':' + b);
+    } else other.push(r);
+  }
+  return { branches, tags, other };
+}
+
+function viewLabel(m) {
+  if (!m.subdir && !(m.refs || []).length) return '全部分支和标签';
+  const maps = splitMaps(m.refs);
+  const arrow = (s) => s.replace(':', ' → ');
+  const parts = [];
+  if (m.subdir) parts.push('目录 ' + m.subdir + '/');
+  parts.push(maps.branches.length ? '分支 ' + maps.branches.map(arrow).join('、') : '全部分支');
+  if (maps.tags.length) parts.push('标签 ' + maps.tags.map(arrow).join('、'));
+  else if (!m.subdir && !maps.branches.length && !maps.other.length) parts.push('全部标签');
+  else if (!maps.other.length) parts.push('不同步标签');
+  if (maps.other.length) parts.push(maps.other.map(arrow).join('、'));
+  return parts.join(' · ');
+}
+
+function viewFields(m, collapsible) {
+  const maps = splitMaps(m ? m.refs : []);
+  const fields = [
+    field('只同步这个目录（可选）', h('input', { name: 'subdir', value: m ? m.subdir || '' : '', placeholder: 'services/api' }), 'wide',
+      '把这个目录的历史拆出来，作为镜像仓库的根目录（monorepo 拆分）。拆出的提交是新的，在镜像上的修改无法回流。'),
+    field('只同步这些分支（可选，每行一个）', h('textarea', { name: 'branches', rows: 2, placeholder: 'api:main' }), null,
+      '源:目标，例如 api:main 把 Hub 的 api 分支推成镜像的 main；可以用 *。留空时同步全部分支'),
+    field('同步这些标签（可选，每行一个）', h('textarea', { name: 'tags', rows: 2, placeholder: 'api-v*:v*' }), null,
+      '例如 api-v*:v* 把 api-v1.0 推成 v1.0。留空时：完整镜像同步全部标签；拆目录或只选了部分分支时不同步标签'),
+  ];
+  fields[1].querySelector('textarea').value = maps.branches.join('\n');
+  fields[2].querySelector('textarea').value = maps.tags.join('\n');
+  if (maps.other.length) fields.push(h('input', { type: 'hidden', name: 'other_refs', value: maps.other.join('\n') }));
+  if (!collapsible) return fields;
+  const open = Boolean(m && (m.subdir || (m.refs || []).length));
+  return h('details', { class: 'wide view-fields', open },
+    h('summary', {}, '只同步部分内容（可选）：一个目录、几个分支或改名的标签'), h('div', { class: 'form-grid' }, fields));
+}
+
+function viewBody(d) {
+  const lines = (s) => (s || '').split('\n').map((x) => x.trim()).filter(Boolean);
+  const refs = lines(d.branches).concat(lines(d.tags).map((t) => {
+    const [src, dst] = t.split(':');
+    return 'refs/tags/' + src + ':refs/tags/' + (dst || src);
+  }), lines(d.other_refs));
+  return { refs, subdir: d.subdir || '' };
+}
+
+function viewModal(path, m) {
+  formModal({
+    title: '镜像视图：' + m.label, submitText: '保存', wide: true,
+    intro: '决定这个镜像同步 Hub 的哪些内容。保存后的下一次同步会按新视图改写镜像：不再包含的分支和标签会在镜像上删除，改变的会被覆盖（原来的值备份在 Hub 的 refs/backup/ 下）。',
+    fields: viewFields(m, false),
+    submit: async (d) => {
+      await api('PATCH', path, viewBody(d));
+      rerender();
+      return '已保存，正在同步';
+    },
+  });
 }
 
 // ------------------------------------------------------------------ targets

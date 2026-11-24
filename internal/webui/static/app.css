@@ -271,6 +271,16 @@ body.logged-out .sidebar { display: none; }
   .form-grid { grid-template-columns: minmax(0, 1fr); }
 }
 .field-hint { display: block; margin-top: 4px; color: var(--text-faint); font-size: 12px; }
+details.view-fields {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+details.view-fields > summary { cursor: pointer; font-weight: 500; }
+details.view-fields[open] > summary { margin-bottom: 12px; }
+details.view-fields .form-grid { gap: 0 16px; }
 label.check {
   display: flex;
   align-items: center;

@@ -169,6 +169,10 @@ type Remote struct {
 	LastSuccessAt       *time.Time   `json:"last_success_at,omitempty"`
 	NextRetryAt         *time.Time   `json:"next_retry_at,omitempty"`
 	Divergences         []Divergence `json:"divergences,omitempty"`
+	// The mirror's view (only part of the repository).
+	Refs   []string `json:"refs,omitempty"`
+	Subdir string   `json:"subdir,omitempty"`
+	View   string   `json:"view,omitempty"`
 }
 
 type Repo struct {

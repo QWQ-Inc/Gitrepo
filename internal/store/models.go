@@ -123,6 +123,11 @@ type Remote struct {
 	// LocationGen changes whenever the remote is pointed at another
 	// repository (see RelocateRemote, UpdateTargetChecked).
 	LocationGen int64
+	// RefMap and Subdir are the mirror's view (syncer.View): which hub refs
+	// it gets, under which names ("SRC:DST" entries; empty = all branches
+	// and tags), and optionally only one subdirectory's history.
+	RefMap []string
+	Subdir string
 }
 
 // EffectiveNamespace is the remote's namespace, falling back to the target's.
@@ -438,18 +443,22 @@ func (s *Store) DeleteRepo(ctx context.Context, id int64) error {
 
 const remoteCols = `r.id, r.repo_id, r.target_id, t.name, t.namespace, t.provider, r.namespace, r.name, r.url, r.on_divergence, r.enabled,
 r.provisioned, r.atomic_unsupported, r.adopt, r.state, r.last_error, r.consecutive_failures, r.next_retry_at, r.last_sync_at,
-r.last_success_at, r.created_at, r.location_gen`
+r.last_success_at, r.created_at, r.location_gen, r.ref_map, r.subdir`
 
 const remoteFrom = ` FROM remotes r JOIN targets t ON t.id = r.target_id`
 
 func scanRemote(sc interface{ Scan(...any) error }) (*Remote, error) {
 	var r Remote
 	var enabled, prov, atomic, adopt int
+	var refMap string
 	err := sc.Scan(&r.ID, &r.RepoID, &r.TargetID, &r.TargetName, &r.TargetNamespace, &r.Provider, &r.Namespace, &r.Name, &r.URL, &r.OnDivergence, &enabled,
 		&prov, &atomic, &adopt, &r.State, &r.LastError, &r.ConsecutiveFailures, &r.NextRetryAt, &r.LastSyncAt,
-		&r.LastSuccessAt, &r.CreatedAt, &r.LocationGen)
+		&r.LastSuccessAt, &r.CreatedAt, &r.LocationGen, &refMap, &r.Subdir)
 	if err != nil {
 		return nil, wrapErr(err)
+	}
+	if refMap != "" {
+		r.RefMap = strings.Split(refMap, "\n")
 	}
 	r.Enabled, r.Provisioned, r.AtomicUnsupported, r.Adopt = enabled != 0, prov != 0, atomic != 0, adopt != 0
 	return &r, nil
@@ -460,8 +469,9 @@ func (s *Store) CreateRemote(ctx context.Context, r *Remote) error {
 	if r.State == "" {
 		r.State = StatePending
 	}
-	res, err := s.db.ExecContext(ctx, `INSERT INTO remotes (repo_id, target_id, namespace, name, url, on_divergence, enabled, adopt, state, created_at)
-VALUES (?,?,?,?,?,?,?,?,?,?)`, r.RepoID, r.TargetID, r.Namespace, r.Name, r.URL, r.OnDivergence, b2i(r.Enabled), b2i(r.Adopt), r.State, r.CreatedAt)
+	res, err := s.db.ExecContext(ctx, `INSERT INTO remotes (repo_id, target_id, namespace, name, url, on_divergence, enabled, adopt, state, created_at, ref_map, subdir)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, r.RepoID, r.TargetID, r.Namespace, r.Name, r.URL, r.OnDivergence, b2i(r.Enabled), b2i(r.Adopt), r.State, r.CreatedAt,
+		strings.Join(r.RefMap, "\n"), r.Subdir)
 	if err != nil {
 		return wrapErr(err)
 	}
@@ -504,7 +514,8 @@ func (s *Store) queryRemotes(ctx context.Context, q string, args ...any) ([]*Rem
 }
 
 func (s *Store) UpdateRemoteConfig(ctx context.Context, r *Remote) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE remotes SET url=?, on_divergence=?, enabled=?, adopt=? WHERE id=?`, r.URL, r.OnDivergence, b2i(r.Enabled), b2i(r.Adopt), r.ID)
+	_, err := s.db.ExecContext(ctx, `UPDATE remotes SET url=?, on_divergence=?, enabled=?, adopt=?, ref_map=?, subdir=? WHERE id=?`,
+		r.URL, r.OnDivergence, b2i(r.Enabled), b2i(r.Adopt), strings.Join(r.RefMap, "\n"), r.Subdir, r.ID)
 	return wrapErr(err)
 }
 
@@ -572,8 +583,8 @@ func (s *Store) RelocateRemote(ctx context.Context, r *Remote) error {
 	if err := forgetRemote(ctx, tx, r.ID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE remotes SET url=?, on_divergence=?, enabled=?, adopt=? WHERE id=?`,
-		r.URL, r.OnDivergence, b2i(r.Enabled), b2i(r.Adopt), r.ID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE remotes SET url=?, on_divergence=?, enabled=?, adopt=?, ref_map=?, subdir=? WHERE id=?`,
+		r.URL, r.OnDivergence, b2i(r.Enabled), b2i(r.Adopt), strings.Join(r.RefMap, "\n"), r.Subdir, r.ID); err != nil {
 		return wrapErr(err)
 	}
 	return tx.Commit()

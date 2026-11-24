@@ -94,6 +94,9 @@ type Manager struct {
 
 	mu     sync.Mutex
 	queues map[int64]*repoQueue
+
+	splitMu    sync.Mutex
+	splitLocks map[int64]*sync.Mutex
 }
 
 type repoQueue struct {
@@ -339,7 +342,7 @@ func (m *Manager) runRepo(repoID int64, p *pendingRun) {
 			}
 			defer func() { <-m.sem }()
 			req := Request{Trigger: p.trigger, Overwrite: p.overwriteAll || p.overwriteIDs[rem.ID]}
-			out := m.syncRemote(ctx, repo, rem, hub, req)
+			out := m.syncViewed(ctx, repo, rem, hub, req)
 			if out.State == store.StateFailed {
 				log.Warn("remote sync failed", "remote", out.Label, "err", out.Error)
 			} else {

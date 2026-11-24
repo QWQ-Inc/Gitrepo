@@ -65,6 +65,10 @@ func (s *Server) apiImport(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
+	if rem != nil && (len(rem.RefMap) > 0 || rem.Subdir != "") {
+		s.fail(w, badRequest("mirror %s holds only part of this repository (a directory split or some branches); import from a full mirror", rem.Label()))
+		return
+	}
 	if rem == nil {
 		rem, err = s.reg.AddRemote(r.Context(), repo, t.Name, in.Namespace, name, in.URL, "", true)
 		if err != nil {

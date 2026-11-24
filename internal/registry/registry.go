@@ -155,6 +155,12 @@ func (r *Registry) ApplyBinding(ctx context.Context, repo *store.Repo, b *store.
 // AddRemote attaches a target to a repository. adopt allows the first sync
 // to write into a mirror repository that already contains other refs.
 func (r *Registry) AddRemote(ctx context.Context, repo *store.Repo, targetName, namespace, name, url, onDivergence string, adopt bool) (*store.Remote, error) {
+	return r.AddRemoteView(ctx, repo, targetName, namespace, name, url, onDivergence, adopt, nil, "")
+}
+
+// AddRemoteView adds a remote with a view (see syncer.View; the caller
+// validates and normalizes it).
+func (r *Registry) AddRemoteView(ctx context.Context, repo *store.Repo, targetName, namespace, name, url, onDivergence string, adopt bool, refMap []string, subdir string) (*store.Remote, error) {
 	t, err := r.Store.GetTargetByName(ctx, targetName)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -185,7 +191,7 @@ func (r *Registry) AddRemote(ctx context.Context, repo *store.Repo, targetName, 
 	}
 	rem := &store.Remote{
 		RepoID: repo.ID, TargetID: t.ID, Namespace: namespace, Name: name, URL: url,
-		OnDivergence: onDivergence, Enabled: true, Adopt: adopt,
+		OnDivergence: onDivergence, Enabled: true, Adopt: adopt, RefMap: refMap, Subdir: subdir,
 	}
 	if err := r.Store.CreateRemote(ctx, rem); err != nil {
 		if errors.Is(err, store.ErrConflict) {

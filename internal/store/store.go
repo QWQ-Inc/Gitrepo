@@ -325,6 +325,12 @@ CREATE TABLE protections (
 	`
 ALTER TABLE remotes ADD COLUMN location_gen INTEGER NOT NULL DEFAULT 0;
 `,
+	// 14: mirror views: which refs a mirror gets (and under which names),
+	// and optionally only the history of one subdirectory.
+	`
+ALTER TABLE remotes ADD COLUMN ref_map TEXT NOT NULL DEFAULT '';
+ALTER TABLE remotes ADD COLUMN subdir TEXT NOT NULL DEFAULT '';
+`,
 }
 
 func (s *Store) migrate(ctx context.Context) error {

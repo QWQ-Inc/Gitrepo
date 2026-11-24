@@ -72,9 +72,46 @@ func (m *Manager) resolveRemote(ctx context.Context, repo *store.Repo, rem *stor
 	return rc, nil
 }
 
-// syncRemote brings one remote in line with the hub refs:
+// syncViewed syncs a remote with what its view selects from the hub refs.
+func (m *Manager) syncViewed(ctx context.Context, repo *store.Repo, rem *store.Remote, hub map[string]string, req Request) RemoteOutcome {
+	view, want, err := m.MirrorRefs(ctx, repo, rem, hub)
+	if err != nil {
+		out := RemoteOutcome{Label: rem.Label(), State: store.StateFailed, Error: "mirror view: " + err.Error()}
+		bg := context.Background()
+		now := store.Now()
+		_ = m.store.RecordRemoteResult(bg, rem.ID, store.RemoteResult{State: out.State, Error: out.Error, SyncedAt: now, Failed: true,
+			NextRetryAt: now + m.backoff(rem.ConsecutiveFailures).Milliseconds()})
+		return out
+	}
+	return m.syncRemote(ctx, repo, rem, want, view, req)
+}
+
+// MirrorRefs returns a remote's view and the refs it should have (mirror
+// ref → value), from the hub's refs.
+func (m *Manager) MirrorRefs(ctx context.Context, repo *store.Repo, rem *store.Remote, hub map[string]string) (View, map[string]string, error) {
+	view, err := ViewOf(rem)
+	if err != nil {
+		return View{}, nil, err
+	}
+	if view.IsZero() {
+		return view, hub, nil
+	}
+	want, _, err := view.Apply(hub)
+	if err != nil {
+		return view, nil, err
+	}
+	if view.Subdir != "" {
+		if want, err = m.splitRefs(ctx, m.reg.Path(repo.Slug), rem.ID, view.Subdir, want); err != nil {
+			return view, nil, fmt.Errorf("split %s/: %w", view.Subdir, err)
+		}
+	}
+	return view, want, nil
+}
+
+// syncRemote brings one remote in line with the refs it should have (hub,
+// already passed through its view):
 // provision → ls-remote → plan → back up → relax protection → push → verify.
-func (m *Manager) syncRemote(parent context.Context, repo *store.Repo, rem *store.Remote, hub map[string]string, req Request) (out RemoteOutcome) {
+func (m *Manager) syncRemote(parent context.Context, repo *store.Repo, rem *store.Remote, hub map[string]string, view View, req Request) (out RemoteOutcome) {
 	out.Label = rem.Label()
 	run := &store.SyncRun{RepoID: repo.ID, RemoteID: rem.ID, Trigger: req.Trigger, Status: store.StateSyncing}
 	_ = m.store.InsertRun(parent, run)
@@ -209,10 +246,14 @@ func (m *Manager) syncRemote(parent context.Context, repo *store.Repo, rem *stor
 	// always a broken hub repository rather than intent, so it needs an
 	// explicit overwrite.
 	if len(hub) == 0 && !req.Overwrite {
+		why := "hub has no branches or tags"
+		if !view.IsZero() {
+			why = "this mirror's view selects nothing on the hub (" + view.Describe() + ")"
+		}
 		kept := ops[:0]
 		for _, op := range ops {
 			if op.Action == ActionDelete {
-				failures[op.Ref] = "hub has no branches or tags; refusing to empty the mirror (sync with --overwrite to force)"
+				failures[op.Ref] = why + "; refusing to empty the mirror (sync with --overwrite to force)"
 				continue
 			}
 			kept = append(kept, op)
@@ -401,8 +442,8 @@ func (m *Manager) syncRemote(parent context.Context, repo *store.Repo, rem *stor
 		}
 	}
 
-	if created && repo.DefaultBranch != "" && prov.Caps().DefaultBranch && after["refs/heads/"+repo.DefaultBranch] != "" {
-		if err := prov.SetDefaultBranch(ctx, t, secret, spec, repo.DefaultBranch); err != nil {
+	if def := view.DefaultBranch(repo.DefaultBranch, hub); created && def != "" && prov.Caps().DefaultBranch && after["refs/heads/"+def] != "" {
+		if err := prov.SetDefaultBranch(ctx, t, secret, spec, def); err != nil {
 			out.Warnings = append(out.Warnings, "set default branch: "+err.Error())
 		}
 	}

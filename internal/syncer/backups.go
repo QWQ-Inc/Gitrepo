@@ -219,6 +219,11 @@ func (m *Manager) PurgeBackups(ctx context.Context, repo *store.Repo, refs []str
 		return nil, err
 	}
 	res := &PurgeResult{Backups: len(lines)}
+	// Directory splits of the old history may hold what is being purged;
+	// they are rebuilt from the current history on the next sync.
+	if err := m.ForgetSplits(ctx, repoPath, 0); err != nil {
+		return res, fmt.Errorf("drop directory splits: %w", err)
+	}
 	if _, err := m.git.Run(ctx, repoPath, "-c", "gc.reflogExpire=now", "-c", "gc.reflogExpireUnreachable=now",
 		"gc", "--quiet", "--prune=5.minutes.ago"); err != nil {
 		return res, fmt.Errorf("git gc: %w", err)

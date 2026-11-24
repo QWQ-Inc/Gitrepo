@@ -719,15 +719,68 @@ func findRemote(slug, ref string) (*client.Repo, *client.Remote, error) {
 	}
 }
 
+// viewFlags are a mirror's view (only part of the repository).
+type viewFlags struct {
+	subdir               string
+	branches, tags, refs []string
+	all                  bool
+}
+
+func (f *viewFlags) register(c *cobra.Command, withAll bool) {
+	c.Flags().StringVar(&f.subdir, "subdir", "", "send only this directory's history, as the mirror's root (a monorepo split)")
+	c.Flags().StringArrayVar(&f.branches, "branch", nil, "send only these branches: SRC[:DST], e.g. api:main (repeatable; * allowed)")
+	c.Flags().StringArrayVar(&f.tags, "tag", nil, "send these tags: SRC[:DST], e.g. 'api-v*:v*' (repeatable)")
+	c.Flags().StringArrayVar(&f.refs, "ref", nil, "full ref map SRC:DST, e.g. refs/heads/*:refs/heads/* (repeatable)")
+	if withAll {
+		c.Flags().BoolVar(&f.all, "all", false, "send everything again (drop the view)")
+	}
+}
+
+// maps is the view's ref maps ("SRC:DST", full ref names).
+func (f *viewFlags) maps() []string {
+	var out []string
+	for _, b := range f.branches {
+		out = append(out, b)
+	}
+	for _, t := range f.tags {
+		src, dst, ok := strings.Cut(t, ":")
+		if !ok {
+			dst = src
+		}
+		out = append(out, "refs/tags/"+strings.TrimPrefix(src, "refs/tags/")+":refs/tags/"+strings.TrimPrefix(dst, "refs/tags/"))
+	}
+	return append(out, f.refs...)
+}
+
+func (f *viewFlags) any() bool {
+	return f.subdir != "" || len(f.branches)+len(f.tags)+len(f.refs) > 0
+}
+
 func remoteCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "remote", Short: "Mirrors of a repository"}
 	var namespace, name, rawURL, onDiv string
 	var adopt bool
+	var view viewFlags
 	add := &cobra.Command{
-		Use:     "add ORG/NAME TARGET",
-		Short:   "Mirror a repository to a target",
-		Example: "  gr remote add acme/demo gitlab\n  gr remote add acme/demo internal --url ssh://git@git.example.com/backup/demo.git",
-		Args:    cobra.ExactArgs(2),
+		Use:   "add ORG/NAME TARGET",
+		Short: "Mirror a repository to a target",
+		Long: `Mirror a repository to a target.
+
+By default the mirror gets every branch and tag. A view sends only part of
+the repository, e.g. to publish a monorepo as several repositories:
+
+  --subdir services/api   the history of that directory, as the mirror's
+                          root (split commits: changes made on the mirror
+                          cannot flow back)
+  --branch api:main       only the hub's branch api, as the mirror's main
+                          (commits unchanged; without --branch: every branch)
+  --tag 'api-v*:v*'       only these tags, renamed (without --tag: every tag
+                          on a full mirror, none with --subdir or --branch)`,
+		Example: `  gr remote add acme/demo gitlab
+  gr remote add acme/demo internal --url ssh://git@git.example.com/backup/demo.git
+  gr remote add acme/mono github --name api --subdir services/api --tag 'api-v*:v*'
+  gr remote add acme/mono github --name web --branch web:main`,
+		Args: cobra.ExactArgs(2),
 		RunE: func(c *cobra.Command, args []string) error {
 			p, err := repoPath(args[0])
 			if err != nil {
@@ -736,6 +789,7 @@ func remoteCmd() *cobra.Command {
 			var r client.Repo
 			if err := call(http.MethodPost, p+"/remotes", map[string]any{
 				"target": args[1], "namespace": namespace, "name": name, "url": rawURL, "on_divergence": onDiv, "adopt": adopt,
+				"refs": view.maps(), "subdir": view.subdir,
 			}, &r); err != nil {
 				return err
 			}
@@ -751,6 +805,7 @@ func remoteCmd() *cobra.Command {
 	add.Flags().StringVar(&rawURL, "url", "", "explicit Git URL (overrides target URL derivation)")
 	add.Flags().StringVar(&onDiv, "on-divergence", "alert", "alert | overwrite")
 	add.Flags().BoolVar(&adopt, "adopt", false, "the mirror repository already has content: let Gitrepo manage it (existing branches are fast-forwarded or reported, never overwritten)")
+	view.register(add, false)
 
 	list := &cobra.Command{
 		Use: "list ORG/NAME", Aliases: []string{"ls"}, Short: "List mirrors", Args: cobra.ExactArgs(1),
@@ -777,8 +832,49 @@ func remoteCmd() *cobra.Command {
 	pause := patch("pause", "Stop pushing to a mirror (it is still checked)", func() map[string]any { return map[string]any{"enabled": false} }, "paused")
 	resume := patch("resume", "Resume pushing to a mirror", func() map[string]any { return map[string]any{"enabled": true} }, "resumed")
 	var setDiv string
-	set := patch("set", "Change a mirror's divergence policy", func() map[string]any { return map[string]any{"on_divergence": setDiv} }, "updated")
+	var setView viewFlags
+	set := &cobra.Command{
+		Use:   "set ORG/NAME REMOTE",
+		Short: "Change a mirror's divergence policy or view",
+		Long: `Change a mirror's divergence policy or view.
+
+A new view rewrites the mirror at the next sync: refs it no longer selects
+are deleted there, and refs that change are force-updated (the values they
+had are kept on the hub under refs/backup/).`,
+		Example: `  gr remote set acme/demo github --on-divergence overwrite
+  gr remote set acme/mono github:acme/api --subdir services/api
+  gr remote set acme/mono github:acme/web --all`,
+		Args: cobra.ExactArgs(2),
+		RunE: func(c *cobra.Command, args []string) error {
+			repo, rem, err := findRemote(args[0], args[1])
+			if err != nil {
+				return err
+			}
+			body := map[string]any{}
+			if c.Flags().Changed("on-divergence") {
+				body["on_divergence"] = setDiv
+			}
+			switch {
+			case setView.all && setView.any():
+				return errors.New("--all drops the view; do not combine it with --subdir, --branch, --tag or --ref")
+			case setView.all:
+				body["refs"], body["subdir"] = []string{}, ""
+			case setView.any():
+				body["refs"], body["subdir"] = setView.maps(), setView.subdir
+			}
+			if len(body) == 0 {
+				return errors.New("nothing to change (see --help)")
+			}
+			p, _ := repoPath(repo.Slug)
+			if err := call(http.MethodPatch, fmt.Sprintf("%s/remotes/%d", p, rem.ID), body, nil); err != nil {
+				return err
+			}
+			fmt.Printf("%s: updated; syncing now\n", rem.Label)
+			return nil
+		},
+	}
 	set.Flags().StringVar(&setDiv, "on-divergence", "alert", "alert | overwrite")
+	setView.register(set, true)
 	rm := &cobra.Command{
 		Use: "rm ORG/NAME REMOTE", Short: "Stop mirroring to a remote (the remote repository is not deleted)", Args: cobra.ExactArgs(2),
 		RunE: func(c *cobra.Command, args []string) error {
@@ -964,13 +1060,17 @@ func statusOne(slug string) error {
 		return nil
 	}
 	w := table()
-	fmt.Fprintln(w, "ID\tMIRROR\tSTATE\tLAST SUCCESS\tON-DIVERGENCE\tURL")
+	fmt.Fprintln(w, "ID\tMIRROR\tSTATE\tLAST SUCCESS\tON-DIVERGENCE\tURL\tVIEW")
 	for _, rem := range r.Remotes {
 		state := rem.State
 		if !rem.Enabled {
 			state = "paused"
 		}
-		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\n", rem.ID, rem.Label, state, ago(rem.LastSuccessAt), rem.OnDivergence, rem.URL)
+		view := rem.View
+		if view == "" {
+			view = "everything"
+		}
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\n", rem.ID, rem.Label, state, ago(rem.LastSuccessAt), rem.OnDivergence, rem.URL, view)
 	}
 	w.Flush()
 	for _, rem := range r.Remotes {

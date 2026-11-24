@@ -951,6 +951,10 @@ type remoteOut struct {
 	LastSuccessAt       *time.Time `json:"last_success_at,omitempty"`
 	NextRetryAt         *time.Time `json:"next_retry_at,omitempty"`
 	Divergences         []divOut   `json:"divergences,omitempty"`
+	// The mirror's view: ref maps and subdirectory, and a summary.
+	Refs   []string `json:"refs,omitempty"`
+	Subdir string   `json:"subdir,omitempty"`
+	View   string   `json:"view,omitempty"`
 }
 
 type repoOut struct {
@@ -1008,6 +1012,10 @@ func (s *Server) repoOut(ctx context.Context, repo *store.Repo, withDivergences 
 			Adopt: rem.Adopt, NeedsAdoption: !rem.Adopt && strings.HasPrefix(rem.LastError, syncer.ErrNeedsAdoption.Error()),
 			LastError: rem.LastError, ConsecutiveFailures: rem.ConsecutiveFailures,
 			LastSyncAt: ts(rem.LastSyncAt), LastSuccessAt: ts(rem.LastSuccessAt), NextRetryAt: ts(rem.NextRetryAt),
+			Refs: rem.RefMap, Subdir: rem.Subdir,
+		}
+		if v, err := syncer.ViewOf(rem); err == nil {
+			ro.View = v.Describe()
 		}
 		if withDivergences {
 			divs, err := s.store.ListDivergences(ctx, rem.ID)
@@ -1146,12 +1154,20 @@ func (s *Server) apiAddRemote(w http.ResponseWriter, r *http.Request) {
 		URL          string `json:"url"`
 		OnDivergence string `json:"on_divergence"`
 		Adopt        bool   `json:"adopt"`
+		// Refs and Subdir are the mirror's view (see syncer.View).
+		Refs   []string `json:"refs"`
+		Subdir string   `json:"subdir"`
 	}
 	if err := decode(r, &in); err != nil {
 		s.fail(w, err)
 		return
 	}
-	rem, err := s.reg.AddRemote(r.Context(), repo, in.Target, in.Namespace, in.Name, in.URL, in.OnDivergence, in.Adopt)
+	view, err := syncer.ParseView(in.Refs, in.Subdir)
+	if err != nil {
+		s.fail(w, badRequest("%v", err))
+		return
+	}
+	rem, err := s.reg.AddRemoteView(r.Context(), repo, in.Target, in.Namespace, in.Name, in.URL, in.OnDivergence, in.Adopt, viewRefs(view), view.Subdir)
 	if err != nil {
 		status := http.StatusBadRequest
 		if errors.Is(err, registry.ErrLocationTaken) {
@@ -1161,13 +1177,26 @@ func (s *Server) apiAddRemote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mgr.Enqueue(repo.ID, syncer.Request{Trigger: syncer.TriggerManual, RemoteIDs: []int64{rem.ID}})
-	noteAudit(r, "mirror %s (on divergence %s, adopt %t)", rem.Label(), rem.OnDivergence, rem.Adopt)
+	if d := view.Describe(); d != "" {
+		noteAudit(r, "mirror %s (on divergence %s, adopt %t; view: %s)", rem.Label(), rem.OnDivergence, rem.Adopt, d)
+	} else {
+		noteAudit(r, "mirror %s (on divergence %s, adopt %t)", rem.Label(), rem.OnDivergence, rem.Adopt)
+	}
 	ro, err := s.repoOut(r.Context(), repo, false)
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, ro)
+}
+
+// viewRefs is how a view's ref maps are stored (normalized "SRC:DST").
+func viewRefs(v syncer.View) []string {
+	var out []string
+	for _, m := range v.Maps {
+		out = append(out, m.String())
+	}
+	return out
 }
 
 func (s *Server) remoteFromPath(r *http.Request, repo *store.Repo) (*store.Remote, error) {
@@ -1189,10 +1218,12 @@ func (s *Server) apiUpdateRemote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		Enabled      *bool   `json:"enabled"`
-		OnDivergence *string `json:"on_divergence"`
-		URL          *string `json:"url"`
-		Adopt        *bool   `json:"adopt"`
+		Enabled      *bool     `json:"enabled"`
+		OnDivergence *string   `json:"on_divergence"`
+		URL          *string   `json:"url"`
+		Adopt        *bool     `json:"adopt"`
+		Refs         *[]string `json:"refs"`
+		Subdir       *string   `json:"subdir"`
 	}
 	if err := decode(r, &in); err != nil {
 		s.fail(w, err)
@@ -1239,6 +1270,26 @@ func (s *Server) apiUpdateRemote(w http.ResponseWriter, r *http.Request) {
 	if in.Adopt != nil {
 		rem.Adopt = *in.Adopt
 	}
+	viewNote := ""
+	if in.Refs != nil || in.Subdir != nil {
+		refs, sub := rem.RefMap, rem.Subdir
+		if in.Refs != nil {
+			refs = *in.Refs
+		}
+		if in.Subdir != nil {
+			sub = *in.Subdir
+		}
+		view, err := syncer.ParseView(refs, sub)
+		if err != nil {
+			s.fail(w, badRequest("%v", err))
+			return
+		}
+		rem.RefMap, rem.Subdir = viewRefs(view), view.Subdir
+		viewNote = "; view: everything"
+		if d := view.Describe(); d != "" {
+			viewNote = "; view: " + d
+		}
+	}
 	moved := remoteLocation(t, rem) != before
 	if moved {
 		// Another repository: nothing learnt about the old one applies,
@@ -1258,7 +1309,7 @@ func (s *Server) apiUpdateRemote(w http.ResponseWriter, r *http.Request) {
 	if moved {
 		where = "; moved to another location (what was known about the old one is forgotten)"
 	}
-	noteAudit(r, "mirror %s: enabled %t, on divergence %s, adopt %t%s", rem.Label(), rem.Enabled, rem.OnDivergence, rem.Adopt, where)
+	noteAudit(r, "mirror %s: enabled %t, on divergence %s, adopt %t%s%s", rem.Label(), rem.Enabled, rem.OnDivergence, rem.Adopt, viewNote, where)
 	release() // the sync needs the lease
 	s.mgr.Enqueue(repo.ID, syncer.Request{Trigger: syncer.TriggerManual, RemoteIDs: []int64{rem.ID}})
 	w.WriteHeader(http.StatusNoContent)
@@ -1278,6 +1329,11 @@ func (s *Server) apiDeleteRemote(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.DeleteRemote(r.Context(), rem.ID); err != nil {
 		s.fail(w, err)
 		return
+	}
+	if rem.Subdir != "" {
+		if err := s.mgr.ForgetSplits(r.Context(), s.reg.Path(repo.Slug), rem.ID); err != nil {
+			s.log.Warn("remove directory split", "repo", repo.Slug, "mirror", rem.Label(), "err", err)
+		}
 	}
 	noteAudit(r, "mirror %s", rem.Label())
 	w.WriteHeader(http.StatusNoContent)

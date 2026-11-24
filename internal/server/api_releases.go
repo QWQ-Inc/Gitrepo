@@ -168,6 +168,9 @@ func (s *Server) releaseOut(ctx context.Context, repo *store.Repo, rel *store.Re
 		byRemote[st.RemoteID] = st
 	}
 	for _, rem := range remotes {
+		if _, ok := releases.MirrorTag(rem, rel.Tag); !ok && byRemote[rem.ID] == nil {
+			continue // this mirror's view leaves the tag out
+		}
 		mo := releaseMirrorOut{RemoteID: rem.ID, Mirror: rem.Label(), State: store.RelPending}
 		if st := byRemote[rem.ID]; st != nil {
 			mo.State, mo.Error, mo.UpdatedAt, mo.NextRetryAt = st.State, st.LastError, ts(st.UpdatedAt), ts(st.NextRetryAt)

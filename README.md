@@ -227,6 +227,38 @@ remote: gitrepo:   [failed]   github:acme/app  adoption required: the mirror rep
 
 修改镜像的地址（`url`），或者修改 target 的命名空间、URL 模板、服务器地址之后，镜像指向的已经是另一个仓库。Gitrepo 会忘掉关于旧仓库的一切记录（推送过的 ref、分叉、已同步的 Release、接管状态），把新位置当作新加的镜像：新位置已有内容时同样需要先接管。
 
+## 一个仓库拆成多个镜像（monorepo）
+
+Hub 上的一个仓库可以按目录或按分支，拆成几个对外的仓库。每个镜像可以有一个"视图"，决定它从 Hub 同步哪些内容；没有视图的镜像同步全部内容。
+
+```bash
+# 按目录拆：services/api 目录的历史成为 acme/api 仓库（目录内容在新仓库的根目录），api-v1.0 标签推成 v1.0
+gr remote add acme/mono github --name api --subdir services/api --tag 'api-v*:v*'
+
+# 按分支拆：Hub 的 web 分支推成 acme/web 仓库的 main
+gr remote add acme/mono github --name web --branch web:main
+
+# 修改或去掉视图（下一次同步按新视图改写镜像）
+gr remote set acme/mono github:acme/api --branch main --tag 'api-v*:v*' --subdir services/api
+gr remote set acme/mono github:acme/web --all
+```
+
+- **按目录拆**：
+  - 镜像只包含改动过这个目录的提交，作者、时间、说明都保留，但提交是重新生成的，SHA 和 Hub 上不同。生成方式和 `git subtree split` 完全相同，同样的历史得到同样的提交，用 git subtree 手工拆分的结果也一样。
+  - 第一次同步要遍历整个历史；之后只处理新的提交。
+  - 不改动这个目录的 push，不会在这个镜像上产生新提交。
+  - 目录被删除时，镜像保持删除前的状态。
+- **按分支拆**：只推送列出的分支（可以改名，可以用 `*`），提交原样不变。不写 `--branch` 时同步全部分支。
+- **标签和 Release**：
+  - 标签用 `--tag` 选择并改名，例如 `api-v*:v*`。
+  - 不写 `--tag` 时，完整镜像同步全部标签；按目录拆或用 `--branch` 只选部分分支的镜像不同步标签，因为 monorepo 的标签通常只属于其中一部分。
+  - 按目录拆时，附注标签会改写为指向拆出的提交（原签名无法保留）。
+  - Release 跟着标签走：Hub 上发布 `api-v1.0`，只在得到这个标签的镜像上创建，名字是映射后的 `v1.0`。
+- **单向同步**：和所有镜像一样，内容只从 Hub 流向镜像。在拆出的仓库上直接提交，会被报告为分叉；按目录拆的镜像也无法把修改合并回 Hub。
+- **修改视图**：下一次同步会按新视图改写镜像。不再包含的分支和标签会被删除，变化的会被强制更新，原来的值备份在 Hub 的 `refs/backup/` 下。
+- 只包含部分内容的镜像不能用来导入或恢复 Hub。清除备份时，拆分结果会一并删除，下次同步时重新生成（结果不变）。
+- 控制台仓库页的镜像列表显示每个镜像的视图，"视图"按钮可以修改；添加镜像时也可以设置。
+
 ## 导入已有项目 / 从镜像恢复
 
 已经在 GitHub、GitLab 等平台上的项目，一条命令就能让 Gitrepo 成为它的 Hub：
@@ -403,7 +435,7 @@ gr target  add|update|list|rm|check      平台账号
 gr bind    ORG|'*' TARGET                新仓库的默认镜像
 gr binding list|rm
 gr repo    add|list|rm|import|set        （push 新地址也会自动建仓；import 从已有镜像导入或恢复；set 修改可见性）
-gr remote  add|list|adopt|pause|resume|set|rm  单个仓库的镜像
+gr remote  add|list|adopt|pause|resume|set|rm  单个仓库的镜像（--subdir、--branch、--tag 只同步部分内容）
 gr sync    ORG/NAME [--overwrite] [--remote ID]
 gr status  [ORG/NAME]
 gr runs    ORG/NAME
@@ -434,8 +466,8 @@ gr doctor                                部署自检：工具、public_url、�
 | GET/POST | `/api/repos` | 列出 / 登记仓库 |
 | GET/DELETE | `/api/repos/{org}/{name}` | 状态详情 / 注销（数据移入 trash） |
 | PATCH | `/api/repos/{org}/{name}` | 修改可见性 `{"visibility":"private"}`，同时修改跟随仓库的镜像，返回各镜像的结果 |
-| POST | `/api/repos/{org}/{name}/remotes` | 添加镜像 |
-| PATCH/DELETE | `/api/repos/{org}/{name}/remotes/{id}` | 暂停、恢复、改分叉策略或 URL / 移除 |
+| POST | `/api/repos/{org}/{name}/remotes` | 添加镜像；`"refs":["api:main","refs/tags/api-v*:refs/tags/v*"]`、`"subdir":"services/api"` 设置视图 |
+| PATCH/DELETE | `/api/repos/{org}/{name}/remotes/{id}` | 暂停、恢复、改分叉策略、URL 或视图 / 移除 |
 | POST | `/api/repos/{org}/{name}/sync` | 立即同步，`{"wait":true,"overwrite":false}` |
 | POST | `/api/repos/{org}/{name}/import` | 从已有镜像导入或恢复，`{"target":"github","force":false}` |
 | GET | `/api/repos/{org}/{name}/backups` | 列出备份 |

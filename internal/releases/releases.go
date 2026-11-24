@@ -32,7 +32,34 @@ import (
 	"github.com/qwq-inc/gitrepo/internal/registry"
 	"github.com/qwq-inc/gitrepo/internal/secrets"
 	"github.com/qwq-inc/gitrepo/internal/store"
+	"github.com/qwq-inc/gitrepo/internal/syncer"
 )
+
+// MirrorTag is the tag's name on rem, whose view (syncer.View) may rename
+// tags or leave them out; ok is false when rem does not get the tag, and
+// so gets no release for it either.
+func MirrorTag(rem *store.Remote, tag string) (string, bool) {
+	v, err := syncer.ViewOf(rem)
+	if err != nil {
+		return "", false
+	}
+	ref, ok := v.Map("refs/tags/" + tag)
+	if !ok {
+		return "", false
+	}
+	return strings.TrimPrefix(ref, "refs/tags/"), true
+}
+
+// withTag keeps the remotes that get the tag.
+func withTag(remotes []*store.Remote, tag string) []*store.Remote {
+	var out []*store.Remote
+	for _, r := range remotes {
+		if _, ok := MirrorTag(r, tag); ok {
+			out = append(out, r)
+		}
+	}
+	return out
+}
 
 // Manager stores release assets and publishes releases.
 type Manager struct {
@@ -150,7 +177,7 @@ func (m *Manager) EnqueueRepo(ctx context.Context, repoID int64) {
 			continue
 		}
 		states, err := m.Store.ListReleaseMirrors(ctx, r.ID)
-		if err == nil && needsWork(remotes, states) {
+		if err == nil && needsWork(withTag(remotes, r.Tag), states) {
 			m.Enqueue(r.ID)
 		}
 	}
@@ -407,6 +434,7 @@ func (m *Manager) Publish(ctx context.Context, releaseID int64, opts PublishOpti
 	if err != nil {
 		return nil, err
 	}
+	remotes = withTag(remotes, rel.Tag)
 	states, err := m.Store.ListReleaseMirrors(ctx, rel.ID)
 	if err != nil {
 		return nil, err
@@ -544,12 +572,29 @@ func (m *Manager) publishTo(parent context.Context, repo *store.Repo, rel *store
 	if tagObj == "" {
 		return save(store.RelFailed, "tag "+rel.Tag+" does not exist on the hub")
 	}
+	tagName, ok := MirrorTag(rem, rel.Tag)
+	if !ok {
+		return save(store.RelUnsupported, "this mirror's view does not include tag "+rel.Tag)
+	}
 	mirrorRefs, err := m.Store.GetRefState(parent, rem.ID)
 	if err != nil {
 		return save(store.RelFailed, err.Error())
 	}
-	if mirrorRefs["refs/tags/"+rel.Tag] != tagObj {
-		return save(store.RelWaiting, "waiting for the tag to be synced to this mirror")
+	if rem.Subdir == "" {
+		if mirrorRefs["refs/tags/"+tagName] != tagObj {
+			return save(store.RelWaiting, "waiting for the tag to be synced to this mirror")
+		}
+	} else {
+		// A directory split sends a rewritten tag: it is there once the
+		// mirror has what the last sync pushed.
+		pushed, err := m.Store.GetPushedState(parent, rem.ID)
+		if err != nil {
+			return save(store.RelFailed, err.Error())
+		}
+		if v := mirrorRefs["refs/tags/"+tagName]; v == "" || pushed["refs/tags/"+tagName] != v {
+			return save(store.RelWaiting, "waiting for the tag to be synced to this mirror")
+		}
+		commit = "" // the hub commit is not on this mirror
 	}
 
 	timeout := m.Timeout
@@ -563,9 +608,9 @@ func (m *Manager) publishTo(parent context.Context, repo *store.Repo, rel *store
 		return save(store.RelFailed, err.Error())
 	}
 	spec := provider.RepoSpec{Namespace: rem.Namespace, Name: rem.Name, Visibility: repo.Visibility}
-	want := provider.Release{Tag: rel.Tag, Name: rel.Name, Body: rel.Body, Prerelease: rel.Prerelease, Commit: commit}
+	want := provider.Release{Tag: tagName, Name: rel.Name, Body: rel.Body, Prerelease: rel.Prerelease, Commit: commit}
 
-	existing, err := rp.GetRelease(ctx, t, secret, spec, rel.Tag)
+	existing, err := rp.GetRelease(ctx, t, secret, spec, tagName)
 	if err != nil {
 		return save(store.RelFailed, err.Error())
 	}
@@ -578,7 +623,7 @@ func (m *Manager) publishTo(parent context.Context, repo *store.Repo, rel *store
 		rr, st.RemoteRelease, st.Creating, st.Adopted = existing, existing.Key, false, false
 		st.Assets = map[string]store.MirroredAsset{}
 	case existing != nil && !rel.Adopt:
-		return save(store.RelConflict, "a release for "+rel.Tag+" already exists on this mirror and was not created by Gitrepo; delete it there, or publish with adopt (admin) to take it over")
+		return save(store.RelConflict, "a release for "+tagName+" already exists on this mirror and was not created by Gitrepo; delete it there, or publish with adopt (admin) to take it over")
 	case existing != nil:
 		// Adopted: Gitrepo manages its own files there and never deletes
 		// the release or other people's files.
@@ -775,7 +820,11 @@ func (m *Manager) deleteOn(parent context.Context, repo *store.Repo, rel *store.
 		return "", err
 	}
 	spec := provider.RepoSpec{Namespace: rem.Namespace, Name: rem.Name, Visibility: repo.Visibility}
-	rr, err := rp.GetRelease(ctx, t, secret, spec, rel.Tag)
+	tagName, ok := MirrorTag(rem, rel.Tag)
+	if !ok {
+		tagName = rel.Tag // the view changed since: try the hub's name
+	}
+	rr, err := rp.GetRelease(ctx, t, secret, spec, tagName)
 	switch {
 	case err != nil:
 		return "", err
