@@ -394,6 +394,22 @@ ALTER TABLE tokens ADD COLUMN prev_last_used_at INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE tokens ADD COLUMN rotated_at INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX tokens_prev_hash ON tokens(prev_hash);
 `,
+	// 17: accounts: a user name and password for the console and for git
+	// over HTTPS. The first one is created with the bootstrap admin token.
+	`
+CREATE TABLE users (
+  id                  INTEGER PRIMARY KEY,
+  username            TEXT    NOT NULL UNIQUE,
+  password_hash       TEXT    NOT NULL,
+  scopes              TEXT    NOT NULL,
+  repos               TEXT    NOT NULL DEFAULT '',
+  disabled            INTEGER NOT NULL DEFAULT 0,
+  created_at          INTEGER NOT NULL,
+  updated_at          INTEGER NOT NULL,
+  password_changed_at INTEGER NOT NULL,
+  last_login_at       INTEGER NOT NULL DEFAULT 0
+);
+`,
 }
 
 func (s *Store) migrate(ctx context.Context) error {

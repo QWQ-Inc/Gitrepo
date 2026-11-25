@@ -211,7 +211,8 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*Server, error) {
 	} else {
 		log.Warn("no admin token configured; the API is only usable with tokens created earlier", "env", cfg.AdminTokenEnv)
 	}
-	s.auth = &auth.Authenticator{Store: st, AdminHash: adminHash}
+	s.auth = &auth.Authenticator{Store: st, AdminHash: adminHash, Limiter: &auth.Limiter{},
+		ClientAddr: func(r *http.Request) string { return gitserve.ClientAddr(r, cfg.TrustedProxyPrefixes()) }}
 	s.gitsrv = &gitserve.Server{
 		Store: st, Registry: s.reg, Auth: s.auth, Log: log,
 		GitBin:          cfg.Git.Binary,
@@ -414,6 +415,7 @@ func (s *Server) Handler() http.Handler {
 	s.registerReleaseAPI(mux)
 	s.registerEdgeAPI(mux)
 	s.registerSSO(mux)
+	s.registerUserAPI(mux)
 	mux.Handle("GET /ui/", webui.Handler("/ui/"))
 	mux.Handle("GET /ui", http.RedirectHandler("/ui/", http.StatusFound))
 	mux.Handle("GET /{$}", http.RedirectHandler("/ui/", http.StatusFound))

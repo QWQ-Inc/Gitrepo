@@ -66,6 +66,10 @@ func (s *Server) registerAPI(mux *http.ServeMux) {
 func (s *Server) requireAdmin(fn http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		p, err := s.auth.FromRequest(r)
+		if errors.Is(err, auth.ErrLocked) {
+			writeErr(w, http.StatusTooManyRequests, err)
+			return
+		}
 		if err != nil || p == nil {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="gitrepo"`)
 			writeErr(w, http.StatusUnauthorized, errors.New("admin token required"))

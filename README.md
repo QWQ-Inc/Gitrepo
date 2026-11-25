@@ -57,7 +57,7 @@ docker run -d --name gitrepo -p 8080:8080 -p 2222:2222 -v gitrepo-data:/data \
 | 项目 | 设置 | 不设置会怎样 |
 |---|---|---|
 | `GITREPO_SECRET_KEY` | `gitrepo keygen` 或 `openssl rand -base64 32` 的输出，另外备份一份 | 启动失败：`no secret key: set GITREPO_SECRET_KEY` |
-| `GITREPO_ADMIN_TOKEN` | 一个长随机串，如 `openssl rand -hex 24` | 能启动，但新实例没有任何令牌，登录不了控制台，也用不了 `gr` |
+| `GITREPO_ADMIN_TOKEN` | 一个长随机串，如 `openssl rand -hex 24` | 能启动，但没法创建第一个账号，忘记密码时也没法找回 |
 | `GITREPO_PUBLIC_URL` | 对外地址，如 `https://git.example.com` | 控制台上的克隆地址和 LFS 链接指向 `http://localhost:8080` |
 | 数据盘 | 挂到 `/data`，只能单副本 | 仓库和数据库都在容器里，重启或重新部署后全部丢失 |
 | 端口 | HTTP 8080；用 SSH 时另开 2222，并设 `GITREPO_SSH_LISTEN=:2222` | 平台不知道把流量转到哪个端口 |
@@ -67,7 +67,7 @@ docker run -d --name gitrepo -p 8080:8080 -p 2222:2222 -v gitrepo-data:/data \
 
 运行时依赖系统 `git`（≥ 2.31）；仓库用到 Git LFS 时还需要 `git-lfs`（Docker 镜像已自带）。生产环境请放在 TLS 反向代理后面。
 
-打开 `https://git.example.com/` 进入 Web 控制台，用管理令牌登录，之后的第 2～5 步都可以在控制台里完成。下面以 CLI 为例。
+打开 `https://git.example.com/` 进入 Web 控制台。第一次打开时，用管理令牌（`GITREPO_ADMIN_TOKEN`）证明身份，创建第一个账号，它就是管理员，以后用用户名和密码登录，见[账户](#账户用户名和密码)。之后的第 2～5 步都可以在控制台里完成。下面以 CLI 为例。
 
 控制台支持浅色、深色和跟随系统（侧边栏底部切换），手机上也能用。它不加载任何外部资源，字体也打包在程序里，所以在内网或访问不了境外 CDN 的环境里显示效果一样。
 
@@ -471,6 +471,39 @@ gr token rotate laptop            # 泄露了：不给宽限，旧值立即失�
 
 注意：备份（`refs/backup/*`）不会出现在 clone、ls-remote、源码包和 bundle 里，但它们引用的对象仍在 Hub 仓库中。有读权限、又知道 SHA 的人可以通过协议 v2 按 SHA 取回这些对象，这和 GitHub 上悬空提交的情况一样。敏感内容请用 `gr backup purge` 彻底清除，见[备份与清除](#备份与清除)。
 
+## 账户（用户名和密码）
+
+控制台用用户名和密码登录，不必每次输入管理令牌。
+
+- **第一个账号**：
+  - 第一次打开控制台时，登录页会要求输入管理令牌（`GITREPO_ADMIN_TOKEN`），然后创建第一个账号。
+  - 它是管理员，以后用它登录。
+  - 只要还没有任何账号，就可以这样创建；有了账号以后，这个入口就关闭了。
+- **忘记密码**：在登录页点"忘记密码"，用管理令牌给账号设置新密码，这个账号已经登录的地方都会退出。管理员也可以在"账户"页面，或用 `gr user passwd NAME`，给别人设置密码。
+- **其他账号**：
+  - 在"账户"页面或用 `gr user add` 添加。
+  - 可以是管理员，也可以只有 `read`、`write`、`create` 权限并限定仓库范围，和访问令牌一样。
+  - 没有管理权限的账号登录控制台后，只能修改自己的密码，主要用于 git。
+- **当作 git 凭据**：
+  - HTTPS 的用户名填账号名，密码填登录密码：`git clone https://alice@git.example.com/acme/app.git`。
+  - 但密码能做这个账号的所有事情，不能按机器限制，泄露后也只能整体改密码。CI、服务器、部署平台请用[访问令牌](#访问控制)或 SSH 密钥。
+  - 边缘节点只认令牌和 SSH 密钥，不认账号密码。
+- **安全**：
+  - 密码用 bcrypt 保存，至少 8 个字符。
+  - 同一个账号连续输错 5 次，或同一个地址输错 20 次，会被暂时锁定：从 1 分钟开始，每次翻倍，最长 15 分钟。用户名不存在时，耗时也和密码错误一样，不会暴露哪些账号存在。
+  - 修改密码、修改权限、停用或删除账号，都会让这个账号已经登录的地方退出。
+  - 最后一个启用的管理员账号不能删除、停用或降级。
+- **审计**：登录（包括失败的）、创建、重置、修改都记入审计日志，操作者为 `user:<账号名>`，用密码做的 push 也一样。
+- **管理令牌**：管理令牌仍然可以登录（登录页的"使用访问令牌登录"），`gr` 也继续用它或其他 admin 令牌。
+
+```bash
+gr user add alice --admin --password-env ALICE_PW
+printf '%s\n' "$PW" | gr user add reader --scopes read --repos 'acme/*' --password-stdin
+gr user list
+gr user passwd alice --password-env NEW_PW
+gr user set reader --disable
+```
+
 ## 登录方式（StackEnigma / OIDC）
 
 除了管理令牌，控制台还可以用 StackEnigma 或任何 OpenID Connect / OAuth 2.0 账号登录。添加后，登录页会出现"使用 StackEnigma 登录"这样的按钮。
@@ -539,6 +572,7 @@ gr remote  add|list|adopt|pause|resume|set|rm  单个仓库的镜像（--subdir�
 gr sync    ORG/NAME [--overwrite] [--remote ID]
 gr status  [ORG/NAME]
 gr runs    ORG/NAME
+gr user    add|list|set|passwd|rm      账户：用户名和密码，登录控制台，也可以做 git 凭据
 gr token   create|list|rotate|end-grace|rm
 gr key     add|list|rm                   SSH 公钥
 gr ssh                                   SSH 地址与主机指纹
@@ -585,6 +619,11 @@ gr deploy  add|set|list|trigger|rm       部署钩子：分支有新提交时通
 | POST | `/api/repos/{org}/{name}/releases/{tag}/publish` | 发布或重新发布，`{"wait":true,"adopt":false,"force":false}` |
 | PUT/GET/DELETE | `/api/repos/{org}/{name}/releases/{tag}/assets/{file}` | 上传（请求体即文件内容）/ 下载 / 删除附件 |
 | GET/POST | `/api/tokens`，DELETE `/api/tokens/{id}` | 客户端 token |
+| GET | `/api/auth/status`（无需令牌） | 是否还没有账号（需要创建第一个） |
+| POST | `/api/auth/setup`、`/api/auth/login`、`/api/auth/reset`（无需令牌） | 用管理令牌创建第一个账号 / 用户名密码登录，返回会话 / 用管理令牌重置密码 |
+| GET | `/api/me`，POST `/api/me/password` | 当前身份 / 修改自己的密码（任何登录的账号） |
+| GET/POST | `/api/users` | 账户，`{"username":"alice","password":"…","admin":true}` 或 `"scopes":["read"],"repos":["acme/*"]` |
+| PATCH/DELETE | `/api/users/{name}`，POST `/api/users/{name}/password` | 修改权限、停用 / 删除 / 设置密码 |
 | POST | `/api/tokens/{id}/rotate` | 轮换，`{"grace":"24h"}`（可选，最长 30d），返回新值 |
 | DELETE | `/api/tokens/{id}/previous` | 提前作废轮换前的旧值 |
 | GET/POST | `/api/webhooks`，PATCH/DELETE `/api/webhooks/{id}` | 出站通知 |

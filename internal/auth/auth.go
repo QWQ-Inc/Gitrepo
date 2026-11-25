@@ -69,8 +69,11 @@ type Principal struct {
 	Scopes []string
 	// Repos are slug patterns ("org/name", "org/*", "*"). Empty means all.
 	Repos []string
-	// SessionID is set for a console session from an identity provider.
+	// SessionID is set for a console session (an identity provider or a
+	// password sign-in).
 	SessionID int64
+	// UserID is set for an account (a password, or a session of one).
+	UserID int64
 }
 
 // Admin returns the bootstrap administrator principal.

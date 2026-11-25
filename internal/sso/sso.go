@@ -144,6 +144,9 @@ func Normalize(p *store.OIDCProvider) error {
 	if !nameRE.MatchString(p.Name) {
 		return fmt.Errorf("invalid name %q: use lowercase letters, digits and dashes (it appears in the callback URL)", p.Name)
 	}
+	if p.Name == store.LocalProvider {
+		return fmt.Errorf("%q is reserved for password sign-ins", p.Name)
+	}
 	if p.Kind == "" {
 		p.Kind = KindOIDC
 	}

@@ -7,6 +7,8 @@
 
 const TOKEN_KEY = 'gitrepo.token';
 let token = sessionStorage.getItem(TOKEN_KEY) || '';
+// Who is signed in (GET /api/me), loaded on the first render.
+let me = null;
 const app = document.getElementById('app');
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -335,6 +337,8 @@ const routes = [
   [/^#\/protect$/, viewProtect],
   [/^#\/tokens$/, viewTokens],
   [/^#\/sso$/, viewSSO],
+  [/^#\/users$/, viewUsers],
+  [/^#\/account$/, viewAccount],
   [/^#\/webhooks$/, viewWebhooks],
   [/^#\/audit(?:\?.*)?$/, viewAudit],
 ];
@@ -348,6 +352,17 @@ async function render() {
   if (location.hash.startsWith('#/login')) {
     history.replaceState(null, '', location.pathname + '#/');
   }
+  if (!me) {
+    try {
+      me = await api('GET', '/api/me');
+    } catch (e) {
+      return; // signed out by api()
+    }
+  }
+  fill(document.getElementById('whoami'), h('a', { href: '#/account', title: '我的账户' }, me.username || me.name));
+  // An account without admin rights only manages itself (and uses git).
+  document.body.classList.toggle('limited', !me.admin);
+  if (!me.admin) return viewAccount();
   const hash = location.hash || '#/';
   for (const a of document.querySelectorAll('#nav .nav-link')) {
     const target = a.getAttribute('href');
@@ -376,7 +391,10 @@ function logout() {
     fetch('/api/sso/logout', { method: 'POST', headers: { Authorization: 'Bearer ' + token } }).catch(() => {});
   }
   token = '';
+  me = null;
+  loginMode = null;
   sessionStorage.removeItem(TOKEN_KEY);
+  document.body.classList.remove('limited');
   render();
 }
 
@@ -426,41 +444,158 @@ function ssoButton(m) {
     icon(m.kind === 'stackenigma' ? 'stack' : 'login'), '使用 ' + m.display_name + ' 登录');
 }
 
-function viewLogin() {
-  const input = h('input', { type: 'password', name: 'token', autocomplete: 'current-password', placeholder: 'GITREPO_ADMIN_TOKEN 或 admin 令牌', required: true });
-  const err = h('p', { class: 'error-text', hidden: true });
+// The sign-in page has four forms: user name and password (the usual one),
+// creating the first account with the bootstrap admin token, resetting a
+// forgotten password with that token, and signing in with a token.
+let loginMode = null;
+let loginUser = '';
+
+async function anonPost(path, body) {
+  const res = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const text = await res.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch (_) { /* not JSON */ }
+  if (!res.ok) {
+    const e = new Error((data && data.error) || text || res.statusText);
+    e.status = res.status;
+    throw e;
+  }
+  return data;
+}
+
+function signIn(tok) {
+  token = tok;
+  me = null;
+  loginMode = null;
+  sessionStorage.setItem(TOKEN_KEY, token);
+  history.replaceState(null, '', location.pathname + '#/');
+  render();
+}
+
+function loginSwitch(mode, text) {
+  return h('button', { class: 'link-button', type: 'button', onclick: () => { loginMode = mode; render(); } }, text);
+}
+
+function passwordPair(label) {
+  const pw = h('input', { type: 'password', name: 'password', autocomplete: 'new-password', required: true, minlength: 8, maxlength: 72 });
+  const again = h('input', { type: 'password', name: 'again', autocomplete: 'new-password', required: true });
+  return [field(label, pw, null, '至少 8 个字符'), field('再输一次', again)];
+}
+
+function checkPair(d) {
+  if (d.password !== d.again) throw new Error('两次输入的密码不一样');
+}
+
+const AUTH_ERRORS = { 401: '用户名或密码错误', 429: '失败次数太多，请过几分钟再试' };
+
+async function viewLogin() {
+  let status = { needs_setup: false, admin_token: true };
+  try {
+    const r = await fetch('/api/auth/status');
+    if (r.ok) status = await r.json();
+  } catch (_) { /* offline: show the sign-in form */ }
+  const mode = loginMode || (status.needs_setup ? 'setup' : 'login');
   const q = new URLSearchParams(location.hash.split('?')[1] || '');
-  const ssoErr = q.get('error') ? h('div', { class: 'notice notice-danger login-notice', role: 'alert' }, '登录失败：' + q.get('error')) : null;
-  const ssoBox = h('div', { class: 'sso-buttons', hidden: true });
-  fetch('/api/sso/methods').then((r) => (r.ok ? r.json() : [])).then((methods) => {
-    if (!methods || !methods.length) return;
-    fill(ssoBox, methods.map(ssoButton), h('div', { class: 'login-or' }, h('span', {}, '或使用管理令牌')));
-    ssoBox.hidden = false;
-  }).catch(() => {});
-  const form = h('form', { class: 'card login-card', onsubmit: action(async (ev) => {
-    token = input.value.trim();
-    try {
-      await api('GET', '/api/status', undefined, { noLogout: true });
-    } catch (e) {
-      token = '';
-      err.textContent = e.message;
-      err.hidden = false;
+  const err = h('p', { class: 'error-text', hidden: true });
+  const fail = (e) => { err.textContent = e.message; err.hidden = false; return false; };
+  let card;
+
+  if (mode === 'setup') {
+    card = h('form', { class: 'card login-card', onsubmit: action(async (ev) => {
+      const d = formData(ev.target);
+      try {
+        checkPair(d);
+        const res = await anonPost('/api/auth/setup', { admin_token: d.admin_token, username: d.username, password: d.password });
+        signIn(res.token);
+        return '管理员账号已创建';
+      } catch (e) {
+        if (e.status === 401) e.message = '管理令牌不对';
+        return fail(e);
+      }
+    }) },
+    h('h1', {}, '创建管理员账号'),
+    h('p', { class: 'hint' }, '首次使用：先用部署时设置的管理令牌（GITREPO_ADMIN_TOKEN）证明身份，再创建第一个账号。它就是管理员，以后用账号密码登录；忘记密码时，用管理令牌重置。'),
+    status.admin_token ? null : h('div', { class: 'notice notice-danger login-notice' }, '服务端没有设置 GITREPO_ADMIN_TOKEN。请设置后重启，再回到这里。'),
+    field('管理令牌', h('input', { type: 'password', name: 'admin_token', required: true, autocomplete: 'off', placeholder: 'GITREPO_ADMIN_TOKEN' })),
+    field('用户名', h('input', { name: 'username', required: true, autocomplete: 'username', pattern: '[A-Za-z0-9][A-Za-z0-9._\\-]{0,38}', placeholder: 'admin 以外的名字' })),
+    passwordPair('密码'), err,
+    h('button', { class: 'btn btn-primary', type: 'submit' }, '创建并登录'),
+    h('div', { class: 'login-links' }, status.needs_setup ? null : loginSwitch('login', '已有账号，去登录'), loginSwitch('token', '使用访问令牌登录')));
+  } else if (mode === 'reset') {
+    card = h('form', { class: 'card login-card', onsubmit: action(async (ev) => {
+      const d = formData(ev.target);
+      try {
+        checkPair(d);
+        await anonPost('/api/auth/reset', { admin_token: d.admin_token, username: d.username, password: d.password });
+      } catch (e) {
+        if (e.status === 401) e.message = '管理令牌不对';
+        if (e.status === 404) e.message = '没有这个账号';
+        return fail(e);
+      }
+      loginMode = 'login';
+      loginUser = d.username;
+      render();
+      return '密码已重置，请用新密码登录';
+    }) },
+    h('h1', {}, '重置密码'),
+    h('p', { class: 'hint' }, '用部署时设置的管理令牌（GITREPO_ADMIN_TOKEN）证明身份，给账号设置新密码。这个账号已经登录的地方都会退出。'),
+    field('管理令牌', h('input', { type: 'password', name: 'admin_token', required: true, autocomplete: 'off', placeholder: 'GITREPO_ADMIN_TOKEN' })),
+    field('用户名', h('input', { name: 'username', required: true, autocomplete: 'username', value: loginUser })),
+    passwordPair('新密码'), err,
+    h('button', { class: 'btn btn-primary', type: 'submit' }, '重置密码'),
+    h('div', { class: 'login-links' }, loginSwitch('login', '返回登录')));
+  } else if (mode === 'token') {
+    const input = h('input', { type: 'password', name: 'token', autocomplete: 'off', placeholder: 'GITREPO_ADMIN_TOKEN 或 grp_… 令牌', required: true });
+    card = h('form', { class: 'card login-card', onsubmit: action(async () => {
+      token = input.value.trim();
+      try {
+        await api('GET', '/api/me', undefined, { noLogout: true });
+      } catch (e) {
+        token = '';
+        return fail(e);
+      }
+      signIn(token);
       return false;
-    }
-    sessionStorage.setItem(TOKEN_KEY, token);
-    render();
-    return false;
-  }) },
-  h('h1', {}, '登录'),
-  h('p', { class: 'hint' }, '使用部署时设置的管理令牌（GITREPO_ADMIN_TOKEN），或具有 admin 权限的令牌。令牌只保存在当前标签页。'),
-  ssoErr, ssoBox,
-  field('管理令牌', input), err,
-  h('button', { class: 'btn btn-primary', type: 'submit' }, '登录'));
+    }) },
+    h('h1', {}, '使用访问令牌登录'),
+    h('p', { class: 'hint' }, '部署时设置的管理令牌（GITREPO_ADMIN_TOKEN），或具有 admin 权限的访问令牌。令牌只保存在当前标签页。'),
+    field('令牌', input), err,
+    h('button', { class: 'btn btn-primary', type: 'submit' }, '登录'),
+    h('div', { class: 'login-links' }, loginSwitch(status.needs_setup ? 'setup' : 'login', '返回')));
+  } else {
+    const ssoErr = q.get('error') ? h('div', { class: 'notice notice-danger login-notice', role: 'alert' }, '登录失败：' + q.get('error')) : null;
+    const ssoBox = h('div', { class: 'sso-buttons', hidden: true });
+    fetch('/api/sso/methods').then((r) => (r.ok ? r.json() : [])).then((methods) => {
+      if (!methods || !methods.length) return;
+      fill(ssoBox, h('div', { class: 'login-or' }, h('span', {}, '或者')), methods.map(ssoButton));
+      ssoBox.hidden = false;
+    }).catch(() => {});
+    card = h('form', { class: 'card login-card', onsubmit: action(async (ev) => {
+      const d = formData(ev.target);
+      try {
+        const res = await anonPost('/api/auth/login', { username: d.username, password: d.password });
+        loginUser = '';
+        signIn(res.token);
+      } catch (e) {
+        if (AUTH_ERRORS[e.status]) e.message = AUTH_ERRORS[e.status];
+        return fail(e);
+      }
+      return false;
+    }) },
+    h('h1', {}, '登录'),
+    ssoErr,
+    field('用户名', h('input', { name: 'username', required: true, autocomplete: 'username', value: loginUser })),
+    field('密码', h('input', { type: 'password', name: 'password', required: true, autocomplete: 'current-password' })), err,
+    h('button', { class: 'btn btn-primary', type: 'submit' }, '登录'),
+    ssoBox,
+    h('div', { class: 'login-links' }, loginSwitch('reset', '忘记密码'), loginSwitch('token', '使用访问令牌登录')));
+  }
   fill(app, h('div', { class: 'login' },
     h('div', { class: 'login-brand' }, brandMark(), 'Gitrepo'),
-    form,
+    card,
     h('p', { class: 'faint login-foot' }, '一个地址 push，同步到 GitHub、GitLab、Gitea、Gitee 和任意 Git 服务器。')));
-  input.focus();
+  const first = [...card.querySelectorAll('input')].find((i) => !i.value);
+  if (first) first.focus();
 }
 
 // -------------------------------------------------------------------- repos
@@ -1241,15 +1376,16 @@ async function viewTokens() {
     },
   });
   const sshSection = sshInfo.enabled
-    ? section('SSH 公钥', [addButton('添加公钥', addKey, false)],
+    ? section('SSH 密钥', [addButton('添加公钥', addKey, false)],
       h('div', { class: 'card card-pad' }, h('dl', { class: 'kv' },
         h('dt', {}, '地址示例'), h('dd', {}, copyable(sshInfo.example_url)),
         h('dt', {}, '主机指纹'), h('dd', {}, h('code', {}, sshInfo.fingerprint), h('span', { class: 'faint' }, '  首次连接时请核对')))),
       table(['名称', '类型', '指纹', '权限', '仓库范围', '上次使用', ''], keyRows, '还没有公钥。'))
-    : section('SSH 公钥', null, h('div', { class: 'empty' }, 'SSH 未启用。在服务端设置 ssh.listen（或环境变量 GITREPO_SSH_LISTEN，例如 :2222）后即可通过 SSH push 和 clone。'));
+    : section('SSH 密钥', null, h('div', { class: 'empty' }, 'SSH 未启用。在服务端设置 ssh.listen（或环境变量 GITREPO_SSH_LISTEN，例如 :2222）后即可通过 SSH push 和 clone。'));
 
   fill(app, 
-    pageHead('访问令牌', '给开发者、CI 和部署平台使用。只保存哈希；丢失或泄露时可以轮换，名称、权限和仓库范围不变。部署时设置的管理令牌（GITREPO_ADMIN_TOKEN）不在这里，改环境变量后重启即可轮换。', [addButton('创建令牌', createToken)]),
+    pageHead('访问令牌', 'git 和 API 的凭据，分 HTTP 访问令牌和 SSH 密钥。账户的用户名和密码也能用于 git，但不能按用途限制权限，安全性不如令牌，CI、服务器请用令牌。部署时设置的管理令牌（GITREPO_ADMIN_TOKEN）不在这里，改环境变量后重启即可轮换。', [addButton('创建令牌', createToken)]),
+    h('h2', { class: 'subhead' }, 'HTTP 访问令牌'),
     table(['名称', '权限', '仓库范围', '上次使用', ''], rows,
       [h('div', { class: 'empty-title' }, '还没有令牌'), h('div', {}, '创建一个 create 权限的令牌，作为 git 的 HTTPS 密码即可 push。'), addButton('创建令牌', createToken)]),
     sshSection);
@@ -1266,6 +1402,118 @@ const EVENTS = [
   ['credential.expiring', 'credential.expiring：凭据将过期'],
 ];
 const FORMAT_LABEL = { json: 'JSON', wecom: '企业微信', feishu: '飞书', dingtalk: '钉钉', slack: 'Slack' };
+
+// ---------------------------------------------------------------- accounts
+
+const SCOPE_LABEL = { read: 'read：clone / fetch', write: 'write：另外可以 push', create: 'create：另外可以 push 新地址建仓' };
+
+function accountScopes(u) {
+  return h('div', { class: 'rowflex' }, u.admin ? h('span', { class: 'badge badge-warn' }, '管理员')
+    : u.scopes.map((x) => h('span', { class: 'badge' }, x)));
+}
+
+function userModal(u) {
+  const editing = Boolean(u);
+  const role = select('role', [['admin', '管理员：控制台和全部 API'], ['create', SCOPE_LABEL.create], ['write', SCOPE_LABEL.write], ['read', SCOPE_LABEL.read]],
+    editing ? (u.admin ? 'admin' : u.scopes[u.scopes.length - 1]) : 'create');
+  formModal({
+    title: editing ? '编辑账户：' + u.username : '添加账户', submitText: editing ? '保存' : '添加', wide: true,
+    intro: editing ? '修改后，这个账户已经登录的地方都会退出。' : '账户用用户名和密码登录控制台（管理员），也可以作为 git 的 HTTPS 凭据。只给 CI 或服务器用的话，访问令牌更合适。',
+    fields: [
+      field('用户名', h('input', { name: 'username', required: true, value: editing ? u.username : '', readonly: editing, pattern: '[A-Za-z0-9][A-Za-z0-9._\\-]{0,38}' })),
+      field('权限', role),
+      field('仓库范围（可选）', h('input', { name: 'repos', value: editing ? (u.repos || []).join(', ') : '', placeholder: 'acme/*, tools/cli' }), 'wide', '默认全部；管理员总是全部'),
+      editing ? null : passwordPair('初始密码'),
+    ],
+    submit: async (d) => {
+      const body = d.role === 'admin' ? { admin: true } : { admin: false, scopes: [d.role], repos: list(d.repos) };
+      if (editing) {
+        await api('PATCH', '/api/users/' + enc(u.username), body);
+      } else {
+        checkPair(d);
+        await api('POST', '/api/users', Object.assign(body, { username: d.username, password: d.password }));
+      }
+      rerender();
+      return editing ? '已保存' : '已添加';
+    },
+  });
+}
+
+async function viewUsers() {
+  const users = await api('GET', '/api/users');
+  const rows = users.map((u) => {
+    const path = '/api/users/' + enc(u.username);
+    const self = me && me.username === u.username;
+    return h('tr', {},
+      h('td', {}, h('div', { class: 'cell-title' }, u.username, self ? h('span', { class: 'faint' }, '（我）') : null),
+        h('div', { class: 'cell-sub' }, '创建于 ' + fmtDay(u.created_at))),
+      h('td', {}, accountScopes(u)),
+      h('td', {}, u.admin ? h('span', { class: 'faint' }, '全部') : (u.repos || []).join(', ') || h('span', { class: 'faint' }, '全部')),
+      h('td', {}, u.disabled ? badge('paused', '停用') : badge('synced', '启用')),
+      h('td', { class: 'nowrap' }, ago(u.last_login_at)),
+      h('td', { class: 'actions' },
+        self ? h('a', { class: 'btn btn-sm', href: '#/account' }, '修改密码')
+          : h('button', { class: 'btn btn-sm', type: 'button', onclick: () => formModal({
+            title: '设置密码：' + u.username, submitText: '设置',
+            intro: '为这个账户设置新密码，它已经登录的地方都会退出。',
+            fields: passwordPair('新密码'),
+            submit: async (d) => {
+              checkPair(d);
+              await api('POST', path + '/password', { password: d.password });
+              return '密码已设置';
+            },
+          }) }, '设置密码'),
+        h('button', { class: 'btn btn-sm', type: 'button', onclick: () => userModal(u) }, '编辑'),
+        self ? null : h('button', { class: 'btn btn-sm', type: 'button', onclick: action(async () => {
+          await api('PATCH', path, { disabled: !u.disabled });
+          rerender();
+        }, u.disabled ? '已启用' : '已停用') }, u.disabled ? '启用' : '停用'),
+        self ? null : h('button', { class: 'btn btn-sm btn-danger-soft', type: 'button', onclick: action(async () => {
+          if (!(await confirmDialog({ title: '删除账户', message: `删除账户 ${u.username}？它已经登录的地方都会退出，用它的密码做 git 凭据的地方也会失效。`, ok: '删除', danger: true }))) return false;
+          await api('DELETE', path);
+          rerender();
+        }, '已删除') }, '删除')));
+  });
+  fill(app,
+    pageHead('账户', '用户名和密码登录控制台，也可以作为 git 的 HTTPS 凭据。第一个账号用管理令牌（GITREPO_ADMIN_TOKEN）创建，是管理员；忘记密码时，在登录页用管理令牌重置。', [addButton('添加账户', () => userModal())]),
+    table(['账户', '权限', '仓库范围', '状态', '上次登录', ''], rows,
+      [h('div', { class: 'empty-title' }, '还没有账户'), h('div', {}, '退出登录后，登录页会引导你用管理令牌创建第一个账户。'), addButton('添加账户', () => userModal())]));
+}
+
+async function viewAccount() {
+  const host = location.host;
+  const gitHint = h('div', { class: 'card card-pad' },
+    h('p', {}, '账号密码也可以当作 git 的 HTTPS 凭据：用户名填账户名，密码填登录密码。'),
+    h('code', {}, `git clone https://${me.username || '<用户名>'}@${host}/acme/demo.git`),
+    h('p', { class: 'hint' }, '密码能做这个账户的所有事情，不能按机器限制，也不方便单独轮换。CI、服务器请用访问令牌（管理员在“访问令牌”页面创建），或者 SSH 密钥。'));
+  if (me.kind !== 'user') {
+    fill(app, pageHead('我的账户', null),
+      h('div', { class: 'card card-pad' }, h('p', {}, `当前通过${me.kind === 'sso' ? '登录方式（' + me.name + '）' : '访问令牌（' + me.name + '）'}登录，没有密码。`),
+        me.admin ? h('p', { class: 'hint' }, h('a', { href: '#/users' }, '账户'), ' 页面可以创建用户名和密码登录的账户。') : null));
+    return;
+  }
+  const form = h('form', { class: 'card card-pad form-grid', onsubmit: action(async (ev) => {
+    const d = formData(ev.target);
+    checkPair(d);
+    const res = await api('POST', '/api/me/password', { current: d.current, password: d.password }, { noLogout: true });
+    // Every session ended; this tab continues with the new one.
+    token = res.token;
+    sessionStorage.setItem(TOKEN_KEY, token);
+    ev.target.reset();
+    return '密码已修改，其他地方的登录已退出';
+  }) },
+  field('当前密码', h('input', { type: 'password', name: 'current', required: true, autocomplete: 'current-password' }), 'wide'),
+  passwordPair('新密码'),
+  h('div', { class: 'wide' }, h('button', { class: 'btn btn-primary', type: 'submit' }, '修改密码')));
+  fill(app,
+    pageHead('我的账户', me.admin ? '管理员账户。' : '这个账户没有管理权限：可以修改自己的密码，并用于 git。'),
+    h('div', { class: 'card card-pad' }, h('dl', { class: 'kv' },
+      h('dt', {}, '用户名'), h('dd', {}, h('code', {}, me.username)),
+      h('dt', {}, '权限'), h('dd', {}, accountScopes(me)),
+      me.admin ? null : [h('dt', {}, '仓库范围'), h('dd', {}, (me.repos || []).join(', ') || '全部')])),
+    section('修改密码', null, form),
+    section('用于 git', null, gitHint));
+}
 
 // --------------------------------------------------------------- sign-in
 
@@ -1375,7 +1623,7 @@ async function viewSSO() {
         rerender();
       }, '已删除') }, '删除'))));
   const sessionRows = sessions.map((x) => h('tr', {},
-    h('td', {}, h('div', { class: 'cell-title' }, x.email || x.name), h('div', { class: 'cell-sub' }, x.provider, x.current ? ' · 当前会话' : '')),
+    h('td', {}, h('div', { class: 'cell-title' }, x.email || x.name.replace(/^user:/, '')), h('div', { class: 'cell-sub' }, x.provider === 'local' ? '账号密码' : x.provider, x.current ? ' · 当前会话' : '')),
     h('td', { class: 'nowrap', title: fmtDate(x.created_at) }, ago(x.created_at)),
     h('td', { class: 'nowrap', title: fmtDate(x.last_used_at) }, ago(x.last_used_at)),
     h('td', { class: 'nowrap' }, fmtDate(x.expires_at)),
@@ -1388,7 +1636,7 @@ async function viewSSO() {
     pageHead('登录方式', '让管理员用 StackEnigma 或其他 OpenID Connect / OAuth 2.0 账号登录控制台，不再共用管理令牌。部署时设置的管理令牌始终可以登录。', [addButton('添加登录方式', () => ssoModal())]),
     table(['登录方式', '端点', '允许登录', '状态', ''], rows,
       [h('div', { class: 'empty-title' }, '还没有登录方式'), h('div', {}, '添加 StackEnigma 或任何 OpenID Connect 提供方后，登录页会出现对应的按钮。'), addButton('添加登录方式', () => ssoModal())]),
-    section('当前登录的会话', null, table(['谁', '登录于', '最近使用', '到期', ''], sessionRows, '没有通过登录方式登录的会话。')));
+    section('当前登录的会话', null, table(['谁', '登录于', '最近使用', '到期', ''], sessionRows, '没有通过账号密码或登录方式登录的会话。')));
 }
 
 async function viewWebhooks() {
