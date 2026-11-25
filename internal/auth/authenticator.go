@@ -72,6 +72,10 @@ func (a *Authenticator) FromToken(ctx context.Context, tok string) (*Principal, 
 		}
 		return nil, err
 	}
-	_ = a.Store.TouchToken(ctx, t.ID)
+	if t.Hash == h {
+		_ = a.Store.TouchToken(ctx, t.ID)
+	} else {
+		_ = a.Store.TouchTokenPrev(ctx, t.ID) // the value before a rotation
+	}
 	return &Principal{Name: t.Name, Scopes: t.Scopes, Repos: t.Repos}, nil
 }

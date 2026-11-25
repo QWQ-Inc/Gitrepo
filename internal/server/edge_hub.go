@@ -111,6 +111,10 @@ type EdgeToken struct {
 	Hash   string   `json:"hash"`
 	Scopes []string `json:"scopes"`
 	Repos  []string `json:"repos,omitempty"`
+	// The value before a rotation and until when it works (ms); edges
+	// enforce the deadline themselves.
+	PrevHash      string `json:"prev_hash,omitempty"`
+	PrevExpiresAt int64  `json:"prev_expires_at,omitempty"`
 }
 
 type EdgeKey struct {
@@ -179,7 +183,11 @@ func (s *Server) apiEdgeState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, t := range tokens {
-		st.Tokens = append(st.Tokens, EdgeToken{Name: t.Name, Hash: t.Hash, Scopes: t.Scopes, Repos: t.Repos})
+		et := EdgeToken{Name: t.Name, Hash: t.Hash, Scopes: t.Scopes, Repos: t.Repos}
+		if t.PrevActive() {
+			et.PrevHash, et.PrevExpiresAt = t.PrevHash, t.PrevExpiresAt
+		}
+		st.Tokens = append(st.Tokens, et)
 	}
 	keys, err := s.store.ListSSHKeys(ctx)
 	if err != nil {

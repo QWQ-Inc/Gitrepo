@@ -54,3 +54,40 @@ func TestSessionsExpire(t *testing.T) {
 		t.Fatal("a session outlived its provider")
 	}
 }
+
+func TestTokenGraceExpires(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	tok := &Token{Name: "ci", Hash: "h1", Scopes: []string{"read"}}
+	if err := s.CreateToken(ctx, tok); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RotateToken(ctx, tok.ID, "h2", FromTime(time.Now().Add(time.Hour))); err != nil {
+		t.Fatal(err)
+	}
+	for _, h := range []string{"h1", "h2"} {
+		if got, err := s.GetTokenByHash(ctx, h); err != nil || got.ID != tok.ID {
+			t.Fatalf("%s: %+v %v", h, got, err)
+		}
+	}
+	// Past its deadline the old value is refused.
+	s.db.Exec(`UPDATE tokens SET prev_expires_at=? WHERE id=?`, FromTime(time.Now().Add(-time.Second)), tok.ID)
+	if _, err := s.GetTokenByHash(ctx, "h1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("an expired previous value resolves: %v", err)
+	}
+	// A rotation with a deadline in the past keeps no previous value.
+	if err := s.RotateToken(ctx, tok.ID, "h3", FromTime(time.Now().Add(-time.Minute))); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.GetToken(ctx, tok.ID); got.PrevHash != "" || got.Hash != "h3" {
+		t.Fatalf("%+v", got)
+	}
+	// An empty hash never matches a token without a previous value.
+	if _, err := s.GetTokenByHash(ctx, ""); !errors.Is(err, ErrNotFound) {
+		t.Fatal("empty hash")
+	}
+}

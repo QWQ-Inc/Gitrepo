@@ -178,7 +178,16 @@ type Token struct {
 	Repos      []string
 	CreatedAt  int64
 	LastUsedAt int64
+	// After a rotation, the previous value keeps working until
+	// PrevExpiresAt (0 / past = it does not).
+	PrevHash       string
+	PrevExpiresAt  int64
+	PrevLastUsedAt int64
+	RotatedAt      int64
 }
+
+// PrevActive reports whether the previous value still works.
+func (t *Token) PrevActive() bool { return t.PrevHash != "" && t.PrevExpiresAt > Now() }
 
 // ---------------------------------------------------------------- targets
 
@@ -833,10 +842,13 @@ func (s *Store) CreateToken(ctx context.Context, t *Token) error {
 	return nil
 }
 
+const tokenCols = `id, name, token_hash, scopes, repos, created_at, last_used_at, prev_hash, prev_expires_at, prev_last_used_at, rotated_at`
+
 func scanToken(sc interface{ Scan(...any) error }) (*Token, error) {
 	var t Token
 	var scopes, repos string
-	if err := sc.Scan(&t.ID, &t.Name, &t.Hash, &scopes, &repos, &t.CreatedAt, &t.LastUsedAt); err != nil {
+	if err := sc.Scan(&t.ID, &t.Name, &t.Hash, &scopes, &repos, &t.CreatedAt, &t.LastUsedAt,
+		&t.PrevHash, &t.PrevExpiresAt, &t.PrevLastUsedAt, &t.RotatedAt); err != nil {
 		return nil, wrapErr(err)
 	}
 	t.Scopes = splitList(scopes)
@@ -851,12 +863,55 @@ func splitList(s string) []string {
 	return strings.Split(s, ",")
 }
 
+// GetTokenByHash finds the token whose current value, or whose previous
+// value within its grace period, has this hash.
 func (s *Store) GetTokenByHash(ctx context.Context, hash string) (*Token, error) {
-	return scanToken(s.db.QueryRowContext(ctx, `SELECT id, name, token_hash, scopes, repos, created_at, last_used_at FROM tokens WHERE token_hash=?`, hash))
+	return scanToken(s.db.QueryRowContext(ctx, `SELECT `+tokenCols+` FROM tokens WHERE token_hash=?
+UNION ALL SELECT `+tokenCols+` FROM tokens WHERE prev_hash=? AND prev_hash<>'' AND prev_expires_at>? LIMIT 1`, hash, hash, Now()))
+}
+
+func (s *Store) GetToken(ctx context.Context, id int64) (*Token, error) {
+	return scanToken(s.db.QueryRowContext(ctx, `SELECT `+tokenCols+` FROM tokens WHERE id=?`, id))
+}
+
+// RotateToken gives a token a new value. With graceUntil in the future the
+// current value keeps working until then (an earlier previous value stops
+// at once); otherwise it stops now.
+func (s *Store) RotateToken(ctx context.Context, id int64, newHash string, graceUntil int64) error {
+	now := Now()
+	res, err := s.db.ExecContext(ctx, `UPDATE tokens SET
+  prev_hash = CASE WHEN ? > ? THEN token_hash ELSE '' END,
+  prev_expires_at = CASE WHEN ? > ? THEN ? ELSE 0 END,
+  prev_last_used_at = 0, token_hash = ?, last_used_at = 0, rotated_at = ?
+WHERE id = ?`, graceUntil, now, graceUntil, now, graceUntil, newHash, now, id)
+	if err != nil {
+		return wrapErr(err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// EndTokenGrace stops a rotated token's previous value now.
+func (s *Store) EndTokenGrace(ctx context.Context, id int64) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE tokens SET prev_hash='', prev_expires_at=0 WHERE id=?`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) TouchTokenPrev(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE tokens SET prev_last_used_at=? WHERE id=?`, Now(), id)
+	return err
 }
 
 func (s *Store) ListTokens(ctx context.Context) ([]*Token, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, token_hash, scopes, repos, created_at, last_used_at FROM tokens ORDER BY name`)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+tokenCols+` FROM tokens ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}

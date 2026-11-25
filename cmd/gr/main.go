@@ -1185,29 +1185,114 @@ func tokenCmd() *cobra.Command {
 				return printJSON(ts)
 			}
 			w := table()
-			fmt.Fprintln(w, "ID\tNAME\tSCOPES\tREPOS\tLAST USED")
+			fmt.Fprintln(w, "ID\tNAME\tSCOPES\tREPOS\tLAST USED\tROTATED\tPREVIOUS VALUE")
 			for _, t := range ts {
 				r := strings.Join(t.Repos, ",")
 				if r == "" {
 					r = "*"
 				}
-				fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\n", t.ID, t.Name, strings.Join(t.Scopes, ","), r, ago(t.LastUsedAt))
+				prev := "-"
+				if t.PreviousValidUntil != nil {
+					prev = "works until " + t.PreviousValidUntil.Local().Format("2006-01-02 15:04") + ", last used " + ago(t.PreviousLastUsedAt)
+				}
+				rotated := "-"
+				if t.RotatedAt != nil {
+					rotated = ago(t.RotatedAt)
+				}
+				fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\n", t.ID, t.Name, strings.Join(t.Scopes, ","), r, ago(t.LastUsedAt), rotated, prev)
 			}
 			return w.Flush()
 		},
 	}
 	rm := &cobra.Command{
-		Use: "rm ID", Short: "Revoke a token", Args: cobra.ExactArgs(1),
+		Use: "rm NAME|ID", Short: "Revoke a token", Args: cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
-			if err := call(http.MethodDelete, "/api/tokens/"+args[0], nil, nil); err != nil {
+			id, err := tokenID(args[0])
+			if err != nil {
+				return err
+			}
+			if err := call(http.MethodDelete, "/api/tokens/"+id, nil, nil); err != nil {
 				return err
 			}
 			fmt.Println("revoked token", args[0])
 			return nil
 		},
 	}
-	cmd.AddCommand(create, list, rm)
+	var grace string
+	rotate := &cobra.Command{
+		Use:   "rotate NAME|ID",
+		Short: "Give a token a new value (shown once); name, scopes and repositories stay",
+		Long: `Give a token a new value (shown once). Its name, scopes and repositories stay.
+
+With --grace the old value keeps working for that long, so CI jobs, deploy
+platforms and machines can switch over without failing; gr token list shows
+whether the old value is still being used. After a leak, rotate without
+--grace: the old value stops working at once. Rotating again ends the
+previous grace period.
+
+The bootstrap admin token (GITREPO_ADMIN_TOKEN) is not stored by Gitrepo:
+change the environment variable and restart to rotate it.`,
+		Example: "  gr token rotate ci --grace 24h\n  gr token rotate laptop   # leaked: the old value stops now",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			id, err := tokenID(args[0])
+			if err != nil {
+				return err
+			}
+			var t client.Token
+			if err := call(http.MethodPost, "/api/tokens/"+id+"/rotate", map[string]any{"grace": grace}, &t); err != nil {
+				return err
+			}
+			if flagJSON {
+				return printJSON(t)
+			}
+			fmt.Println(t.Token)
+			if t.PreviousValidUntil != nil {
+				fmt.Fprintf(os.Stderr, "token %q rotated; the old value keeps working until %s (end it early: gr token end-grace %s).\n",
+					t.Name, t.PreviousValidUntil.Local().Format("2006-01-02 15:04"), t.Name)
+			} else {
+				fmt.Fprintf(os.Stderr, "token %q rotated; the old value no longer works.\n", t.Name)
+			}
+			fmt.Fprintln(os.Stderr, "the new value will not be shown again.")
+			return nil
+		},
+	}
+	rotate.Flags().StringVar(&grace, "grace", "", "keep the old value working this long, e.g. 1h, 24h, 7d (max 30d; default: stop it now)")
+	endGrace := &cobra.Command{
+		Use: "end-grace NAME|ID", Short: "Stop a rotated token's old value now", Args: cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			id, err := tokenID(args[0])
+			if err != nil {
+				return err
+			}
+			if err := call(http.MethodDelete, "/api/tokens/"+id+"/previous", nil, nil); err != nil {
+				return err
+			}
+			fmt.Printf("the old value of token %s no longer works\n", args[0])
+			return nil
+		},
+	}
+	cmd.AddCommand(create, list, rotate, endGrace, rm)
 	return cmd
+}
+
+// tokenID resolves a token name or id to its id.
+func tokenID(ref string) (string, error) {
+	var ts []client.Token
+	if err := call(http.MethodGet, "/api/tokens", nil, &ts); err != nil {
+		return "", err
+	}
+	for _, t := range ts {
+		if t.Name == ref {
+			return fmt.Sprint(t.ID), nil
+		}
+	}
+	for _, t := range ts {
+		if fmt.Sprint(t.ID) == ref {
+			return ref, nil
+		}
+	}
+	return "", fmt.Errorf("no token %q", ref)
 }
 
 func splitNonEmpty(s string) []string {

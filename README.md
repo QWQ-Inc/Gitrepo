@@ -447,6 +447,21 @@ gr deploy list acme/app                  # 最近一次投递的提交、状态�
 
 `gr token create ci --scopes read --repos 'acme/*'` 可以把 token 限制在部分仓库。token 只存 SHA-256 哈希。`--public` 仓库允许匿名读。
 
+**轮换 token**：生成新值，名称、权限和仓库范围不变，新值只显示一次。
+
+```bash
+gr token rotate ci --grace 24h    # 例行轮换：旧值再用 24 小时，CI、部署平台有时间换上新值
+gr token list                     # 看旧值还有没有人在用（"PREVIOUS VALUE" 一列）
+gr token end-grace ci             # 都换好了：提前作废旧值
+gr token rotate laptop            # 泄露了：不给宽限，旧值立即失效
+```
+
+- `--grace` 最长 30 天。再次轮换时，上一次留下的旧值立即失效。
+- 边缘节点同步宽限期，旧值在边缘节点上同样按时失效。
+- 每次轮换都记入审计日志，日志里不含令牌值。
+- 控制台"访问令牌"页面的"轮换"按钮做同样的事。
+- 部署时设置的管理令牌（`GITREPO_ADMIN_TOKEN`）不存在 Gitrepo 里：改环境变量后重启即可轮换。
+
 修改可见性：`gr repo set acme/demo --visibility private`（控制台仓库页也可以改）。
 - Hub 先改，限制立即生效；
 - 然后通过平台 API 修改各镜像，逐个报告结果。凭据上固定了可见性（`--visibility`）的镜像保持不变，没有 API 的镜像需要到平台上手动修改。
@@ -524,7 +539,7 @@ gr remote  add|list|adopt|pause|resume|set|rm  单个仓库的镜像（--subdir�
 gr sync    ORG/NAME [--overwrite] [--remote ID]
 gr status  [ORG/NAME]
 gr runs    ORG/NAME
-gr token   create|list|rm
+gr token   create|list|rotate|end-grace|rm
 gr key     add|list|rm                   SSH 公钥
 gr ssh                                   SSH 地址与主机指纹
 gr webhook add|list|test|enable|disable|rm
@@ -570,6 +585,8 @@ gr deploy  add|set|list|trigger|rm       部署钩子：分支有新提交时通
 | POST | `/api/repos/{org}/{name}/releases/{tag}/publish` | 发布或重新发布，`{"wait":true,"adopt":false,"force":false}` |
 | PUT/GET/DELETE | `/api/repos/{org}/{name}/releases/{tag}/assets/{file}` | 上传（请求体即文件内容）/ 下载 / 删除附件 |
 | GET/POST | `/api/tokens`，DELETE `/api/tokens/{id}` | 客户端 token |
+| POST | `/api/tokens/{id}/rotate` | 轮换，`{"grace":"24h"}`（可选，最长 30d），返回新值 |
+| DELETE | `/api/tokens/{id}/previous` | 提前作废轮换前的旧值 |
 | GET/POST | `/api/webhooks`，PATCH/DELETE `/api/webhooks/{id}` | 出站通知 |
 | GET/POST | `/api/ssh-keys`，DELETE `/api/ssh-keys/{id}` | SSH 公钥 |
 | GET | `/api/ssh` | SSH 是否启用、地址、主机密钥与指纹 |

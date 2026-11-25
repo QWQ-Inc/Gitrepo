@@ -385,6 +385,15 @@ CREATE TABLE deploy_hooks (
   UNIQUE (repo_id, name)
 );
 `,
+	// 16: token rotation: a rotated token keeps working under its previous
+	// value until prev_expires_at, so clients can switch over.
+	`
+ALTER TABLE tokens ADD COLUMN prev_hash TEXT NOT NULL DEFAULT '';
+ALTER TABLE tokens ADD COLUMN prev_expires_at INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE tokens ADD COLUMN prev_last_used_at INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE tokens ADD COLUMN rotated_at INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX tokens_prev_hash ON tokens(prev_hash);
+`,
 }
 
 func (s *Store) migrate(ctx context.Context) error {

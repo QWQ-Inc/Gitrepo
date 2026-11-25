@@ -222,6 +222,32 @@ func TestEdgeNode(t *testing.T) {
 		}
 	})
 
+	t.Run("a rotated token's old value works on the edge only during its grace period", func(t *testing.T) {
+		var tok client.Token
+		e.do(http.MethodPost, "/api/tokens", map[string]any{"name": "rot", "scopes": []string{"read"}}, &tok)
+		eventually(t, "new token on the edge", 5*time.Second, func() bool {
+			_, err := lsRemote(edgeURL(tok.Token, "acme/app"))
+			return err == nil
+		})
+		var rotated client.Token
+		e.do(http.MethodPost, "/api/tokens/"+strconv.FormatInt(tok.ID, 10)+"/rotate", map[string]any{"grace": "1h"}, &rotated)
+		eventually(t, "rotated token on the edge", 5*time.Second, func() bool {
+			_, err := lsRemote(edgeURL(rotated.Token, "acme/app"))
+			return err == nil
+		})
+		if _, err := lsRemote(edgeURL(tok.Token, "acme/app")); err != nil {
+			t.Fatalf("the old value stopped working on the edge during its grace period: %v", err)
+		}
+		e.do(http.MethodDelete, "/api/tokens/"+strconv.FormatInt(tok.ID, 10)+"/previous", nil, nil)
+		eventually(t, "old value refused on the edge", 5*time.Second, func() bool {
+			_, err := lsRemote(edgeURL(tok.Token, "acme/app"))
+			return err != nil
+		})
+		if _, err := lsRemote(edgeURL(rotated.Token, "acme/app")); err != nil {
+			t.Fatalf("the new value: %v", err)
+		}
+	})
+
 	t.Run("revoked tokens and deleted repositories disappear from the edge", func(t *testing.T) {
 		var list []struct {
 			ID   int64  `json:"id"`

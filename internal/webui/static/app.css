@@ -476,6 +476,7 @@ input[type="file"].input::file-selector-button {
 .cell-break { overflow-wrap: anywhere; }
 .table td .ro-compact.ro-narrow { max-width: 300px; }
 .tag-list { display: flex; flex-wrap: wrap; gap: 4px; }
+.token-grace { margin-top: 6px; max-width: 420px; }
 .tag-list .badge { white-space: nowrap; }
 
 /* ------------------------------------------------------ narrow screens */

@@ -10,9 +10,9 @@ import (
 func (s *Store) ReplaceTokens(ctx context.Context, tokens []Token) error {
 	return s.replaceKeyed(ctx, "tokens", "token_hash", len(tokens), func(i int) (string, []any) {
 		t := tokens[i]
-		return t.Hash, []any{t.Name, strings.Join(t.Scopes, ","), strings.Join(t.Repos, ",")}
-	}, `UPDATE tokens SET name=?, scopes=?, repos=? WHERE token_hash=?`,
-		`INSERT INTO tokens (name, scopes, repos, token_hash, created_at) VALUES (?,?,?,?,?)`)
+		return t.Hash, []any{t.Name, strings.Join(t.Scopes, ","), strings.Join(t.Repos, ","), t.PrevHash, t.PrevExpiresAt}
+	}, `UPDATE tokens SET name=?, scopes=?, repos=?, prev_hash=?, prev_expires_at=? WHERE token_hash=?`,
+		`INSERT INTO tokens (name, scopes, repos, prev_hash, prev_expires_at, token_hash, created_at) VALUES (?,?,?,?,?,?,?)`)
 }
 
 // ReplaceSSHKeys makes the SSH key table exactly keys, keyed by

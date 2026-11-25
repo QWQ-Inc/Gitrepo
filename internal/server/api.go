@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/qwq-inc/gitrepo/internal/auth"
+	"github.com/qwq-inc/gitrepo/internal/config"
 	"github.com/qwq-inc/gitrepo/internal/provider"
 	"github.com/qwq-inc/gitrepo/internal/registry"
 	"github.com/qwq-inc/gitrepo/internal/store"
@@ -49,6 +50,8 @@ func (s *Server) registerAPI(mux *http.ServeMux) {
 	h("GET /api/tokens", s.apiListTokens)
 	h("POST /api/tokens", s.apiCreateToken)
 	h("DELETE /api/tokens/{id}", s.apiDeleteToken)
+	h("POST /api/tokens/{id}/rotate", s.apiRotateToken)
+	h("DELETE /api/tokens/{id}/previous", s.apiEndTokenGrace)
 
 	h("GET /api/status", s.apiListRepos)
 	s.registerWebhookAPI(h)
@@ -1422,6 +1425,96 @@ type tokenOut struct {
 	Token      string     `json:"token,omitempty"`
 	CreatedAt  *time.Time `json:"created_at"`
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+	RotatedAt  *time.Time `json:"rotated_at,omitempty"`
+	// The value before the last rotation, while it still works.
+	PreviousValidUntil *time.Time `json:"previous_valid_until,omitempty"`
+	PreviousLastUsedAt *time.Time `json:"previous_last_used_at,omitempty"`
+}
+
+func toTokenOut(t *store.Token) tokenOut {
+	out := tokenOut{ID: t.ID, Name: t.Name, Scopes: t.Scopes, Repos: t.Repos, CreatedAt: ts(t.CreatedAt), LastUsedAt: ts(t.LastUsedAt), RotatedAt: ts(t.RotatedAt)}
+	if t.PrevActive() {
+		out.PreviousValidUntil, out.PreviousLastUsedAt = ts(t.PrevExpiresAt), ts(t.PrevLastUsedAt)
+	}
+	return out
+}
+
+// maxTokenGrace bounds how long a rotated token's previous value works.
+const maxTokenGrace = 30 * 24 * time.Hour
+
+func (s *Server) tokenFromPath(r *http.Request) (*store.Token, error) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		return nil, badRequest("invalid id")
+	}
+	t, err := s.store.GetToken(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, &apiError{status: http.StatusNotFound, err: errors.New("token not found")}
+	}
+	return t, err
+}
+
+// apiRotateToken gives a token a new value (shown once). Its name, scopes
+// and repositories stay. grace ("24h", "7d"; default none) keeps the old
+// value working meanwhile, so clients can switch over without an outage;
+// after a leak, rotate without grace.
+func (s *Server) apiRotateToken(w http.ResponseWriter, r *http.Request) {
+	t, err := s.tokenFromPath(r)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	var in struct {
+		Grace string `json:"grace"`
+	}
+	if err := decode(r, &in); err != nil {
+		s.fail(w, err)
+		return
+	}
+	var grace time.Duration
+	if in.Grace != "" && in.Grace != "0" {
+		if grace, err = config.ParseDuration(in.Grace); err != nil || grace < 0 || grace > maxTokenGrace {
+			s.fail(w, badRequest("grace must be a duration between 0 and 30d, e.g. 1h or 7d"))
+			return
+		}
+	}
+	plain, hash := auth.NewToken()
+	var until int64
+	if grace > 0 {
+		until = store.FromTime(time.Now().Add(grace))
+	}
+	if err := s.store.RotateToken(r.Context(), t.ID, hash, until); err != nil {
+		s.fail(w, err)
+		return
+	}
+	t, err = s.store.GetToken(r.Context(), t.ID)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	if grace > 0 {
+		noteAudit(r, "token %s rotated; the previous value works until %s", t.Name, store.ToTime(until).UTC().Format(time.RFC3339))
+	} else {
+		noteAudit(r, "token %s rotated; the previous value stopped working", t.Name)
+	}
+	out := toTokenOut(t)
+	out.Token = plain
+	writeJSON(w, http.StatusOK, out)
+}
+
+// apiEndTokenGrace stops a rotated token's previous value now.
+func (s *Server) apiEndTokenGrace(w http.ResponseWriter, r *http.Request) {
+	t, err := s.tokenFromPath(r)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	if err := s.store.EndTokenGrace(r.Context(), t.ID); err != nil {
+		s.fail(w, err)
+		return
+	}
+	noteAudit(r, "token %s: the previous value stopped working", t.Name)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) apiListTokens(w http.ResponseWriter, r *http.Request) {
@@ -1432,7 +1525,7 @@ func (s *Server) apiListTokens(w http.ResponseWriter, r *http.Request) {
 	}
 	out := []tokenOut{}
 	for _, t := range toks {
-		out = append(out, tokenOut{ID: t.ID, Name: t.Name, Scopes: t.Scopes, Repos: t.Repos, CreatedAt: ts(t.CreatedAt), LastUsedAt: ts(t.LastUsedAt)})
+		out = append(out, toTokenOut(t))
 	}
 	writeJSON(w, http.StatusOK, out)
 }

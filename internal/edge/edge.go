@@ -47,10 +47,12 @@ type State struct {
 		Purged        int64  `json:"purged"`
 	} `json:"repos"`
 	Tokens []struct {
-		Name   string   `json:"name"`
-		Hash   string   `json:"hash"`
-		Scopes []string `json:"scopes"`
-		Repos  []string `json:"repos"`
+		Name          string   `json:"name"`
+		Hash          string   `json:"hash"`
+		Scopes        []string `json:"scopes"`
+		Repos         []string `json:"repos"`
+		PrevHash      string   `json:"prev_hash"`
+		PrevExpiresAt int64    `json:"prev_expires_at"`
 	} `json:"tokens"`
 	SSHKeys []struct {
 		Name        string   `json:"name"`
@@ -269,7 +271,7 @@ func (r *Replica) apply(ctx context.Context, st *State, refreshAll bool) error {
 	// Credentials first: a revoked token must stop working right away.
 	var tokens []store.Token
 	for _, t := range st.Tokens {
-		tokens = append(tokens, store.Token{Name: t.Name, Hash: t.Hash, Scopes: t.Scopes, Repos: t.Repos})
+		tokens = append(tokens, store.Token{Name: t.Name, Hash: t.Hash, Scopes: t.Scopes, Repos: t.Repos, PrevHash: t.PrevHash, PrevExpiresAt: t.PrevExpiresAt})
 	}
 	if err := r.Store.ReplaceTokens(ctx, tokens); err != nil {
 		return fmt.Errorf("replace tokens: %w", err)

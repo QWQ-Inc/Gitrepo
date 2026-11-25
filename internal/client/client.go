@@ -230,6 +230,10 @@ type Token struct {
 	Token      string     `json:"token,omitempty"`
 	CreatedAt  *time.Time `json:"created_at"`
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+	RotatedAt  *time.Time `json:"rotated_at,omitempty"`
+	// While the value before the last rotation still works.
+	PreviousValidUntil *time.Time `json:"previous_valid_until,omitempty"`
+	PreviousLastUsedAt *time.Time `json:"previous_last_used_at,omitempty"`
 }
 
 type Webhook struct {

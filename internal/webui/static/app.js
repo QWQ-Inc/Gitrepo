@@ -1160,14 +1160,51 @@ async function viewProtect() {
 async function viewTokens() {
   const [tokens, keys, sshInfo] = await Promise.all([api('GET', '/api/tokens'), api('GET', '/api/ssh-keys'), api('GET', '/api/ssh')]);
   const scopeBadges = (scopes) => h('div', { class: 'rowflex' }, scopes.map((s) => h('span', { class: 'badge' + (s === 'admin' ? ' badge-warn' : '') }, s)));
+  // showToken displays a new token value, once.
+  const showToken = (t, title, note) => {
+    let close = null;
+    close = openModal({
+      title,
+      body: [h('p', {}, '只显示这一次，请现在保存：'), h('div', { class: 'secret' }, t.token),
+        h('div', { class: 'rowflex' }, h('button', { class: 'btn btn-sm', type: 'button', onclick: () => copyText(t.token) }, icon('copy', 15), '复制令牌')),
+        note ? h('p', { class: 'hint' }, note) : null,
+        h('p', { class: 'hint' }, '作为 git 的 HTTPS 密码使用（用户名任意），例如：'),
+        h('code', {}, `git push https://x:${t.token.slice(0, 8)}…@${location.host}/acme/demo.git main`)],
+      foot: [h('button', { class: 'btn btn-primary', type: 'button', onclick: () => close() }, '我已保存')],
+    });
+  };
+  const rotate = (t) => formModal({
+    title: '轮换令牌：' + t.name, submitText: '轮换',
+    intro: '生成一个新的令牌值，名称、权限和仓库范围不变。可以让旧值再用一段时间，方便 CI 和部署平台换上新值；令牌泄露时请选“立即失效”。再次轮换时，上一次留下的旧值立即失效。',
+    fields: [field('旧值', select('grace', [['', '立即失效（令牌泄露时选这个）'], ['1h', '再用 1 小时'], ['24h', '再用 24 小时'], ['7d', '再用 7 天']], '24h'), 'wide')],
+    submit: async (d) => {
+      const res = await api('POST', '/api/tokens/' + t.id + '/rotate', { grace: d.grace });
+      await rerender();
+      showToken(res, `令牌 ${res.name} 已轮换`, res.previous_valid_until
+        ? `旧值在 ${fmtDate(res.previous_valid_until)} 之前仍然可用；所有客户端换好后，可以在列表里提前作废。`
+        : '旧值已经失效。');
+      return false;
+    },
+  });
   const rows = tokens.map((t) => h('tr', {},
-    h('td', { class: 'cell-title' }, t.name), h('td', {}, scopeBadges(t.scopes)), h('td', {}, (t.repos || []).join(', ') || h('span', { class: 'faint' }, '全部')),
+    h('td', {}, h('div', { class: 'cell-title' }, t.name),
+      t.rotated_at ? h('div', { class: 'cell-sub' }, '轮换于 ' + ago(t.rotated_at)) : null,
+      t.previous_valid_until ? h('div', { class: 'notice notice-warn token-grace' },
+        `旧值在 ${fmtDate(t.previous_valid_until)} 之前仍可用，最近一次被使用：${ago(t.previous_last_used_at)}`,
+        h('div', {}, h('button', { class: 'btn btn-sm', type: 'button', onclick: action(async () => {
+          if (!(await confirmDialog({ title: '作废旧值', message: `立即作废令牌 ${t.name} 的旧值？还在用旧值的客户端会失去访问。`, ok: '作废', danger: true }))) return false;
+          await api('DELETE', '/api/tokens/' + t.id + '/previous');
+          rerender();
+        }, '旧值已作废') }, '立即作废旧值'))) : null),
+    h('td', {}, scopeBadges(t.scopes)), h('td', {}, (t.repos || []).join(', ') || h('span', { class: 'faint' }, '全部')),
     h('td', { class: 'nowrap' }, ago(t.last_used_at)),
-    h('td', { class: 'actions' }, h('button', { class: 'btn btn-sm btn-danger-soft', type: 'button', onclick: action(async () => {
-      if (!(await confirmDialog({ title: '吊销令牌', message: `吊销令牌 ${t.name}？使用它的客户端会立即失去访问。`, ok: '吊销', danger: true }))) return false;
-      await api('DELETE', '/api/tokens/' + t.id);
-      rerender();
-    }, '已吊销') }, '吊销'))));
+    h('td', { class: 'actions' },
+      h('button', { class: 'btn btn-sm', type: 'button', onclick: () => rotate(t) }, '轮换'),
+      h('button', { class: 'btn btn-sm btn-danger-soft', type: 'button', onclick: action(async () => {
+        if (!(await confirmDialog({ title: '吊销令牌', message: `吊销令牌 ${t.name}？使用它的客户端会立即失去访问。`, ok: '吊销', danger: true }))) return false;
+        await api('DELETE', '/api/tokens/' + t.id);
+        rerender();
+      }, '已吊销') }, '吊销'))));
   const createToken = () => formModal({
     title: '创建令牌', submitText: '创建令牌',
     fields: [
@@ -1177,15 +1214,7 @@ async function viewTokens() {
     submit: async (d) => {
       const t = await api('POST', '/api/tokens', { name: d.name, scopes: [d.scope], repos: list(d.repos) });
       await rerender();
-      let close = null;
-      close = openModal({
-        title: `令牌 ${t.name} 已创建`,
-        body: [h('p', {}, '只显示这一次，请现在保存：'), h('div', { class: 'secret' }, t.token),
-          h('div', { class: 'rowflex' }, h('button', { class: 'btn btn-sm', type: 'button', onclick: () => copyText(t.token) }, icon('copy', 15), '复制令牌')),
-          h('p', { class: 'hint' }, '作为 git 的 HTTPS 密码使用（用户名任意），例如：'),
-          h('code', {}, `git push https://x:${t.token.slice(0, 8)}…@${location.host}/acme/demo.git main`)],
-        foot: [h('button', { class: 'btn btn-primary', type: 'button', onclick: () => close() }, '我已保存')],
-      });
+      showToken(t, `令牌 ${t.name} 已创建`);
       return false;
     },
   });
@@ -1220,7 +1249,7 @@ async function viewTokens() {
     : section('SSH 公钥', null, h('div', { class: 'empty' }, 'SSH 未启用。在服务端设置 ssh.listen（或环境变量 GITREPO_SSH_LISTEN，例如 :2222）后即可通过 SSH push 和 clone。'));
 
   fill(app, 
-    pageHead('访问令牌', '给开发者、CI 和部署平台使用。只保存哈希，丢失后只能重新创建。', [addButton('创建令牌', createToken)]),
+    pageHead('访问令牌', '给开发者、CI 和部署平台使用。只保存哈希；丢失或泄露时可以轮换，名称、权限和仓库范围不变。部署时设置的管理令牌（GITREPO_ADMIN_TOKEN）不在这里，改环境变量后重启即可轮换。', [addButton('创建令牌', createToken)]),
     table(['名称', '权限', '仓库范围', '上次使用', ''], rows,
       [h('div', { class: 'empty-title' }, '还没有令牌'), h('div', {}, '创建一个 create 权限的令牌，作为 git 的 HTTPS 密码即可 push。'), addButton('创建令牌', createToken)]),
     sshSection);
