@@ -52,6 +52,19 @@ docker run -d --name gitrepo -p 8080:8080 -p 2222:2222 -v gitrepo-data:/data \
 
 镜像内置健康检查（`gitrepo healthcheck`）。
 
+部署到 Kubernetes 或从 Git 仓库构建的容器平台时，在平台上设置以下几项（对应上面 `docker run` 里的参数）：
+
+| 项目 | 设置 | 不设置会怎样 |
+|---|---|---|
+| `GITREPO_SECRET_KEY` | `gitrepo keygen` 或 `openssl rand -base64 32` 的输出，另外备份一份 | 启动失败：`no secret key: set GITREPO_SECRET_KEY` |
+| `GITREPO_ADMIN_TOKEN` | 一个长随机串，如 `openssl rand -hex 24` | 能启动，但新实例没有任何令牌，登录不了控制台，也用不了 `gr` |
+| `GITREPO_PUBLIC_URL` | 对外地址，如 `https://git.example.com` | 控制台上的克隆地址和 LFS 链接指向 `http://localhost:8080` |
+| 数据盘 | 挂到 `/data`，只能单副本 | 仓库和数据库都在容器里，重启或重新部署后全部丢失 |
+| 端口 | HTTP 8080；用 SSH 时另开 2222，并设 `GITREPO_SSH_LISTEN=:2222` | 平台不知道把流量转到哪个端口 |
+| 健康检查 | HTTP `GET /healthz`，端口 8080 | 实例还没启动好就开始接收请求 |
+
+部署完运行 `gr doctor`（`GITREPO_URL` 设为对外地址，`GITREPO_TOKEN` 设为管理令牌），检查对外地址、数据盘和工具是否都正常。
+
 运行时依赖系统 `git`（≥ 2.31）；仓库用到 Git LFS 时还需要 `git-lfs`（Docker 镜像已自带）。生产环境请放在 TLS 反向代理后面。
 
 打开 `https://git.example.com/` 进入 Web 控制台，用管理令牌登录，之后的第 2～5 步都可以在控制台里完成。下面以 CLI 为例。
