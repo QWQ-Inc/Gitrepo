@@ -20,6 +20,10 @@
 - 一个仓库拆成多个镜像（monorepo）：镜像可以只同步一个目录的历史（作为新仓库的根目录，和 `git subtree split` 的结果完全相同），或者只同步某些分支（可以改名）；标签可以按前缀改名，Release 跟着标签走。CLI 用 `--subdir`、`--branch`、`--tag`，控制台和 API 也可以设置。
 - `gr target check NAME --write`：在平台上建一个临时仓库，把同步和发布用到的写操作（建仓、LFS、推送、默认分支、可见性、Release 和附件）都实际做一遍，最后删除它，用来在真实平台上确认凭据和权限。控制台也有对应按钮。
 
+### 修复
+
+- 平台滚动更新（新实例先启动、旧实例后停止，共用一块数据盘）之后，git 子进程连不上服务：push 能进 Hub，但不同步到镜像，强推覆盖的历史没有备份，push 没有审计记录；写入检查和同步报错 `dial unix …/gitrepo.sock: no such file or directory`。原因是旧实例退出时删掉了新实例的内部 socket。现在每个进程使用自己的 socket，启动时只清理已经没有进程监听的旧 socket。`gr doctor` 新增内部 socket 检查。
+
 ## v0.1.0
 
 2026-11-01 发布，第一个版本。

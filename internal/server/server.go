@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/qwq-inc/gitrepo/internal/auth"
@@ -84,6 +86,7 @@ type Server struct {
 	tickets    *gitexec.Tickets
 	hookToken  string
 	socketPath string
+	socketGlob string // prefix of every instance's socket on this data directory
 	selfPath   string
 
 	httpSrv *http.Server
@@ -132,11 +135,13 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
+	sockPath, sockPrefix := socketPath(cfg)
 	s := &Server{
 		cfg: cfg, opts: opts, log: log, store: st, box: box,
 		tickets:    gitexec.NewTickets(),
 		hookToken:  randomHex(24),
-		socketPath: socketPath(cfg),
+		socketPath: sockPath,
+		socketGlob: sockPrefix,
 		selfPath:   self,
 		done:       make(chan struct{}),
 
@@ -326,14 +331,43 @@ func randomHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
-// socketPath keeps the unix socket path under the OS limit (~104 bytes).
-func socketPath(cfg *config.Config) string {
-	p := filepath.Join(cfg.RunDir(), "gitrepo.sock")
-	if len(p) < 100 {
-		return p
+// socketPath returns the internal socket's path, unique to this process:
+// a rolling update starts the new instance on the same data directory
+// before it stops the old one, and neither may replace or remove the
+// other's socket (hooks and askpass reach the server through it, by the
+// path in GITREPO_SOCKET). The path stays under the OS limit (~104 bytes).
+// prefix is shared by every instance's socket on this data directory.
+func socketPath(cfg *config.Config) (path, prefix string) {
+	id := randomHex(4)
+	if p := filepath.Join(cfg.RunDir(), "gitrepo-"+id+".sock"); len(p) < 100 {
+		return p, filepath.Join(cfg.RunDir(), "gitrepo")
 	}
 	sum := sha256.Sum256([]byte(cfg.DataDir))
-	return filepath.Join(os.TempDir(), "gitrepo-"+hex.EncodeToString(sum[:6])+".sock")
+	prefix = filepath.Join(os.TempDir(), "gitrepo-"+hex.EncodeToString(sum[:6]))
+	return prefix + "-" + id + ".sock", prefix
+}
+
+// removeStaleSockets deletes the sockets of instances that are gone (a
+// killed process cannot remove its own). A socket somebody still listens
+// on, such as the previous instance during a rolling update, stays.
+func removeStaleSockets(prefix, keep string) {
+	matches, _ := filepath.Glob(prefix + "*.sock")
+	for _, p := range matches {
+		if p == keep {
+			continue
+		}
+		if fi, err := os.Lstat(p); err != nil || fi.Mode()&os.ModeSocket == 0 {
+			continue
+		}
+		c, err := net.DialTimeout("unix", p, time.Second)
+		if err == nil {
+			c.Close()
+			continue
+		}
+		if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, fs.ErrNotExist) {
+			os.Remove(p)
+		}
+	}
 }
 
 func (s *Server) checkGit() error {
@@ -394,7 +428,7 @@ func (s *Server) Handler() http.Handler {
 
 // Start begins serving on ln and starts background work.
 func (s *Server) Start(ln net.Listener) error {
-	os.Remove(s.socketPath)
+	removeStaleSockets(s.socketGlob, s.socketPath)
 	sock, err := net.Listen("unix", s.socketPath)
 	if err != nil {
 		return fmt.Errorf("listen on internal socket: %w", err)

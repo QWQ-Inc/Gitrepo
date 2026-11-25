@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -58,6 +59,14 @@ func (s *Server) apiDoctor(w http.ResponseWriter, r *http.Request) {
 	}
 	s.checkPublicURL(ctx, add)
 	s.checkDisk(add)
+	// Hooks (sync after a push, backups of overwritten refs, the push audit)
+	// and the askpass helper (mirror credentials) reach the server here.
+	if c, err := net.DialTimeout("unix", s.socketPath, 2*time.Second); err != nil {
+		add("internal socket", "fail", "git hooks and mirror pushes cannot reach the server (%v); restart Gitrepo", err)
+	} else {
+		c.Close()
+		add("internal socket", "ok", "reachable")
+	}
 
 	var wg sync.WaitGroup
 	targets, err := s.store.ListTargets(ctx)
