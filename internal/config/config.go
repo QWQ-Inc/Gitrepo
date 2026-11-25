@@ -49,6 +49,7 @@ type Config struct {
 	Audit    AuditConfig    `yaml:"audit"`
 	Releases ReleasesConfig `yaml:"releases"`
 	Edge     EdgeConfig     `yaml:"edge"`
+	SSO      SSOConfig      `yaml:"sso"`
 }
 
 // EdgeConfig turns this instance into a read-only edge node of a hub: it
@@ -60,6 +61,14 @@ type EdgeConfig struct {
 	// TokenEnv names the environment variable holding a hub token with
 	// the edge scope.
 	TokenEnv string `yaml:"token_env"`
+}
+
+// SSOConfig is about signing in to the console through an identity
+// provider (the providers themselves are managed in the console or with
+// `gr sso`).
+type SSOConfig struct {
+	// SessionTTL is how long a sign-in lasts (default 12h).
+	SessionTTL Duration `yaml:"session_ttl"`
 }
 
 // ReleasesConfig controls releases kept on the hub and published to mirrors.
@@ -181,6 +190,7 @@ func Default() *Config {
 		Audit:    AuditConfig{Retention: Duration(365 * 24 * time.Hour)},
 		Releases: ReleasesConfig{MaxAssetSize: ByteSize(2 << 30)},
 		Edge:     EdgeConfig{TokenEnv: "GITREPO_EDGE_TOKEN"},
+		SSO:      SSOConfig{SessionTTL: Duration(12 * time.Hour)},
 	}
 }
 
@@ -265,6 +275,9 @@ func (c *Config) validate() error {
 		if !strings.HasPrefix(c.Edge.Upstream, "https://") && !strings.HasPrefix(c.Edge.Upstream, "http://") {
 			errs = append(errs, errors.New("edge.upstream must be the hub's http(s) URL"))
 		}
+	}
+	if c.SSO.SessionTTL.D() < time.Minute {
+		errs = append(errs, errors.New("sso.session_ttl must be at least 1m"))
 	}
 	if c.Audit.Retention.D() < 0 {
 		errs = append(errs, errors.New("audit.retention must not be negative"))

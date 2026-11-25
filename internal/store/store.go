@@ -331,6 +331,60 @@ ALTER TABLE remotes ADD COLUMN location_gen INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE remotes ADD COLUMN ref_map TEXT NOT NULL DEFAULT '';
 ALTER TABLE remotes ADD COLUMN subdir TEXT NOT NULL DEFAULT '';
 `,
+	// 15: sign-in through OpenID Connect / OAuth 2.0 providers, the console
+	// sessions they create, and deploy hooks (a deployment platform is told
+	// when a branch has a new commit on the hub or on a mirror).
+	`
+CREATE TABLE oidc_providers (
+  id             INTEGER PRIMARY KEY,
+  name           TEXT    NOT NULL UNIQUE,
+  display_name   TEXT    NOT NULL DEFAULT '',
+  kind           TEXT    NOT NULL DEFAULT 'oidc',
+  issuer         TEXT    NOT NULL DEFAULT '',
+  auth_url       TEXT    NOT NULL DEFAULT '',
+  token_url      TEXT    NOT NULL DEFAULT '',
+  userinfo_url   TEXT    NOT NULL DEFAULT '',
+  client_id      TEXT    NOT NULL,
+  client_secret  BLOB,
+  scopes         TEXT    NOT NULL DEFAULT '',
+  groups_claim   TEXT    NOT NULL DEFAULT 'groups',
+  allow          TEXT    NOT NULL DEFAULT '',
+  enabled        INTEGER NOT NULL DEFAULT 1,
+  created_at     INTEGER NOT NULL,
+  updated_at     INTEGER NOT NULL
+);
+CREATE TABLE sessions (
+  id           INTEGER PRIMARY KEY,
+  token_hash   TEXT    NOT NULL UNIQUE,
+  provider     TEXT    NOT NULL,
+  subject      TEXT    NOT NULL,
+  name         TEXT    NOT NULL,
+  email        TEXT    NOT NULL DEFAULT '',
+  scopes       TEXT    NOT NULL,
+  created_at   INTEGER NOT NULL,
+  expires_at   INTEGER NOT NULL,
+  last_used_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX sessions_provider ON sessions(provider);
+CREATE TABLE deploy_hooks (
+  id          INTEGER PRIMARY KEY,
+  repo_id     INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+  name        TEXT    NOT NULL,
+  kind        TEXT    NOT NULL DEFAULT 'generic',
+  url         BLOB    NOT NULL,
+  url_host    TEXT    NOT NULL DEFAULT '',
+  secret      BLOB,
+  token       BLOB,
+  branch      TEXT    NOT NULL DEFAULT '',
+  remote_id   INTEGER REFERENCES remotes(id) ON DELETE CASCADE,
+  enabled     INTEGER NOT NULL DEFAULT 1,
+  last_status TEXT    NOT NULL DEFAULT '',
+  last_commit TEXT    NOT NULL DEFAULT '',
+  last_at     INTEGER NOT NULL DEFAULT 0,
+  created_at  INTEGER NOT NULL,
+  UNIQUE (repo_id, name)
+);
+`,
 }
 
 func (s *Store) migrate(ctx context.Context) error {

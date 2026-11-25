@@ -145,7 +145,7 @@ func startServer(t *testing.T, cfg *config.Config, log *slog.Logger) (*server.Se
 		t.Fatal(err)
 	}
 	cfg.PublicURL = "http://" + ln.Addr().String()
-	srv, err := server.New(cfg, log, server.Options{NoBackground: true})
+	srv, err := server.New(cfg, log, server.Options{NoBackground: true, DeployBackoff: []time.Duration{50 * time.Millisecond, 100 * time.Millisecond}})
 	if err != nil {
 		t.Fatal(err)
 	}

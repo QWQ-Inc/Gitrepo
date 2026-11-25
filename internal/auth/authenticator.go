@@ -54,6 +54,17 @@ func (a *Authenticator) FromToken(ctx context.Context, tok string) (*Principal, 
 	if a.AdminHash != "" && subtle.ConstantTimeCompare([]byte(h), []byte(a.AdminHash)) == 1 {
 		return Admin(), nil
 	}
+	if strings.HasPrefix(tok, SessionPrefix) {
+		x, err := a.Store.GetSessionByHash(ctx, h)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return nil, ErrInvalidToken
+			}
+			return nil, err
+		}
+		_ = a.Store.TouchSession(ctx, x.ID)
+		return &Principal{Name: x.Name, Scopes: x.Scopes, SessionID: x.ID}, nil
+	}
 	t, err := a.Store.GetTokenByHash(ctx, h)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {

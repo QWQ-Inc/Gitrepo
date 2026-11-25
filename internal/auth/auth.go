@@ -32,6 +32,20 @@ func ValidScope(s string) bool { _, ok := scopeRank[s]; return ok }
 // TokenPrefix marks Gitrepo tokens so they are easy to spot in leaks.
 const TokenPrefix = "grp_"
 
+// SessionPrefix marks console sessions created by signing in through an
+// identity provider.
+const SessionPrefix = "grs_"
+
+// NewSessionToken returns a new random session token and its storage hash.
+func NewSessionToken() (plain, hash string) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		panic(err)
+	}
+	plain = SessionPrefix + hex.EncodeToString(b)
+	return plain, Hash(plain)
+}
+
 // NewToken returns a new random token and its storage hash.
 func NewToken() (plain, hash string) {
 	b := make([]byte, 24)
@@ -55,6 +69,8 @@ type Principal struct {
 	Scopes []string
 	// Repos are slug patterns ("org/name", "org/*", "*"). Empty means all.
 	Repos []string
+	// SessionID is set for a console session from an identity provider.
+	SessionID int64
 }
 
 // Admin returns the bootstrap administrator principal.

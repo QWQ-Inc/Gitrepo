@@ -245,6 +245,72 @@ type Webhook struct {
 	LastDeliveryAt *time.Time `json:"last_delivery_at,omitempty"`
 }
 
+// SSOProvider is an identity provider for console sign-in.
+type SSOProvider struct {
+	Name         string    `json:"name"`
+	DisplayName  string    `json:"display_name"`
+	Kind         string    `json:"kind"`
+	Issuer       string    `json:"issuer,omitempty"`
+	AuthURL      string    `json:"auth_url,omitempty"`
+	TokenURL     string    `json:"token_url,omitempty"`
+	UserinfoURL  string    `json:"userinfo_url,omitempty"`
+	ClientID     string    `json:"client_id"`
+	ClientSecret bool      `json:"client_secret"`
+	Scopes       []string  `json:"scopes"`
+	GroupsClaim  string    `json:"groups_claim"`
+	Allow        []string  `json:"allow"`
+	Enabled      bool      `json:"enabled"`
+	RedirectURL  string    `json:"redirect_url"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+// SSOCheck describes a provider's resolved endpoints.
+type SSOCheck struct {
+	Mode        string `json:"mode"`
+	AuthURL     string `json:"auth_url"`
+	TokenURL    string `json:"token_url"`
+	UserinfoURL string `json:"userinfo_url,omitempty"`
+	RedirectURL string `json:"redirect_url"`
+}
+
+// Session is a console sign-in through an identity provider.
+type Session struct {
+	ID         int64      `json:"id"`
+	Name       string     `json:"name"`
+	Provider   string     `json:"provider"`
+	Email      string     `json:"email,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+	ExpiresAt  time.Time  `json:"expires_at"`
+	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+	Current    bool       `json:"current"`
+}
+
+// DeployHook tells a deployment platform about new commits of a branch.
+type DeployHook struct {
+	ID         int64      `json:"id"`
+	Name       string     `json:"name"`
+	Kind       string     `json:"kind"`
+	Host       string     `json:"host"`
+	Branch     string     `json:"branch"`
+	BranchSet  bool       `json:"branch_set"`
+	RemoteID   int64      `json:"remote_id,omitempty"`
+	Source     string     `json:"source"`
+	Signed     bool       `json:"signed"`
+	Token      bool       `json:"token"`
+	Enabled    bool       `json:"enabled"`
+	LastStatus string     `json:"last_status,omitempty"`
+	LastCommit string     `json:"last_commit,omitempty"`
+	LastAt     *time.Time `json:"last_at,omitempty"`
+}
+
+// DeployTrigger is the outcome of a manual deploy.
+type DeployTrigger struct {
+	Commit string `json:"commit"`
+	Status string `json:"status"`
+	OK     bool   `json:"ok"`
+	Error  string `json:"error,omitempty"`
+}
+
 type SSHKey struct {
 	ID          int64      `json:"id"`
 	Name        string     `json:"name"`

@@ -392,6 +392,39 @@ gr webhook test 2
 
 JSON 投递带以下请求头：`X-Gitrepo-Event`、`X-Gitrepo-Delivery`；配置了 secret 时还带 `X-Gitrepo-Signature-256: sha256=<HMAC-SHA256(secret, body)>`，校验方式与 GitHub webhook 相同。失败的投递会在 5s、30s、2m 后重试。`--repos 'acme/*'` 可以只接收部分仓库的事件；这样的 webhook 收不到不属于某个仓库的事件（`credential.expiring`），以免一个团队的 webhook 得知整个实例的凭据情况。飞书和钉钉机器人的"签名校验"安全设置暂不支持，请改用关键词（例如 `Gitrepo`）或 IP 白名单。
 
+## 部署钩子（StackEnigma 等）
+
+分支有新提交时，通知部署平台去部署。每个钩子盯一个仓库的一个分支，触发时机二选一：
+
+- **push 到 Hub 后**：平台直接从 Hub 构建时用。
+- **同步到某个镜像后**：平台从镜像构建时用，例如 StackEnigma 从 GitHub 拉代码。要等 GitHub 上已经有了这个提交才通知，否则平台会构建到旧版本。
+
+```bash
+# 在 StackEnigma 服务的"部署钩子"里新建一个，把地址和签名密钥（standardSecret，whsec_ 开头）交给 Gitrepo
+export SE_DEPLOY_URL=… SE_DEPLOY_SECRET=whsec_…
+gr deploy add acme/app production --stackenigma --url-env SE_DEPLOY_URL --secret-env SE_DEPLOY_SECRET --after github:acme/app
+
+# 任意平台：从 Hub 构建 develop 分支，带 Bearer 令牌
+gr deploy add acme/app staging --url https://deploy.example.com/hooks/app --token-env DEPLOY_TOKEN --branch develop
+
+gr deploy trigger acme/app production    # 立即部署当前提交
+gr deploy list acme/app                  # 最近一次投递的提交、状态和时间
+```
+
+- **请求格式**：每次投递是一个 JSON POST：
+  ```json
+  {"type":"deploy.requested","timestamp":"…","data":{"hook":"production","repository":"acme/app","branch":"main","ref":"refs/heads/main",
+   "commit":"<sha>","source":"github:acme/app","source_url":"https://github.com/acme/app.git","clone_url":"https://git.example.com/acme/app.git",
+   "trigger":"sync","pusher":"…"}}
+  ```
+- **签名**：
+  - 按 [Standard Webhooks](https://www.standardwebhooks.com/) 签名，请求头为 `webhook-id`、`webhook-timestamp`，配置了密钥时还有 `webhook-signature`。
+  - 同时带 `X-Gitrepo-Signature-256`，和[通知](#通知)的签名一样。
+  - 配置了令牌时，带 `Authorization: Bearer <令牌>`。
+- **重试与合并**：失败的投递在 5s、30s、2m 后重试。一个钩子在投递时，后来的提交只保留最新的一个，因为部署只需要最新版本。
+- **控制台**：仓库页的"部署"标签可以添加、编辑、立即部署，并查看最近一次投递的结果。
+- 地址、令牌和密钥都加密保存。删除镜像时，等待它的部署钩子一并删除。
+
 ## 策略
 
 在 Hub 的 pre-receive 阶段执行：
@@ -422,6 +455,45 @@ JSON 投递带以下请求头：`X-Gitrepo-Event`、`X-Gitrepo-Delivery`；配�
 名为 `admin` 的 token 不能创建：这个名字留给启动时配置的管理员 token，审计日志里才不会混淆。
 
 注意：备份（`refs/backup/*`）不会出现在 clone、ls-remote、源码包和 bundle 里，但它们引用的对象仍在 Hub 仓库中。有读权限、又知道 SHA 的人可以通过协议 v2 按 SHA 取回这些对象，这和 GitHub 上悬空提交的情况一样。敏感内容请用 `gr backup purge` 彻底清除，见[备份与清除](#备份与清除)。
+
+## 登录方式（StackEnigma / OIDC）
+
+除了管理令牌，控制台还可以用 StackEnigma 或任何 OpenID Connect / OAuth 2.0 账号登录。添加后，登录页会出现"使用 StackEnigma 登录"这样的按钮。
+
+```bash
+# 1. 在身份提供方那里把 Gitrepo 注册为 OAuth 应用（Web 应用），回调地址是
+#    <public_url>/auth/oidc/<名称>/callback，gr sso add 也会打印出来
+# 2. 添加
+export SE_CLIENT_SECRET=…
+gr sso add stackenigma --stackenigma --issuer https://<StackEnigma 身份服务> --client-id gitrepo \
+    --client-secret-env SE_CLIENT_SECRET --allow '*@example.com'
+gr sso check stackenigma        # 读取 Issuer 的发现文档，显示端点和回调地址
+
+# 其他 OpenID Connect 提供方：Keycloak、Authentik、Azure AD、Google、GitLab……
+gr sso add keycloak --issuer https://sso.example.com/realms/dev --client-id gitrepo \
+    --client-secret-env KC_SECRET --allow group:gitrepo-admins
+
+# 只有 OAuth 2.0、没有 OpenID Connect 的（Gitea、GitHub 等）：手动填写端点
+gr sso add forge --auth-url https://git.example.com/login/oauth/authorize \
+    --token-url https://git.example.com/login/oauth/access_token \
+    --userinfo-url https://git.example.com/api/v1/user --client-id … --client-secret-env FORGE_SECRET --allow sub:1
+```
+
+- **谁能登录**：用这种方式登录的人是这个 Gitrepo 的管理员，所以必须用 `--allow` 写明放行谁：
+  - 邮箱，或通配如 `*@example.com`。只匹配提供方标记为已验证的邮箱；提供方不给 `email_verified` 时，视为已验证。
+  - `group:组名`，从 `groups` claim 读取，可以用 `--groups-claim` 改。
+  - `sub:用户 ID`。
+  - `*`：提供方认可的所有人。
+- **安全**：
+  - 使用授权码流程，并带 PKCE、state 和 nonce；ID token 的签名、issuer、audience 和有效期都会校验。
+  - 浏览器端的登录状态存在一个用实例密钥加密的短期 cookie 里。
+  - 登录成功后，控制台通过一次性的代码换取会话，会话令牌不会出现在 URL 里。
+- **会话**：
+  - 默认 12 小时，用 `sso.session_ttl` 调整。
+  - `gr sso sessions` 列出会话，`gr sso signout ID` 强制退出；控制台"登录方式"页面也能做到。
+  - 修改提供方的端点、Client ID 或放行规则，或停用、删除提供方，都会让通过它登录的会话立即失效。
+- **审计**：每次登录，包括被拒绝的，都记入[审计日志](#审计日志)，操作者为 `sso:<提供方>:<邮箱>`。登录后的操作也用这个身份记录。
+- **管理令牌**：部署时设置的管理令牌始终可以登录，所以配置出错时不会把自己锁在外面。
 
 ## 审计日志
 
@@ -461,13 +533,17 @@ gr protect add|list|rm                   分支保护：禁止强推和删除
 gr audit   [--repo] [--actor] [--action] 审计日志
 gr release create|edit|upload|remove-file|publish|list|show|download|rm  发布到所有镜像的 Release
 gr doctor                                部署自检：工具、public_url、磁盘、各平台凭据、镜像、边缘节点
+gr sso     add|set|list|check|rm|sessions|signout  用 StackEnigma 或 OIDC 账号登录控制台
+gr deploy  add|set|list|trigger|rm       部署钩子：分支有新提交时通知 StackEnigma 等平台
 ```
 
 所有命令都支持 `--json`。`gr` 读取 `GITREPO_URL` 和 `GITREPO_TOKEN`。
 
 ## HTTP API
 
-`/api/*` 和 `/metrics` 都需要 admin token（`Authorization: Bearer …`），只有 `/api/repos/{org}/{name}/releases…` 例外：它按仓库授权，修改需要 write 权限，读取与 clone 相同。
+`/api/*` 和 `/metrics` 都需要 admin token（`Authorization: Bearer …`），通过[登录方式](#登录方式stackenigma--oidc)得到的会话也可以。例外：
+- `/api/repos/{org}/{name}/releases…` 按仓库授权，修改需要 write 权限，读取与 clone 相同；
+- 登录用的几个 `/api/sso/…` 接口，见下表。
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
@@ -498,6 +574,16 @@ gr doctor                                部署自检：工具、public_url、�
 | GET/POST | `/api/ssh-keys`，DELETE `/api/ssh-keys/{id}` | SSH 公钥 |
 | GET | `/api/ssh` | SSH 是否启用、地址、主机密钥与指纹 |
 | POST | `/api/webhooks/{id}/test` | 发送测试投递 |
+| GET/POST | `/api/repos/{org}/{name}/deploy-hooks` | 部署钩子，`{"name":"production","kind":"stackenigma","url":"…","secret":"whsec_…","token":"…","branch":"main","source":"github:acme/app"}` |
+| PATCH/DELETE | `/api/repos/{org}/{name}/deploy-hooks/{id}` | 修改（未给的字段不变，`clear_secret`、`clear_token` 清除）/ 删除 |
+| POST | `/api/repos/{org}/{name}/deploy-hooks/{id}/trigger` | 立即部署当前提交 |
+| GET/POST | `/api/sso/providers` | 登录方式，`{"name":"stackenigma","kind":"stackenigma","issuer":"…","client_id":"…","client_secret":"…","allow":["*@example.com"]}` |
+| GET/PATCH/DELETE | `/api/sso/providers/{name}` | 查看 / 修改 / 删除（修改放行规则或端点会结束已有会话） |
+| POST | `/api/sso/providers/{name}/check` | 读取端点，返回回调地址 |
+| GET | `/api/sso/sessions`，DELETE `/api/sso/sessions/{id}` | 当前会话 / 强制退出 |
+| GET | `/api/sso/methods`（无需令牌） | 登录页显示的按钮 |
+| POST | `/api/sso/exchange`、`/api/sso/logout`（无需管理权限） | 控制台用一次性代码换取会话 / 退出登录 |
+| GET | `/auth/oidc/{name}/login`、`/auth/oidc/{name}/callback` | 浏览器登录流程 |
 | GET | `/api/status` | 全部仓库概览 |
 | GET | `/metrics` | Prometheus 指标 |
 | GET | `/archive/{org}/{name}/{rev}.tar.gz`、`.zip` | 源码包（鉴权同 clone） |

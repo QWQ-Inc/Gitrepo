@@ -24,6 +24,7 @@ import (
 	"github.com/qwq-inc/gitrepo/internal/auth"
 	"github.com/qwq-inc/gitrepo/internal/bundles"
 	"github.com/qwq-inc/gitrepo/internal/config"
+	"github.com/qwq-inc/gitrepo/internal/deploy"
 	"github.com/qwq-inc/gitrepo/internal/edge"
 	"github.com/qwq-inc/gitrepo/internal/gitexec"
 	"github.com/qwq-inc/gitrepo/internal/gitserve"
@@ -33,6 +34,7 @@ import (
 	"github.com/qwq-inc/gitrepo/internal/releases"
 	"github.com/qwq-inc/gitrepo/internal/secrets"
 	"github.com/qwq-inc/gitrepo/internal/sshserve"
+	"github.com/qwq-inc/gitrepo/internal/sso"
 	"github.com/qwq-inc/gitrepo/internal/store"
 	"github.com/qwq-inc/gitrepo/internal/syncer"
 	"github.com/qwq-inc/gitrepo/internal/webui"
@@ -43,6 +45,8 @@ type Options struct {
 	// NoBackground disables the startup pass and the patrol/retry loops
 	// (used by tests that want deterministic sync runs).
 	NoBackground bool
+	// DeployBackoff overrides the waits between deploy hook attempts.
+	DeployBackoff []time.Duration
 }
 
 type Server struct {
@@ -50,12 +54,16 @@ type Server struct {
 	opts Options
 	log  *slog.Logger
 
-	store   *store.Store
-	git     *gitexec.Git
-	box     *secrets.Box
-	reg     *registry.Registry
-	mgr     *syncer.Manager
-	notify  *notify.Notifier
+	store  *store.Store
+	git    *gitexec.Git
+	box    *secrets.Box
+	reg    *registry.Registry
+	mgr    *syncer.Manager
+	notify *notify.Notifier
+	// deploy tells deployment platforms about new commits.
+	deploy *deploy.Manager
+	// sso signs people in through identity providers.
+	sso     *sso.Manager
 	ssh     *sshserve.Server // nil when SSH is disabled
 	bundles *bundles.Manager // nil when bundles are disabled
 	// releases keeps releases and publishes them to mirrors.
@@ -159,6 +167,18 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*Server, error) {
 	}
 	s.reg = &registry.Registry{Store: st, Git: s.git, ReposDir: cfg.ReposDir(), TrashDir: cfg.TrashDir()}
 	s.notify = notify.New(st, box, log)
+	s.deploy = deploy.New(st, box, log, cfg.PublicURL)
+	s.deploy.Resolve = s.resolveDeployRef
+	if opts.DeployBackoff != nil {
+		s.deploy.Backoff = opts.DeployBackoff
+	}
+	s.sso = &sso.Manager{
+		Store: st, Box: box, PublicURL: cfg.PublicURL, Log: log, SessionTTL: cfg.SSO.SessionTTL.D(),
+		OnSignIn: s.auditSignIn,
+		ClientAddr: func(r *http.Request) string {
+			return gitserve.ClientAddr(r, cfg.TrustedProxyPrefixes())
+		},
+	}
 	gate := &gitserve.Gate{}
 	s.releases = &releases.Manager{
 		Store: st, Git: s.git, Box: box, Registry: s.reg, Log: log,
@@ -174,6 +194,11 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*Server, error) {
 		AlertAfterFailures: cfg.Alerts.FailureThreshold,
 		PublicURL:          cfg.PublicURL,
 		Notify:             s.notify.Emit,
+		OnRemote: func(repo *store.Repo, rem *store.Remote, out syncer.RemoteOutcome) {
+			if len(out.Updated) > 0 {
+				s.deploy.MirrorUpdated(repo, rem, out.Updated)
+			}
+		},
 	})
 	adminHash := ""
 	if tok := strings.TrimSpace(os.Getenv(cfg.AdminTokenEnv)); tok != "" {
@@ -354,6 +379,7 @@ func (s *Server) Handler() http.Handler {
 	s.registerAPI(mux)
 	s.registerReleaseAPI(mux)
 	s.registerEdgeAPI(mux)
+	s.registerSSO(mux)
 	mux.Handle("GET /ui/", webui.Handler("/ui/"))
 	mux.Handle("GET /ui", http.RedirectHandler("/ui/", http.StatusFound))
 	mux.Handle("GET /{$}", http.RedirectHandler("/ui/", http.StatusFound))
@@ -451,6 +477,7 @@ func (s *Server) shutdown(ctx context.Context) error {
 	s.mgr.Shutdown()
 	s.releases.Stop()
 	s.notify.Stop()
+	s.deploy.Stop()
 	if s.sockSrv != nil {
 		errs = append(errs, s.sockSrv.Shutdown(ctx))
 	}
@@ -508,6 +535,9 @@ func (s *Server) patrol(ctx context.Context) {
 		s.log.Warn("prune sync runs", "err", err)
 	}
 	s.pruneAudit(ctx)
+	if err := s.store.PruneSessions(ctx); err != nil {
+		s.log.Warn("prune sessions", "err", err)
+	}
 	s.checkCredentialExpiry(ctx)
 	s.releases.RetryDue(ctx)
 	// Bundle builds can take long for big repositories; they must not hold

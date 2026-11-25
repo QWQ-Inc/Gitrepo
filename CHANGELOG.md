@@ -15,6 +15,8 @@
 
 ### 功能
 
+- 用 StackEnigma 或任何 OpenID Connect / OAuth 2.0 账号登录控制台（`gr sso`，控制台"登录方式"页面）：放行规则按已验证邮箱、组或用户 ID；授权码流程带 PKCE、state 和 nonce；会话默认 12 小时，可以查看和强制退出；修改放行规则会让已有会话失效；登录记入审计日志。
+- 部署钩子（`gr deploy`，仓库页"部署"标签）：分支有新提交时通知 StackEnigma 等部署平台，可以选择 push 到 Hub 后，或同步到某个镜像（例如平台从 GitHub 构建）之后；按 Standard Webhooks 签名，可带 Bearer 令牌，失败重试，并可以手动立即部署。
 - 一个仓库拆成多个镜像（monorepo）：镜像可以只同步一个目录的历史（作为新仓库的根目录，和 `git subtree split` 的结果完全相同），或者只同步某些分支（可以改名）；标签可以按前缀改名，Release 跟着标签走。CLI 用 `--subdir`、`--branch`、`--tag`，控制台和 API 也可以设置。
 - `gr target check NAME --write`：在平台上建一个临时仓库，把同步和发布用到的写操作（建仓、LFS、推送、默认分支、可见性、Release 和附件）都实际做一遍，最后删除它，用来在真实平台上确认凭据和权限。控制台也有对应按钮。
 

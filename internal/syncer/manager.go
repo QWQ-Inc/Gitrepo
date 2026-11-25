@@ -73,6 +73,8 @@ type Options struct {
 	// Quiesce, when set, refuses new pushes to a repository and waits for
 	// running ones; a backup purge holds it around git gc and LFS cleanup.
 	Quiesce func(ctx context.Context, repoID int64) (release func(), err error)
+	// OnRemote is called after each mirror's sync in a run (may be nil).
+	OnRemote func(repo *store.Repo, rem *store.Remote, out RemoteOutcome)
 	// AfterRun is called when a sync run of a repository has finished (its
 	// mirrors may now have new tags).
 	AfterRun func(repoID int64)
@@ -349,6 +351,9 @@ func (m *Manager) runRepo(repoID int64, p *pendingRun) {
 				log.Info("remote synced", "remote", out.Label, "state", out.State, "changed", out.Changed)
 			}
 			m.notifyTransition(repo, rem, out)
+			if m.opts.OnRemote != nil {
+				m.opts.OnRemote(repo, rem, out)
+			}
 			mu.Lock()
 			outcomes = append(outcomes, out)
 			mu.Unlock()

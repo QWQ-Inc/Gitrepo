@@ -66,3 +66,7 @@ releases:
 edge:
   upstream: ""               # e.g. https://git.example.com (env GITREPO_EDGE_UPSTREAM); empty = this is a hub
   token_env: GITREPO_EDGE_TOKEN   # hub token with the edge scope (gr token create edge-1 --scopes edge)
+
+sso:
+  session_ttl: 12h           # how long a console sign-in through an identity provider lasts
+                             # (providers are added in the console or with `gr sso add`)

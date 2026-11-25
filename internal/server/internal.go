@@ -114,6 +114,7 @@ func (s *Server) handlePostReceive(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.notify.Emit(notify.Event{Event: notify.EventPush, Repo: repo.Slug, CloneURL: s.cfg.PublicURL + "/" + repo.Slug + ".git", Refs: pushed, Pusher: req.Pusher})
+	s.deploy.HubUpdated(repo, pushed, req.Pusher)
 
 	remotes, err := s.store.ListRemotes(ctx, repo.ID)
 	if err != nil {

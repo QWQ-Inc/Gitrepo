@@ -45,6 +45,9 @@ const ICONS = {
   sync: ['M4 12a8 8 0 0 1 13.66-5.66L20 8.5', 'M20 4v4.5h-4.5', 'M20 12a8 8 0 0 1-13.66 5.66L4 15.5', 'M4 20v-4.5h4.5'],
   arrowLeft: ['M15 6l-6 6 6 6'],
   download: ['M12 4v11', 'M7 10l5 5 5-5', 'M5 20h14'],
+  login: ['M10 17l5-5-5-5', 'M15 12H3', 'M14 4h5a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1h-5'],
+  stack: ['M12 3 3 7.5l9 4.5 9-4.5L12 3z', 'M3 12l9 4.5 9-4.5', 'M3 16.5l9 4.5 9-4.5'],
+  rocket: ['M5 15c-1.5 1.5-2 5-2 5s3.5-.5 5-2', 'M9 15l-3-3c1-4 4.5-8 12-9-1 7.5-5 11-9 12z', 'M15 9a1 1 0 1 1-2 0 1 1 0 0 1 2 0z'],
   logo: [],
 };
 function icon(name, size) {
@@ -331,14 +334,20 @@ const routes = [
   [/^#\/bindings$/, viewBindings],
   [/^#\/protect$/, viewProtect],
   [/^#\/tokens$/, viewTokens],
+  [/^#\/sso$/, viewSSO],
   [/^#\/webhooks$/, viewWebhooks],
   [/^#\/audit(?:\?.*)?$/, viewAudit],
 ];
 
 async function render() {
   for (const close of [...openClosers]) close();
+  const ssoCode = (location.hash.match(/^#\/sso\/([A-Za-z0-9_-]+)$/) || [])[1];
+  if (ssoCode) return finishSSO(ssoCode);
   document.body.classList.toggle('logged-out', !token);
   if (!token) return viewLogin();
+  if (location.hash.startsWith('#/login')) {
+    history.replaceState(null, '', location.pathname + '#/');
+  }
   const hash = location.hash || '#/';
   for (const a of document.querySelectorAll('#nav .nav-link')) {
     const target = a.getAttribute('href');
@@ -362,6 +371,10 @@ async function render() {
 function rerender() { return render(); }
 
 function logout() {
+  // A sign-in through an identity provider is ended on the server too.
+  if (token.startsWith('grs_')) {
+    fetch('/api/sso/logout', { method: 'POST', headers: { Authorization: 'Bearer ' + token } }).catch(() => {});
+  }
   token = '';
   sessionStorage.removeItem(TOKEN_KEY);
   render();
@@ -389,9 +402,41 @@ render();
 
 // -------------------------------------------------------------------- login
 
+// finishSSO takes the one-time code an identity provider sign-in ended with
+// (#/sso/<code>) and exchanges it for the session token.
+async function finishSSO(code) {
+  // The code leaves the address bar and the history at once.
+  history.replaceState(null, '', location.pathname + '#/');
+  try {
+    const res = await fetch('/api/sso/exchange', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code }) });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new Error((data && data.error) || res.statusText);
+    token = data.token;
+    sessionStorage.setItem(TOKEN_KEY, token);
+  } catch (e) {
+    token = '';
+    sessionStorage.removeItem(TOKEN_KEY);
+    history.replaceState(null, '', location.pathname + '#/login?error=' + enc(e.message));
+  }
+  render();
+}
+
+function ssoButton(m) {
+  return h('a', { class: 'btn btn-sso' + (m.kind === 'stackenigma' ? ' btn-sso-se' : ''), href: m.login_url },
+    icon(m.kind === 'stackenigma' ? 'stack' : 'login'), '使用 ' + m.display_name + ' 登录');
+}
+
 function viewLogin() {
   const input = h('input', { type: 'password', name: 'token', autocomplete: 'current-password', placeholder: 'GITREPO_ADMIN_TOKEN 或 admin 令牌', required: true });
   const err = h('p', { class: 'error-text', hidden: true });
+  const q = new URLSearchParams(location.hash.split('?')[1] || '');
+  const ssoErr = q.get('error') ? h('div', { class: 'notice notice-danger login-notice', role: 'alert' }, '登录失败：' + q.get('error')) : null;
+  const ssoBox = h('div', { class: 'sso-buttons', hidden: true });
+  fetch('/api/sso/methods').then((r) => (r.ok ? r.json() : [])).then((methods) => {
+    if (!methods || !methods.length) return;
+    fill(ssoBox, methods.map(ssoButton), h('div', { class: 'login-or' }, h('span', {}, '或使用管理令牌')));
+    ssoBox.hidden = false;
+  }).catch(() => {});
   const form = h('form', { class: 'card login-card', onsubmit: action(async (ev) => {
     token = input.value.trim();
     try {
@@ -408,6 +453,7 @@ function viewLogin() {
   }) },
   h('h1', {}, '登录'),
   h('p', { class: 'hint' }, '使用部署时设置的管理令牌（GITREPO_ADMIN_TOKEN），或具有 admin 权限的令牌。令牌只保存在当前标签页。'),
+  ssoErr, ssoBox,
   field('管理令牌', input), err,
   h('button', { class: 'btn btn-primary', type: 'submit' }, '登录'));
   fill(app, h('div', { class: 'login' },
@@ -512,13 +558,13 @@ function quickStart(targets, bindings) {
       step(false, 'push：', h('code', {}, `git push ${location.origin}/<组织>/<仓库>.git main`))));
 }
 
-const REPO_TABS = [['mirrors', '镜像'], ['releases', 'Release'], ['backups', '备份'], ['runs', '同步记录'], ['audit', '操作记录'], ['settings', '设置']];
+const REPO_TABS = [['mirrors', '镜像'], ['releases', 'Release'], ['deploy', '部署'], ['backups', '备份'], ['runs', '同步记录'], ['audit', '操作记录'], ['settings', '设置']];
 
 async function viewRepo(org, name, tab) {
   const slug = org + '/' + name;
   const base = '/api/repos/' + enc(org) + '/' + enc(name);
-  const [repo, runs, targets, backups, audit, releases] = await Promise.all([api('GET', base), api('GET', base + '/runs?limit=30'), api('GET', '/api/targets'), api('GET', base + '/backups'),
-    api('GET', '/api/audit?limit=10&repo=' + enc(slug)), api('GET', base + '/releases')]);
+  const [repo, runs, targets, backups, audit, releases, deployHooks] = await Promise.all([api('GET', base), api('GET', base + '/runs?limit=30'), api('GET', '/api/targets'), api('GET', base + '/backups'),
+    api('GET', '/api/audit?limit=10&repo=' + enc(slug)), api('GET', base + '/releases'), api('GET', base + '/deploy-hooks')]);
 
   const syncNow = (overwrite) => action(async () => {
     if (overwrite && !(await confirmDialog({ title: '以 Hub 为准覆盖分叉', message: '以 Hub 为准覆盖所有分叉的镜像 ref？\n被覆盖的镜像内容会先备份到 Hub 的 refs/backup/ 下。', ok: '覆盖', danger: true }))) return false;
@@ -617,6 +663,32 @@ async function viewRepo(org, name, tab) {
         rerender();
       }, '已清除') }, '清除'))));
 
+  // ---- deploy hooks
+  const deployRows = deployHooks.map((d) => {
+    const path = base + '/deploy-hooks/' + d.id;
+    return h('tr', {},
+      h('td', {}, h('div', { class: 'cell-title' }, d.name, d.kind === 'stackenigma' ? [' ', h('span', { class: 'badge badge-info' }, 'StackEnigma')] : null),
+        h('div', { class: 'cell-sub mono' }, d.host),
+        h('div', { class: 'cell-sub' }, [d.signed ? '已签名' : '未签名', d.token ? '带令牌' : null].filter(Boolean).join(' · '))),
+      h('td', {}, h('code', {}, d.branch), h('div', { class: 'cell-sub' }, d.source === 'hub' ? 'push 到 Hub 后' : '同步到 ' + d.source + ' 后')),
+      h('td', {}, d.enabled ? badge('synced', '启用') : badge('paused', '停用')),
+      h('td', {}, d.last_at ? [h('div', {}, d.last_status), h('div', { class: 'cell-sub' }, (d.last_commit ? short(d.last_commit) + ' · ' : '') + ago(d.last_at))] : h('span', { class: 'faint' }, '从未')),
+      h('td', { class: 'actions' },
+        h('button', { class: 'btn btn-sm', type: 'button', onclick: action(async () => {
+          const r = await api('POST', path + '/trigger');
+          rerender();
+          if (!r.ok) throw new Error(`部署 ${short(r.commit)} 失败：${r.status}`);
+          return `已请求部署 ${short(r.commit)}（${r.status}）`;
+        }) }, '立即部署'),
+        h('button', { class: 'btn btn-sm', type: 'button', onclick: () => deployModal(base, repo, d) }, '编辑'),
+        h('button', { class: 'btn btn-sm', type: 'button', onclick: action(async () => { await api('PATCH', path, { enabled: !d.enabled }); rerender(); }, d.enabled ? '已停用' : '已启用') }, d.enabled ? '停用' : '启用'),
+        h('button', { class: 'btn btn-sm btn-danger-soft', type: 'button', onclick: action(async () => {
+          if (!(await confirmDialog({ title: '删除部署钩子', message: `删除部署钩子 ${d.name}？`, ok: '删除', danger: true }))) return false;
+          await api('DELETE', path);
+          rerender();
+        }, '已删除') }, '删除')));
+  });
+
   // ---- info card
   const toggleVisibility = action(async () => {
     const next = repo.visibility === 'public' ? 'private' : 'public';
@@ -647,6 +719,11 @@ async function viewRepo(org, name, tab) {
     releases: () => [toolbar('在这里发布一次，说明和附件会发布到所有 GitHub、GitLab、Gitea/Forgejo、Gitee 镜像；标签同步到某个镜像后才会在那里创建。平台上已有的、不是 Gitrepo 建的同名 Release 不会被覆盖（显示“冲突”）。',
       [addButton('新建 Release', () => releaseModal(base), false)]),
       releaseTable(base, releases)],
+    deploy: () => [toolbar('分支有新提交时通知部署平台（StackEnigma 或任何接收 webhook 的平台）。平台从某个镜像构建时，选“同步到该镜像后”，等镜像有了这个提交再通知。',
+      [addButton('添加部署钩子', () => deployModal(base, repo), false)]),
+      table(['部署钩子', '分支', '状态', '最近投递', ''], deployRows,
+        [h('div', { class: 'empty-title' }, '还没有部署钩子'), h('div', {}, '在 StackEnigma 服务的“部署钩子”里新建一个，把地址和密钥填到这里，push 后就会自动部署。'),
+          addButton('添加部署钩子', () => deployModal(base, repo))])],
     backups: () => [toolbar('被强推覆盖、删除或导入替换的历史会在 Hub 上隐藏保留一段时间（默认 30 天），clone 看不到。泄露了密钥时，请轮换密钥并清除备份。'),
       table(['时间', '来源', '原 ref', '提交', '说明', '到期', ''], backupRows, '没有备份。')],
     runs: () => [table(['时间', '镜像', '触发', '结果', '变更', '耗时', '错误'], runRows, '暂无记录。')],
@@ -660,7 +737,7 @@ async function viewRepo(org, name, tab) {
         location.hash = '#/';
       }, '已注销') }, '注销仓库')))],
   };
-  const counts = { mirrors: repo.remotes.length, releases: releases.length, backups: backups.length };
+  const counts = { mirrors: repo.remotes.length, releases: releases.length, deploy: deployHooks.length, backups: backups.length };
   let current = panels[tab] ? tab : 'mirrors';
   const panel = h('div', { class: 'tab-panel' });
   const bar = h('div', { class: 'tabnav-bar', role: 'tablist' });
@@ -687,6 +764,48 @@ async function viewRepo(org, name, tab) {
     info,
     h('div', { class: 'section' }, h('div', { class: 'tabnav' }, bar), panel));
   show(current);
+}
+
+// ------------------------------------------------------------ deploy hooks
+
+// deployModal adds (d undefined) or edits a repository's deploy hook.
+function deployModal(base, repo, d) {
+  const editing = Boolean(d);
+  const sources = [['hub', 'push 到 Hub 后（平台从 Hub 构建）']].concat(repo.remotes.map((m) => [m.label, '同步到 ' + m.label + ' 后']));
+  const current = editing ? d.source : (repo.remotes.find((m) => m.provider === 'github') || {}).label || 'hub';
+  const kind = select('kind', [['stackenigma', 'StackEnigma'], ['generic', '通用 webhook']], editing ? d.kind : 'stackenigma');
+  formModal({
+    title: editing ? '编辑部署钩子：' + d.name : '添加部署钩子', submitText: editing ? '保存' : '添加', wide: true,
+    intro: '在 StackEnigma 服务的“部署钩子”里新建一个，把返回的地址、令牌和签名密钥（standardSecret，whsec_ 开头）填到这里。每次投递是一个 JSON POST，按 Standard Webhooks 签名。',
+    fields: [
+      field('平台', kind),
+      field('名称', h('input', { name: 'name', required: true, value: editing ? d.name : '', placeholder: 'production', pattern: '[A-Za-z0-9._\\-]+', readonly: editing })),
+      field('部署钩子地址', h('input', { name: 'url', type: 'password', autocomplete: 'off', required: !editing, placeholder: editing ? '已保存（' + d.host + '）；留空表示不修改' : 'https://…' }), 'wide', '加密保存（地址里可能带着令牌）'),
+      field('令牌（可选）', h('input', { name: 'token', type: 'password', autocomplete: 'off', placeholder: editing && d.token ? '已保存；留空表示不修改' : '以 Authorization: Bearer 发送' })),
+      field('签名密钥（可选）', h('input', { name: 'secret', type: 'password', autocomplete: 'off', placeholder: editing && d.signed ? '已保存；留空表示不修改' : 'whsec_…' })),
+      field('分支', h('input', { name: 'branch', value: editing && d.branch_set ? d.branch : '', placeholder: (repo.default_branch || 'main') + '（默认分支）' }), null, '按来源上的名字填写'),
+      field('什么时候通知', select('source', sources, current), null, 'StackEnigma 从 GitHub 构建时选“同步到 github:… 后”'),
+      editing && d.signed ? check('clear_secret', '不再签名', false) : null,
+      editing && d.token ? check('clear_token', '不再发送令牌', false) : null,
+    ],
+    submit: async (f) => {
+      const body = { kind: f.kind, branch: f.branch, source: f.source };
+      if (f.url) body.url = f.url;
+      if (f.token) body.token = f.token;
+      if (f.secret) body.secret = f.secret;
+      if (f.clear_secret) body.clear_secret = true;
+      if (f.clear_token) body.clear_token = true;
+      if (editing) {
+        await api('PATCH', base + '/deploy-hooks/' + d.id, body);
+        rerender();
+        return '已保存';
+      }
+      body.name = f.name;
+      await api('POST', base + '/deploy-hooks', body);
+      rerender();
+      return '已添加，可以点“立即部署”试一下';
+    },
+  });
 }
 
 // ------------------------------------------------------------ mirror views
@@ -1118,6 +1237,130 @@ const EVENTS = [
   ['credential.expiring', 'credential.expiring：凭据将过期'],
 ];
 const FORMAT_LABEL = { json: 'JSON', wecom: '企业微信', feishu: '飞书', dingtalk: '钉钉', slack: 'Slack' };
+
+// --------------------------------------------------------------- sign-in
+
+const SSO_MODES = [
+  ['stackenigma', 'StackEnigma'],
+  ['oidc', 'OpenID Connect（Keycloak、Authentik、Azure AD、Google 等）'],
+  ['oauth2', 'OAuth 2.0（手动填写端点，如 Gitea、GitHub）'],
+];
+
+function ssoMode(p) {
+  if (!p) return 'stackenigma';
+  if (!p.issuer) return 'oauth2';
+  return p.kind === 'stackenigma' ? 'stackenigma' : 'oidc';
+}
+
+// ssoModal adds (p undefined) or edits a sign-in provider.
+function ssoModal(p) {
+  const editing = Boolean(p);
+  const callback = (name) => location.origin + '/auth/oidc/' + (name || '<名称>') + '/callback';
+  const cbInput = h('input', { readonly: true, tabindex: '-1', value: editing ? p.redirect_url : callback('') });
+  const nameInput = h('input', { name: 'name', required: true, placeholder: 'stackenigma', pattern: '[a-z0-9][a-z0-9\\-]{0,31}', value: editing ? p.name : '', readonly: editing,
+    oninput: (ev) => { cbInput.value = callback(ev.target.value.trim()); } });
+  const endpoints = h('div', { class: 'wide form-grid' });
+  const showEndpoints = (mode) => {
+    const nodes = [];
+    if (mode !== 'oauth2') {
+      nodes.push(field('Issuer', h('input', { name: 'issuer', type: 'url', required: true, value: editing ? p.issuer || '' : '', placeholder: mode === 'stackenigma' ? 'StackEnigma 身份服务的地址' : 'https://sso.example.com/realms/dev' }), 'wide',
+        '端点从 Issuer 的 /.well-known/openid-configuration 读取'));
+    } else {
+      nodes.push(field('授权端点', h('input', { name: 'auth_url', type: 'url', required: true, value: editing ? p.auth_url || '' : '', placeholder: 'https://git.example.com/login/oauth/authorize' }), 'wide'));
+      nodes.push(field('Token 端点', h('input', { name: 'token_url', type: 'url', required: true, value: editing ? p.token_url || '' : '' }), 'wide'));
+      nodes.push(field('用户信息端点', h('input', { name: 'userinfo_url', type: 'url', required: true, value: editing ? p.userinfo_url || '' : '', placeholder: 'https://git.example.com/api/v1/user' }), 'wide',
+        '返回 JSON，至少含 sub 或 id；按邮箱放行时还需要 email'));
+    }
+    fill(endpoints, nodes);
+  };
+  const modeSelect = select('mode', SSO_MODES, ssoMode(p));
+  modeSelect.addEventListener('change', () => showEndpoints(modeSelect.value));
+  showEndpoints(ssoMode(p));
+  const allow = h('textarea', { name: 'allow', rows: 3, required: true, placeholder: '*@example.com\ngroup:gitrepo-admins' });
+  allow.value = editing ? (p.allow || []).join('\n') : '';
+  formModal({
+    title: editing ? '编辑登录方式：' + p.name : '添加登录方式', submitText: editing ? '保存' : '添加', wide: true,
+    intro: '在身份提供方那里把 Gitrepo 注册为 OAuth 应用（Web 应用），回调地址填下面这个。用这种方式登录的人是这个 Gitrepo 的管理员，所以请只放行需要的人。',
+    fields: [
+      field('类型', modeSelect, 'wide'),
+      field('名称', nameInput, null, '出现在回调地址里，创建后不能改'),
+      field('按钮文字（可选）', h('input', { name: 'display_name', value: editing ? p.display_name : '', placeholder: '默认用名称；StackEnigma 类型默认 StackEnigma' })),
+      field('回调地址（填到身份提供方）', cbInput, 'wide'),
+      endpoints,
+      field('Client ID', h('input', { name: 'client_id', required: true, value: editing ? p.client_id : '', autocomplete: 'off' })),
+      field('Client Secret', h('input', { name: 'client_secret', type: 'password', autocomplete: 'off', placeholder: editing && p.client_secret ? '已保存；留空表示不修改' : '公共客户端可以不填（始终使用 PKCE）' })),
+      field('允许登录（每行一个）', allow, 'wide', '已验证的邮箱或通配（*@example.com）、group:组名、sub:用户 ID，或 * 表示提供方认可的所有人。修改后，通过这个提供方登录的会话全部失效'),
+      field('Scopes（可选）', h('input', { name: 'scopes', value: editing ? (p.scopes || []).join(' ') : '', placeholder: 'openid profile email' })),
+      field('组的 claim（可选）', h('input', { name: 'groups_claim', value: editing ? p.groups_claim : '', placeholder: 'groups' })),
+    ],
+    submit: async (d) => {
+      const mode = d.mode;
+      const body = {
+        // StackEnigma over plain OAuth 2.0 keeps its button.
+        kind: mode === 'stackenigma' || (mode === 'oauth2' && editing && p.kind === 'stackenigma') ? 'stackenigma' : 'oidc',
+        display_name: d.display_name, client_id: d.client_id,
+        allow: (d.allow || '').split('\n').map((x) => x.trim()).filter(Boolean),
+        scopes: (d.scopes || '').split(/\s+/).filter(Boolean),
+        groups_claim: d.groups_claim,
+        issuer: mode === 'oauth2' ? '' : d.issuer,
+        auth_url: mode === 'oauth2' ? d.auth_url : '', token_url: mode === 'oauth2' ? d.token_url : '', userinfo_url: mode === 'oauth2' ? d.userinfo_url : '',
+      };
+      if (d.client_secret) body.client_secret = d.client_secret;
+      if (editing) {
+        await api('PATCH', '/api/sso/providers/' + enc(p.name), body);
+      } else {
+        body.name = d.name;
+        const res = await api('POST', '/api/sso/providers', body);
+        rerender();
+        return '已添加。回调地址：' + res.redirect_url;
+      }
+      rerender();
+      return '已保存';
+    },
+  });
+}
+
+async function viewSSO() {
+  const [providers, sessions] = await Promise.all([api('GET', '/api/sso/providers'), api('GET', '/api/sso/sessions')]);
+  const rows = providers.map((p) => h('tr', {},
+    h('td', {}, h('div', { class: 'cell-title' }, p.display_name, p.kind === 'stackenigma' ? [' ', h('span', { class: 'badge badge-info' }, 'StackEnigma')] : null),
+      h('div', { class: 'cell-sub mono' }, p.name)),
+    h('td', {}, h('div', { class: 'mono cell-break' }, p.issuer || p.auth_url), h('div', { class: 'cell-sub' }, p.issuer ? 'OpenID Connect' : 'OAuth 2.0'),
+      h('div', { class: 'cell-sub' }, '回调地址'), (() => { const c = copyable(p.redirect_url, true); c.classList.add('ro-narrow'); return c; })()),
+    h('td', {}, h('div', { class: 'tag-list' }, (p.allow || []).map((a) => h('span', { class: 'badge mono' }, a)))),
+    h('td', {}, p.enabled ? badge('synced', '启用') : badge('paused', '停用')),
+    h('td', { class: 'actions' },
+      h('button', { class: 'btn btn-sm', type: 'button', onclick: action(async () => {
+        const r = await api('POST', '/api/sso/providers/' + enc(p.name) + '/check');
+        return `可以连接（${r.mode === 'oidc' ? 'OpenID Connect' : 'OAuth 2.0'}）。回调地址：${r.redirect_url}`;
+      }) }, '检查'),
+      h('button', { class: 'btn btn-sm', type: 'button', onclick: () => ssoModal(p) }, '编辑'),
+      h('button', { class: 'btn btn-sm', type: 'button', onclick: action(async () => {
+        if (p.enabled && !(await confirmDialog({ title: '停用登录方式', message: `停用 ${p.display_name}？通过它登录的会话会立即失效。`, ok: '停用', danger: true }))) return false;
+        await api('PATCH', '/api/sso/providers/' + enc(p.name), { enabled: !p.enabled });
+        rerender();
+      }, p.enabled ? '已停用' : '已启用') }, p.enabled ? '停用' : '启用'),
+      h('button', { class: 'btn btn-sm btn-danger-soft', type: 'button', onclick: action(async () => {
+        if (!(await confirmDialog({ title: '删除登录方式', message: `删除 ${p.display_name}？通过它登录的会话会立即失效。`, ok: '删除', danger: true }))) return false;
+        await api('DELETE', '/api/sso/providers/' + enc(p.name));
+        rerender();
+      }, '已删除') }, '删除'))));
+  const sessionRows = sessions.map((x) => h('tr', {},
+    h('td', {}, h('div', { class: 'cell-title' }, x.email || x.name), h('div', { class: 'cell-sub' }, x.provider, x.current ? ' · 当前会话' : '')),
+    h('td', { class: 'nowrap', title: fmtDate(x.created_at) }, ago(x.created_at)),
+    h('td', { class: 'nowrap', title: fmtDate(x.last_used_at) }, ago(x.last_used_at)),
+    h('td', { class: 'nowrap' }, fmtDate(x.expires_at)),
+    h('td', { class: 'actions' }, h('button', { class: 'btn btn-sm btn-danger-soft', type: 'button', onclick: action(async () => {
+      await api('DELETE', '/api/sso/sessions/' + x.id);
+      if (x.current) { logout(); return false; }
+      rerender();
+    }, '已退出') }, x.current ? '退出登录' : '强制退出'))));
+  fill(app,
+    pageHead('登录方式', '让管理员用 StackEnigma 或其他 OpenID Connect / OAuth 2.0 账号登录控制台，不再共用管理令牌。部署时设置的管理令牌始终可以登录。', [addButton('添加登录方式', () => ssoModal())]),
+    table(['登录方式', '端点', '允许登录', '状态', ''], rows,
+      [h('div', { class: 'empty-title' }, '还没有登录方式'), h('div', {}, '添加 StackEnigma 或任何 OpenID Connect 提供方后，登录页会出现对应的按钮。'), addButton('添加登录方式', () => ssoModal())]),
+    section('当前登录的会话', null, table(['谁', '登录于', '最近使用', '到期', ''], sessionRows, '没有通过登录方式登录的会话。')));
+}
 
 async function viewWebhooks() {
   const hooks = await api('GET', '/api/webhooks');
